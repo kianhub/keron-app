@@ -1146,6 +1146,12 @@ impl EngineRpc {
                 // the user's top-level sessions rather than its side chats.
                 let parent_chat_id = parent_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
+                // Sessions start asking, whoever creates them (an agent's MCP
+                // call included); full access is chosen on the session later.
+                let config = config.map(|mut config| {
+                    crate::run_access::start_asking(&mut config);
+                    config
+                });
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -1990,6 +1996,10 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
+                // A fork asks even when its source has full access.
+                if let Some(config) = chat.config.as_mut() {
+                    crate::run_access::start_asking(config);
+                }
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();

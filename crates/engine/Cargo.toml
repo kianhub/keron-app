@@ -36,6 +36,11 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
+# Local IPC authentication (ipc_auth.rs): the authenticated acceptor, the
+# secret's CSPRNG and its constant-time comparison.
+tokio-tungstenite.workspace = true
+getrandom = "0.3"
+subtle = "2.6"
 
 tempfile.workspace = true
 
@@ -47,6 +52,5 @@ tokio = { workspace = true, features = ["test-util"] }
 zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 zip.workspace = true
-tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
 zeron-sync = { workspace = true, features = ["mock-server"] }

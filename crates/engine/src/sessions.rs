@@ -175,6 +175,9 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// The IPC secret's file, handed to the injected `zeron mcp` server so it
+    /// can authenticate (the path, never the secret itself).
+    ipc_secret_file: Mutex<Option<std::path::PathBuf>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -228,6 +231,7 @@ impl SessionsEngine {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_secret_file: Mutex::new(None),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -255,6 +259,12 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record the IPC secret's file for the injected MCP server (see
+    /// [`crate::ipc_auth::SECRET_FILE_ENV`]).
+    pub fn set_ipc_secret_file(&self, path: std::path::PathBuf) {
+        *lock(&self.inner.ipc_secret_file) = Some(path);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -363,10 +373,19 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        // Compare the request as dispatch will run it.
+        let request = request.map(|(id, r)| {
+            let mut r = r.clone();
+            self.inner.apply_session_access(chat_id, &mut r);
+            (id, r)
+        });
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
-                h.steerable && request.is_none_or(|(id, r)| h.runtime_config.can_route(id, r)),
+                h.steerable
+                    && request
+                        .as_ref()
+                        .is_none_or(|(id, r)| h.runtime_config.can_route(*id, r)),
             )
         });
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
@@ -526,6 +545,7 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        self.inner.apply_session_access(chat_id, &mut request);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -1330,18 +1350,35 @@ impl Inner {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let mut env: std::collections::BTreeMap<String, String> = [
+            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        if let Some(path) = lock(&self.ipc_secret_file)
+            .as_ref()
+            .and_then(|p| p.to_str())
+        {
+            env.insert(crate::ipc_auth::SECRET_FILE_ENV.to_owned(), path.to_owned());
+        }
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
             args: vec!["mcp".into()],
-            env: [
-                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
-                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            env,
         })
+    }
+
+    /// Full access is the session's own choice (its chat row), never the
+    /// request's — see `run_access`.
+    fn apply_session_access(&self, chat_id: &str, request: &mut RunRequest) {
+        let session = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.config);
+        crate::run_access::apply(request, session.as_ref());
     }
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {

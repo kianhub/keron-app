@@ -136,9 +136,15 @@ fn main() -> anyhow::Result<()> {
             .start(Arc::new(move || vec![root.clone()]), None),
     );
     let ipc_port = port();
-    let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");
     std::fs::create_dir(&data)?;
+    // The fixture engine serves the UI's data dir: one secret for both.
+    let secret = zeron_engine::ipc_auth::IpcSecret::load_or_create(&data)?;
+    let _ipc = runtime.block_on(zeron_engine::serve_ipc(
+        ipc_port,
+        core.rpc_service(),
+        secret,
+    ))?;
     let boot = EngineBootConfig {
         data_dir: data.clone(),
         ipc_port,

@@ -154,6 +154,8 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
     assert_eq!(target.doc().read_entries().unwrap().len(), 3);
     core.sessions.set_ipc_port(27699);
     core.sessions
+        .set_ipc_secret_file(dir.path().join(zeron_engine::ipc_auth::SECRET_FILE));
+    core.sessions
         .dispatch(
             "side",
             HarnessId::Mock,
@@ -195,6 +197,11 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
     assert_eq!(mcp.env["ZERON_IPC_PORT"], "27699");
     assert_eq!(mcp.env["ZERON_CHAT_ID"], "side");
     assert_eq!(mcp.env["ZERON_DEVICE_ID"], core.device_id);
+    // The path to the IPC secret, never the secret itself.
+    assert_eq!(
+        mcp.env[zeron_engine::ipc_auth::SECRET_FILE_ENV],
+        dir.path().join("ipc-secret").to_str().unwrap()
+    );
     assert!(request.prompt.contains("PINEAPPLE"));
     assert!(!request.prompt.contains("unfinished turn"));
     assert_eq!(source.doc().read_entries().unwrap().len(), 4);
