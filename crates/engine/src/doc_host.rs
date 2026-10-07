@@ -5230,13 +5230,16 @@ impl DocHost {
                 if let Some(ws) = self.workspace()
                     && ws.chat_config(chat_id).is_none()
                 {
-                    let config = zeron_proto::ChatConfig {
+                    let mut config = zeron_proto::ChatConfig {
                         harness,
                         model: request.model.clone(),
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
                     };
+                    // A backfilled row starts asking like any new session: a
+                    // request never seeds full access (see `run_access`).
+                    crate::run_access::start_asking(&mut config);
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }

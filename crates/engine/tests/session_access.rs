@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus, SessionMessageEntry,
+};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -191,4 +194,45 @@ async fn runs_take_their_access_from_the_session_not_the_request() {
         Some(SandboxLevel::WorkspaceWrite)
     );
     assert_eq!(sandbox("fork"), Some(SandboxLevel::WorkspaceWrite));
+}
+
+#[tokio::test]
+async fn a_queued_run_never_seeds_full_access_into_a_claimed_session() {
+    // A Run can reach the host before its chat row does (claim on first
+    // command); the host then stamps the row from the run. That stamp must
+    // not carry a request's full access.
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let handle = core.doc_host.open("claimed").unwrap();
+    handle
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: "cmd-1".into(),
+            payload: SessionCommandPayload::Run {
+                request: request(SandboxLevel::DangerFullAccess, true),
+                message_id: "m1".into(),
+            },
+            issued_by: "viewer-device".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
+    let ran = wait_for(&requests, 1).await;
+    assert_eq!(ran.sandbox, SandboxLevel::WorkspaceWrite);
+    assert!(!ran.auto_approve);
+    let row = core
+        .workspace
+        .chat("claimed")
+        .unwrap()
+        .expect("claimed row");
+    assert_eq!(
+        row.config.map(|c| c.sandbox),
+        Some(SandboxLevel::WorkspaceWrite)
+    );
 }
