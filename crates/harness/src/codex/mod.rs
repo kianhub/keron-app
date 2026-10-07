@@ -104,14 +104,20 @@ fn plain_executable(path: PathBuf) -> PathBuf {
 }
 
 /// Dotted `thread/start` config overrides that add an injected MCP server
-/// to the user's `mcp_servers` table.
+/// to the user's `mcp_servers` table. A pre-approved server's tools run
+/// without asking (its `default_tools_approval_mode`); every other server
+/// keeps the user's approval settings.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-    vec![
+    let mut overrides = vec![
         (key("command"), mcp.command.clone().into()),
         (key("args"), json!(mcp.args)),
         (key("env"), json!(mcp.env)),
-    ]
+    ];
+    if mcp.approve_tools {
+        overrides.push((key("default_tools_approval_mode"), "approve".into()));
+    }
+    overrides
 }
 
 /// A ready-to-spawn `codex login` command for the engine's account flow.
@@ -2198,6 +2204,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let overrides: serde_json::Map<String, Value> =
             codex_mcp_overrides(&mcp).into_iter().collect();
@@ -2206,6 +2213,34 @@ mod mcp_injection_tests {
         assert_eq!(
             overrides["mcp_servers.zeron.env"],
             json!({ "ZERON_CHAT_ID": "chat-1" })
+        );
+        // Not pre-approved: the server's tools keep asking.
+        assert!(
+            !overrides.keys().any(|k| k.contains("approval_mode")),
+            "{overrides:?}"
+        );
+    }
+
+    #[test]
+    fn a_pre_approved_server_approves_only_its_own_tools() {
+        let mcp = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            approve_tools: true,
+            ..Default::default()
+        };
+        let overrides: serde_json::Map<String, Value> =
+            codex_mcp_overrides(&mcp).into_iter().collect();
+        assert_eq!(
+            overrides["mcp_servers.zeron.default_tools_approval_mode"],
+            "approve"
+        );
+        // Nothing else is widened: only this server's keys are touched.
+        assert!(
+            overrides
+                .keys()
+                .all(|k| k.starts_with("mcp_servers.zeron.")),
+            "{overrides:?}"
         );
     }
 }

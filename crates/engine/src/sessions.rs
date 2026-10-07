@@ -1371,6 +1371,11 @@ impl Inner {
             command,
             args: vec!["mcp".into()],
             env,
+            // Keron: the hidden voice orchestrator drives sessions through
+            // these tools mid-call, where nobody is looking at a question,
+            // so its own Zeron tools run unasked (the owner's call, 7 Oct).
+            // Every other chat, and every other tool, keeps asking.
+            approve_tools: zeron_proto::voice::is_orchestrator_chat(chat_id),
         })
     }
 

@@ -13,7 +13,9 @@
 //!   permission tool — needs a server process and was rejected. Tool calls
 //!   ask the user (a yes/no question through [`RunControls::request_input`])
 //!   unless the session chose full access ([`crate::permissions`]), which
-//!   alone starts the CLI with `--dangerously-skip-permissions`;
+//!   alone starts the CLI with `--dangerously-skip-permissions`. Asking
+//!   sessions run in `acceptEdits`, so file edits in the working directory
+//!   don't ask; a pre-approved injected server's tools don't either;
 //!   `AskUserQuestion` round-trips through the same bridge either way.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
@@ -208,16 +210,31 @@ impl ClaudeHarness {
             cmd.args(["--effort", effort]);
         }
         // Bypass is the session's explicit full-access choice, never a
-        // default: everything else runs in the CLI's default mode, where
-        // tool calls reach us as `can_use_tool` and ask the user.
+        // default. An asking session runs in `acceptEdits` (Keron, the
+        // owner's call): file edits in the working directory go through,
+        // and every other tool call reaches us as `can_use_tool` and asks
+        // the user. A read-only run (title runs included) edits nothing
+        // unasked.
         if crate::permissions::full_access(request) {
             cmd.args([
                 "--permission-mode",
                 "bypassPermissions",
                 "--dangerously-skip-permissions",
             ]);
+        } else if request.sandbox == zeron_proto::SandboxLevel::WorkspaceWrite {
+            cmd.args(["--permission-mode", "acceptEdits"]);
         } else {
             cmd.args(["--permission-mode", "default"]);
+        }
+        if let Some(mcp) = &request.mcp {
+            // Zeron's own server rides beside the user's configured servers
+            // (no `--strict-mcp-config`): the CLI merges an inline JSON
+            // config with settings-sourced ones. Title runs never carry it.
+            cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
+            if mcp.approve_tools {
+                // `mcp__<server>` allows every tool of that one server.
+                cmd.args(["--allowedTools", &format!("mcp__{}", mcp.name)]);
+            }
         }
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
@@ -544,11 +561,6 @@ impl ClaudeHarness {
                 "--setting-sources",
                 "",
             ]);
-        } else if let Some(mcp) = &request.mcp {
-            // Zeron's own server rides beside the user's configured servers
-            // (no `--strict-mcp-config`): the CLI merges an inline JSON
-            // config with settings-sourced ones.
-            cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
         }
         let normalizer = if let Some(session_id) = &request.resume {
             let config = crate::model_context::root(
@@ -1265,14 +1277,26 @@ mod permission_tests {
                     !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
                     "{argv:?}"
                 );
-                assert_eq!(mode(&argv), "default");
                 assert!(
                     argv.windows(2)
                         .any(|w| w[0] == "--permission-prompt-tool" && w[1] == "stdio"),
                     "tool calls must reach us to be asked: {argv:?}"
                 );
+                assert!(!argv.iter().any(|a| a == "--allowedTools"), "{argv:?}");
             }
         }
+    }
+
+    #[test]
+    fn asking_sessions_accept_edits_and_ask_for_the_rest() {
+        // "Ask first": edits in the working directory go through; Bash and
+        // every other tool still reach `can_use_tool`.
+        let asking = argv(&request(SandboxLevel::WorkspaceWrite, false));
+        assert_eq!(mode(&asking), "acceptEdits");
+        // A read-only run (a title run, a read-only session) edits nothing
+        // unasked.
+        let read_only = argv(&request(SandboxLevel::ReadOnly, false));
+        assert_eq!(mode(&read_only), "default");
     }
 
     #[test]
@@ -1280,6 +1304,40 @@ mod permission_tests {
         let argv = argv(&request(SandboxLevel::DangerFullAccess, true));
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert_eq!(mode(&argv), "bypassPermissions");
+        assert!(!argv.iter().any(|a| a == "acceptEdits"), "{argv:?}");
+    }
+
+    fn zeron_mcp(approve_tools: bool) -> zeron_proto::McpServer {
+        zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            approve_tools,
+            ..Default::default()
+        }
+    }
+
+    fn allowed_tools(argv: &[String]) -> Vec<&str> {
+        argv.windows(2)
+            .filter(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn only_a_pre_approved_server_skips_asking_and_only_for_its_own_tools() {
+        let mut req = request(SandboxLevel::WorkspaceWrite, false);
+        req.mcp = Some(zeron_mcp(true));
+        let approved = argv(&req);
+        assert!(approved.iter().any(|a| a == "--mcp-config"), "{approved:?}");
+        assert_eq!(allowed_tools(&approved), ["mcp__zeron"]);
+        assert_eq!(mode(&approved), "acceptEdits");
+
+        // The same server in any other chat still asks for every tool.
+        req.mcp = Some(zeron_mcp(false));
+        let asking = argv(&req);
+        assert!(asking.iter().any(|a| a == "--mcp-config"), "{asking:?}");
+        assert!(allowed_tools(&asking).is_empty(), "{asking:?}");
     }
 
     #[test]
@@ -1314,6 +1372,7 @@ mod mcp_injection_tests {
             env: [("ZERON_CHAT_ID".to_owned(), "chat-1".to_owned())]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         };
         let parsed: Value = serde_json::from_str(&mcp_config_arg(&mcp)).unwrap();
         assert_eq!(parsed["mcpServers"]["zeron"]["command"], "/opt/zeron/zeron");

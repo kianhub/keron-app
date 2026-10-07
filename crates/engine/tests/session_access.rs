@@ -334,3 +334,81 @@ async fn a_session_minted_with_full_access_starts_asking() {
     assert!(ran.auto_approve);
     assert_eq!(sandbox("phone"), Some(SandboxLevel::DangerFullAccess));
 }
+
+#[tokio::test]
+async fn only_the_voice_orchestrator_runs_its_zeron_tools_unasked() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    // The host only injects its server while it serves an IPC port.
+    core.sessions.set_ipc_port(27699);
+    let orchestrator = format!("{}1", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
+    let config = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+    };
+    for chat in [orchestrator.as_str(), "ordinary"] {
+        core.workspace
+            .create_chat(
+                chat,
+                None,
+                Some(&core.device_id),
+                Some(config.clone()),
+                None,
+            )
+            .unwrap();
+    }
+
+    core.sessions
+        .dispatch(
+            &orchestrator,
+            HarnessId::Mock,
+            request(SandboxLevel::WorkspaceWrite, false),
+            Some("m1".into()),
+        )
+        .await
+        .unwrap();
+    let ran = wait_for(&requests, 1).await;
+    let mcp = ran
+        .mcp
+        .expect("the orchestrator's run carries the zeron server");
+    assert_eq!(mcp.name, "zeron");
+    assert!(
+        mcp.approve_tools,
+        "the orchestrator's own tools are pre-approved"
+    );
+    // Nothing else about the run is widened.
+    assert_eq!(ran.sandbox, SandboxLevel::WorkspaceWrite);
+    assert!(!ran.auto_approve);
+
+    core.sessions
+        .dispatch(
+            "ordinary",
+            HarnessId::Mock,
+            request(SandboxLevel::WorkspaceWrite, false),
+            Some("m2".into()),
+        )
+        .await
+        .unwrap();
+    let ran = wait_for(&requests, 2).await;
+    let mcp = ran.mcp.expect("every run carries the zeron server");
+    assert!(
+        !mcp.approve_tools,
+        "any other chat's zeron tools keep asking"
+    );
+
+    // A client can't send a pre-approved server: the flag never crosses the
+    // wire, so a run queued with its own server asks for its tools.
+    let sent: RunRequest = serde_json::from_value(serde_json::json!({
+        "prompt": "go", "cwd": "/tmp", "sandbox": "workspace-write",
+        "mcp": { "name": "zeron", "command": "zeron", "approveTools": true,
+                 "approve_tools": true },
+    }))
+    .unwrap();
+    assert!(!sent.mcp.unwrap().approve_tools);
+}

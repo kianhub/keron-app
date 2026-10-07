@@ -142,6 +142,7 @@ async fn steering_never_aborts_a_running_tool() {
                         env: [("SLOW_MCP_DIR".to_owned(), mcp_dir.display().to_string())]
                             .into_iter()
                             .collect(),
+                        ..Default::default()
                     }),
                     prompt: "Call the slow_wait tool from the `slow` MCP server exactly once and \
                              wait for it, then tell me the secret word it returned."

@@ -1670,6 +1670,7 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        ..Default::default()
     });
     let (mut controls, steer, token) = controls("Yes");
     let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
@@ -1745,6 +1746,7 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        ..Default::default()
     });
     let (mut controls, _steer, token) = controls("Yes");
     let (voice, bridge, mut events) = channel();

@@ -55,14 +55,26 @@ Single binary `zeron`:
   (`crates/harness/src/codex/catalog.rs`), and that sandbox can read the whole disk, so an agent
   in it can read `{data_dir}/ipc-secret`, dial `127.0.0.1:{ipc_port}`, authenticate, and drive
   the engine like the UI does — for example switch its own session to full access, or start
-  other chats. Nothing changes this today. The owner decides between turning network access off
-  in the default sandbox and moving the secret into a Keychain item the sandbox can't read.
-  Separately, the injected Keron MCP server lets an agent in an "Ask first" session create a
-  chat on a harness that never asks (Cursor, OpenCode, Pi and the ACP agents run without
+  other chats. Separately, the injected Keron MCP server lets an agent in an "Ask first" session
+  create a chat on a harness that never asks (Cursor, OpenCode, Pi and the ACP agents run without
   approvals; only Claude Code and Codex ask). That chat's agent then acts without approvals,
-  gated only by the user approving that one `create_chat` call. New chats never start with
-  full access (`create_chat` refuses `danger-full-access`, and the host starts every new
-  row asking), but that doesn't bind a harness that never asks.
+  gated only by the user approving that one `create_chat` call (and not even that in the voice
+  orchestrator, below). New chats never start with full access (`create_chat` refuses
+  `danger-full-access`, and the host starts every new row asking), but that doesn't bind a
+  harness that never asks. The owner accepted both risks for now (7 Oct 2026). If that changes,
+  the options are turning network access off in the default sandbox, moving the secret into a
+  Keychain item the sandbox can't read, and refusing never-asking harnesses in `create_chat`.
+- "Ask first" (Keron, the owner's call, 7 Oct 2026): Claude Code runs in `acceptEdits`, so file
+  edits in the working directory go through and Bash and every other tool ask
+  (`crates/harness/src/claude/mod.rs`); Codex's `workspace-write` sandbox already lets edits in
+  the workspace through. Full access stays `--dangerously-skip-permissions` / Codex full access.
+  The hidden voice orchestrator chat runs its own injected Keron MCP tools unasked: the host
+  marks that one server `approve_tools` for chats whose id has the orchestrator prefix
+  (`Inner::zeron_mcp`), which Claude spells `--allowedTools mcp__zeron` and Codex
+  `mcp_servers.zeron.default_tools_approval_mode = "approve"`. The flag is `serde(skip)`, so
+  no client can send it; every other chat and every other tool keeps asking. The Keron tools
+  mint chat ids as UUIDs, so an agent can't make itself an orchestrator through them; one
+  driving the engine over IPC (above) could, which the accepted risk already covers.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles

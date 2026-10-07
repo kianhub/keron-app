@@ -266,6 +266,12 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Run this server's tools without asking, even in an asking session.
+    /// Only the host sets it, and only on its own server for its voice
+    /// orchestrator chat (Keron). Never on the wire: a client-sent server
+    /// always asks.
+    #[serde(skip)]
+    pub approve_tools: bool,
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
