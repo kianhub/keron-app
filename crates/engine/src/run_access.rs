@@ -14,6 +14,16 @@
 //! full access in it (a phone's or any client's `createSession`, a claimed,
 //! imported or re-homed row) runs asking, and the host rewrites it to say so
 //! when it adopts or runs it (`WorkspaceHost::settle_session_access`).
+//! Every whole-row write re-mints the row, so a session that did choose full
+//! access goes back to asking after a re-home (`set_chat_host`), an import
+//! (`import_chat_row`) or a backdated activity stamp (`set_chat_activity`).
+//!
+//! The field clocks are local hybrid clocks with no merge on receive, so
+//! "after" depends on the devices' wall clocks. A toggle made on a device
+//! whose clock lags the host's when it minted the row doesn't count: the
+//! session keeps asking, and the host rewrites the row so that device's
+//! controls show "Ask first" again. This fails safe; choosing full access
+//! again once the clocks agree takes effect.
 
 use zeron_proto::{ChatConfig, RunRequest, SandboxLevel};
 

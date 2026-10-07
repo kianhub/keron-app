@@ -4,8 +4,8 @@
 # all carry the same values (a Finder-launched app sees no environment).
 #
 # Any value containing "change-me" is a placeholder. Desktop debug builds
-# accept placeholders: the app runs local-only and sign-in fails against a
-# never-resolving `.invalid` host. Release builds refuse to compile while any
+# accept placeholders: the app runs local-only and sign-in fails until every
+# placeholder is filled in. Release builds refuse to compile while any
 # placeholder is left (KERON_ALLOW_PLACEHOLDERS=1 lifts that for CI tests).
 # iPhone builds always compile the Rust core with the release-based mobile
 # profiles, in an emptied environment (scripts/ios/build-core.sh), so a

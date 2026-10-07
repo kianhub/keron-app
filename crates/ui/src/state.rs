@@ -3900,6 +3900,95 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// Serve `service` on `listener` with no authentication, the way a stock
+    /// Zeron engine does: `AuthenticateIpc` answers "unknown method".
+    async fn serve_without_authentication(
+        listener: tokio::net::TcpListener,
+        service: Arc<dyn RpcService>,
+    ) {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        while let Ok((stream, _)) = listener.accept().await {
+            let service = service.clone();
+            tokio::spawn(async move {
+                let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let (mut sink, mut source) = ws.split();
+                let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+                let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(64);
+                tokio::spawn(async move {
+                    while let Some(text) = out_rx.recv().await {
+                        if sink.send(Message::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                tokio::spawn(async move {
+                    while let Some(Ok(Message::Text(text))) = source.next().await {
+                        if in_tx.send(text).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                zeron_rpc::serve_connection(service, out_tx, in_rx).await;
+            });
+        }
+    }
+
+    /// Bootstrap beside an unauthenticated engine. The temp dirs come back so
+    /// they outlive the engines using them.
+    async fn bootstrap_beside_an_unauthenticated_engine(
+        ui_has_secret: bool,
+    ) -> (EngineHandle, [tempfile::TempDir; 2]) {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let core = EngineCore::assemble(
+            daemon_dir.path(),
+            Arc::new(default_registry()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_without_authentication(listener, core.rpc_service()));
+
+        let ui_dir = tempfile::tempdir().unwrap();
+        if ui_has_secret {
+            IpcSecret::load_or_create(ui_dir.path()).unwrap();
+        }
+        let handle = EngineHandle::bootstrap(EngineBootConfig {
+            data_dir: ui_dir.path().to_path_buf(),
+            ipc_port: port,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: HarnessId::Mock,
+        })
+        .await
+        .unwrap();
+        (handle, [daemon_dir, ui_dir])
+    }
+
+    #[tokio::test]
+    async fn bootstrap_never_attaches_to_an_engine_that_does_not_authenticate() {
+        // A stock Zeron engine on the port answers AuthenticateIpc with
+        // "unknown method": the window embeds its own engine instead.
+        let (handle, _dirs) = bootstrap_beside_an_unauthenticated_engine(true).await;
+        assert_eq!(handle.mode(), EngineMode::InProcess);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_embeds_when_the_data_dir_has_no_ipc_secret() {
+        // A Keron engine writes its secret before serving, so a listener
+        // with no secret beside the UI's data dir isn't this install's.
+        let (handle, _dirs) = bootstrap_beside_an_unauthenticated_engine(false).await;
+        assert_eq!(handle.mode(), EngineMode::InProcess);
+        handle.shutdown().await;
+    }
+
     fn chat(id: &str, created_min: i64, last_msg_min: Option<i64>) -> Chat {
         let base = DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
             .unwrap()

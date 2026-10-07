@@ -1092,7 +1092,8 @@ impl WorkspaceHost {
     }
 
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when
-    /// the chat doesn't exist.
+    /// the chat doesn't exist. Rewrites the whole row, so a session's chosen
+    /// full access goes back to asking (see `run_access`).
     pub fn set_chat_activity(
         &self,
         chat_id: &str,

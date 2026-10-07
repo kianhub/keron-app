@@ -1,4 +1,5 @@
-// chat2 wire-level E2E against a deployed worker (AUTH_MODE=dev).
+// chat2 wire-level E2E against a local `npm run dev` (wrangler dev) origin with
+// AUTH_MODE=dev. Never point it at a deployed Worker: Keron never deploys dev auth.
 // Speaks the binary frame protocol from edge/src/chat-frames.ts and drives
 // every route + guard in edge/src/chat-room.ts per docs/chat2-sync.md B.
 // Usage: node chat2-e2e.mjs <baseUrl>

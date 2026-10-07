@@ -123,6 +123,7 @@ gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 mimalloc.workspace = true
 tracing-subscriber.workspace = true
+tokio-tungstenite.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
