@@ -536,6 +536,23 @@ async fn explicit_dev_bearer_keeps_online_routing_enabled() {
     runtime.shutdown().await;
 }
 
+/// Dial a starting headless daemon the way a client does: with the secret
+/// it writes into its data dir.
+async fn connect_daemon(data_dir: &std::path::Path, port: u16) -> zeron_rpc::RpcClient {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(secret) = zeron_engine::ipc_auth::IpcSecret::load(data_dir)
+                && let Ok(client) = zeron_engine::ipc_auth::connect(port, &secret).await
+            {
+                break client;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("headless IPC did not start")
+}
+
 #[tokio::test]
 async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     let dir = tempfile::tempdir().unwrap();
@@ -552,16 +569,27 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     engine_config.ipc_port = port;
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
-    let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
-                break client;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("headless IPC did not start");
+    let client = connect_daemon(dir.path(), port).await;
+
+    // Reaching the port is not enough: a client without the install's
+    // secret, or with the wrong one, is refused before any command.
+    let stranger = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+    assert!(
+        stranger
+            .call(methods::STOP_ENGINE, serde_json::json!({}))
+            .await
+            .is_err()
+    );
+    let other = tempfile::tempdir().unwrap();
+    let wrong = zeron_engine::ipc_auth::IpcSecret::load_or_create(other.path()).unwrap();
+    assert!(zeron_engine::ipc_auth::connect(port, &wrong).await.is_err());
+    let raw = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+    assert!(
+        raw.call(zeron_engine::ipc_auth::AUTHENTICATE, serde_json::json!({}))
+            .await
+            .is_err(),
+        "a missing secret is refused"
+    );
 
     assert_eq!(
         client
@@ -598,16 +626,7 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     engine_config.ipc_port = port;
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
-    let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
-                break client;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("headless IPC did not start");
+    let client = connect_daemon(dir.path(), port).await;
     wait_until(
         || edge.active_matching("/registry/") > 0,
         "registry room did not connect",

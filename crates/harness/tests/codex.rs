@@ -511,6 +511,86 @@ async fn approvals_round_trip_as_input_requests() {
 }
 
 #[tokio::test]
+async fn full_access_runs_without_approvals_or_sandbox() {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let _steer = steer_tx;
+    let seen = asked.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Vec::new());
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let mut req = request("scenario:full-access");
+    req.sandbox = SandboxLevel::DangerFullAccess;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert!(asked.lock().unwrap().is_empty(), "full access never asks");
+}
+
+#[tokio::test]
+async fn permission_and_mcp_tool_approvals_are_asked_and_answered() {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let _steer = steer_tx;
+    let seen = asked.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec!["Yes".into()],
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let events = run_to_end(&harness(), request("scenario:extra-approvals"), controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap();
+    // The permissions request and the MCP tool approval are asked; the
+    // server's own form is declined without bothering the user.
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[0].header, "Approve permissions");
+    assert!(asked[0].question.contains("network access"));
+    assert_eq!(asked[1].header, "Approve tool");
+    assert!(asked[1].question.contains("memory server"));
+}
+
+#[tokio::test]
 async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");

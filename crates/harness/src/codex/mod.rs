@@ -15,12 +15,13 @@
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
-//!   `item/commandExecution/requestApproval` +
-//!   `item/fileChange/requestApproval` still round-trip through
-//!   [`RunControls::request_input`] as a synthesized yes/no question.
+//! - Approvals + sandbox: a session asks by default — approval policy
+//!   `"on-request"` with the requested sandbox (`workspace-write` unless the
+//!   session narrowed it). Command, file-change, permission and MCP-tool
+//!   approval requests round-trip through [`RunControls::request_input`] as
+//!   a synthesized yes/no question. Only a session that chose full access
+//!   ([`crate::permissions`]) runs with `"never"` and `danger-full-access`,
+//!   where any stray approval request is accepted outright.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -724,18 +725,13 @@ impl CodexHarness {
                 .canonicalize()
                 .map_err(HarnessError::Io)?,
         );
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
-        request.sandbox = if title_only {
-            zeron_proto::SandboxLevel::ReadOnly
-        } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
-        };
+        // The session's own sandbox, with "never" approvals only under full
+        // access (see `permission_wire`). Title runs stay read-only. (codex
+        // ≤0.144.x mis-mounted workspace-write in a linked worktree on a
+        // slash-named branch, killing every command; later releases don't.)
+        if title_only {
+            request.sandbox = zeron_proto::SandboxLevel::ReadOnly;
+        }
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
@@ -1004,14 +1000,7 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    let (approval_policy, full_access) = permission_wire(&request, title_only);
     let effort = to_effort(request.reasoning);
     // Service tier rides thread-start and every turn (mirrors the Codex IDE
     // client). "default" means Standard — omit it entirely.
@@ -1562,7 +1551,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
+                        full_access,
                         &request_input,
                     );
                 }
@@ -1770,17 +1759,85 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
+/// The approval policy a run sends on `thread/start` and every `turn/start`,
+/// and whether it runs with full access. A session asks (`"on-request"`)
+/// unless it chose full access; title runs never ask (their tools are off
+/// and their sandbox read-only).
+fn permission_wire(request: &RunRequest, title_only: bool) -> (&'static str, bool) {
+    let full_access = !title_only && crate::permissions::full_access(request);
+    let policy = if full_access || title_only {
+        "never"
+    } else {
+        "on-request"
+    };
+    (policy, full_access)
+}
+
+/// What an approval request asks for, and how to answer it either way.
+struct Approval {
+    question: UserInputQuestion,
+    accept: Value,
+    decline: Value,
+}
+
+/// The approval requests the app server can send, as a question plus both
+/// answers. `None` for anything that isn't an approval.
+fn approval_request(method: &str, params: &Value) -> Option<Approval> {
+    let decision = |accept: &str, decline: &str| {
+        (
+            json!({ "decision": accept }),
+            json!({ "decision": decline }),
+        )
+    };
+    let (accept, decline) = match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            decision("accept", "decline")
+        }
+        // Legacy (v1 conversation) spellings of the same two approvals.
+        "execCommandApproval" | "applyPatchApproval" => decision("approved", "denied"),
+        // Extra sandbox permissions for this turn: grant exactly what was
+        // asked for, or nothing.
+        "item/permissions/requestApproval" => (
+            json!({
+                "permissions": params.get("permissions").cloned().unwrap_or_else(|| json!({})),
+                "scope": "turn",
+            }),
+            json!({ "permissions": {} }),
+        ),
+        // An MCP tool call awaiting approval arrives as an elicitation that
+        // Codex marks as its own; other elicitations are real forms.
+        "mcpServer/elicitation/request"
+            if params
+                .pointer("/_meta/codex_approval_kind")
+                .and_then(Value::as_str)
+                .is_some() =>
+        {
+            (
+                json!({ "action": "accept", "content": {} }),
+                json!({ "action": "decline" }),
+            )
+        }
+        _ => return None,
+    };
+    Some(Approval {
+        question: approval_question(method, params),
+        accept,
+        decline,
+    })
+}
+
 /// Serve one server→client request. Approval requests round-trip through
 /// `request_input` as a synthesized yes/no question (in a subtask so the
-/// message loop keeps flowing); with `auto_approve` they're accepted outright
+/// message loop keeps flowing); with full access they're accepted outright
 /// (belt to the wire-level `approvalPolicy: "never"`). Anything else is
-/// rejected as unsupported so the server never wedges awaiting a reply.
+/// declined or rejected as unsupported so the server never wedges awaiting a
+/// reply.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
-    auto_approve: bool,
+    full_access: bool,
     request_input: &Arc<RequestInputFn>,
 ) {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
@@ -1810,24 +1867,24 @@ fn handle_server_request(
         });
         return;
     }
-    let is_approval = matches!(
-        method,
-        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-    );
-    if !is_approval {
+    let Some(approval) = approval_request(method, params) else {
         tracing::debug!(
             target: "zeron_harness::codex",
             "unhandled server request: {method}"
         );
-        client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+        if method == "mcpServer/elicitation/request" {
+            // A form we can't render: decline it rather than fail the call.
+            client.respond(&id, json!({ "action": "decline" }));
+        } else {
+            client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+        }
         return;
-    }
-    if auto_approve {
-        client.respond(&id, json!({ "decision": "accept" }));
+    };
+    if full_access {
+        client.respond(&id, approval.accept);
         return;
     }
 
-    let question = approval_question(method, params);
     let client = client.clone();
     let request_input = Arc::clone(request_input);
     tokio::spawn(async move {
@@ -1838,16 +1895,20 @@ fn handle_server_request(
         //
         // A dropped sender (caller went away) degrades to a decline so the
         // agent is unblocked — never silently allowed.
+        let Approval {
+            question,
+            accept,
+            decline,
+        } = approval;
         let answers = (request_input)(vec![question.clone()])
             .await
             .unwrap_or_default();
-        let accept = answers.iter().any(|a| {
-            a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-        });
-        client.respond(
-            &id,
-            json!({ "decision": if accept { "accept" } else { "decline" } }),
-        );
+        let answer = if crate::permissions::approved(&question, &answers) {
+            accept
+        } else {
+            decline
+        };
+        client.respond(&id, answer);
     });
 }
 
@@ -1913,51 +1974,102 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
 
 /// Synthesize the yes/no question an approval request surfaces to the user.
 fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
-    let (header, question) = if method.contains("commandExecution") {
-        let command = match params.get("command") {
-            Some(Value::String(s)) => s.clone(),
+    let strings = |value: Option<&Value>| -> Vec<String> {
+        match value {
+            Some(Value::String(s)) => vec![s.clone()],
             Some(Value::Array(parts)) => parts
                 .iter()
                 .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ => String::new(),
-        };
-        (
-            "Approve command".to_owned(),
-            if command.is_empty() {
-                "Codex wants to run a command. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to run `{command}`. Allow it?")
-            },
-        )
-    } else {
-        let paths: Vec<&str> = params
-            .get("changes")
-            .and_then(Value::as_array)
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|c| c.get("path").and_then(Value::as_str))
-            .collect();
-        (
-            "Approve file change".to_owned(),
-            if paths.is_empty() {
-                "Codex wants to modify files. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to modify {}. Allow it?", paths.join(", "))
-            },
-        )
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
     };
-    UserInputQuestion {
-        id: new_message_id(),
-        header,
-        question,
-        options: vec!["Yes".into(), "No".into()],
-        prefill: None,
-        multiline: false,
-        multi_select: false,
-    }
+    let (header, question) = match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => {
+            let command = strings(params.get("command")).join(" ");
+            (
+                "Approve command",
+                if command.is_empty() {
+                    "Codex wants to run a command. Allow it?".to_owned()
+                } else {
+                    format!("Codex wants to run `{command}`. Allow it?")
+                },
+            )
+        }
+        "item/permissions/requestApproval" => {
+            let permissions = params.get("permissions").unwrap_or(&Value::Null);
+            let mut wants = Vec::new();
+            if permissions.pointer("/network/enabled") == Some(&Value::Bool(true)) {
+                wants.push("network access".to_owned());
+            }
+            let writes = strings(permissions.pointer("/fileSystem/write"));
+            if !writes.is_empty() {
+                wants.push(format!("write access to {}", writes.join(", ")));
+            }
+            let reads = strings(permissions.pointer("/fileSystem/read"));
+            if !reads.is_empty() {
+                wants.push(format!("read access to {}", reads.join(", ")));
+            }
+            let mut question = if wants.is_empty() {
+                "Codex wants extra sandbox permissions for this turn".to_owned()
+            } else {
+                format!("Codex wants {} for this turn", wants.join(" and "))
+            };
+            if let Some(reason) = params
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|r| !r.trim().is_empty())
+            {
+                question.push_str(&format!(" ({})", reason.trim()));
+            }
+            question.push_str(". Allow it?");
+            ("Approve permissions", question)
+        }
+        "mcpServer/elicitation/request" => {
+            let message = params
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty());
+            let server = params.get("serverName").and_then(Value::as_str);
+            (
+                "Approve tool",
+                match (message, server) {
+                    (Some(message), _) => format!("{message} Allow it?"),
+                    (None, Some(server)) => {
+                        format!("Codex wants to use a tool from the {server} MCP server. Allow it?")
+                    }
+                    (None, None) => "Codex wants to use an MCP tool. Allow it?".to_owned(),
+                },
+            )
+        }
+        _ => {
+            // File changes: v2 lists `changes[].path`, the legacy request
+            // keys `fileChanges` by path.
+            let mut paths: Vec<String> = params
+                .get("changes")
+                .and_then(Value::as_array)
+                .map(|a| a.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|c| c.get("path").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            if let Some(changes) = params.get("fileChanges").and_then(Value::as_object) {
+                paths.extend(changes.keys().cloned());
+            }
+            (
+                "Approve file change",
+                if paths.is_empty() {
+                    "Codex wants to modify files. Allow it?".to_owned()
+                } else {
+                    format!("Codex wants to modify {}. Allow it?", paths.join(", "))
+                },
+            )
+        }
+    };
+    crate::permissions::approval_question(header.to_owned(), question)
 }
 
 use crate::{Signal, send_signal, shutdown_child};
@@ -2251,5 +2363,125 @@ mod skill_discovery_tests {
         assert_eq!(skills.len(), 2);
         assert_ne!(skills[0].path, skills[1].path);
         assert!(!skills[1].enabled);
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use zeron_proto::SandboxLevel;
+
+    fn request(sandbox: SandboxLevel, auto_approve: bool) -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: String::new(),
+            sandbox,
+            auto_approve,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+        }
+    }
+
+    #[test]
+    fn sessions_default_to_on_request_in_their_own_sandbox() {
+        for auto_approve in [false, true] {
+            let req = request(SandboxLevel::WorkspaceWrite, auto_approve);
+            assert_eq!(permission_wire(&req, false), ("on-request", false));
+            assert_eq!(sandbox_mode(req.sandbox), "workspace-write");
+            assert_eq!(
+                sandbox_policy_value(req.sandbox),
+                json!({"type": "workspaceWrite", "networkAccess": true})
+            );
+        }
+        let req = request(SandboxLevel::ReadOnly, true);
+        assert_eq!(permission_wire(&req, false), ("on-request", false));
+        assert_eq!(sandbox_mode(req.sandbox), "read-only");
+    }
+
+    #[test]
+    fn full_access_is_never_with_danger_full_access() {
+        let req = request(SandboxLevel::DangerFullAccess, true);
+        assert_eq!(permission_wire(&req, false), ("never", true));
+        assert_eq!(sandbox_mode(req.sandbox), "danger-full-access");
+        assert_eq!(
+            sandbox_policy_value(req.sandbox),
+            json!({"type": "dangerFullAccess"})
+        );
+        // Title runs never ask and never get full access.
+        assert_eq!(permission_wire(&req, true), ("never", false));
+    }
+
+    #[test]
+    fn every_approval_kind_has_a_question_and_both_answers() {
+        let command = approval_request(
+            "item/commandExecution/requestApproval",
+            &json!({"command": "cargo test"}),
+        )
+        .unwrap();
+        assert_eq!(command.question.header, "Approve command");
+        assert!(command.question.question.contains("`cargo test`"));
+        assert_eq!(command.accept, json!({"decision": "accept"}));
+        assert_eq!(command.decline, json!({"decision": "decline"}));
+
+        let legacy =
+            approval_request("execCommandApproval", &json!({"command": ["ls", "-la"]})).unwrap();
+        assert!(legacy.question.question.contains("`ls -la`"));
+        assert_eq!(legacy.accept, json!({"decision": "approved"}));
+        assert_eq!(legacy.decline, json!({"decision": "denied"}));
+
+        let patch = approval_request(
+            "applyPatchApproval",
+            &json!({"fileChanges": {"/repo/a.rs": {"type": "update"}}}),
+        )
+        .unwrap();
+        assert_eq!(patch.question.header, "Approve file change");
+        assert!(patch.question.question.contains("/repo/a.rs"));
+
+        let wanted = json!({"network": {"enabled": true}, "fileSystem": {"write": ["/tmp/out"]}});
+        let permissions = approval_request(
+            "item/permissions/requestApproval",
+            &json!({"permissions": wanted, "reason": "fetch deps"}),
+        )
+        .unwrap();
+        assert_eq!(permissions.question.header, "Approve permissions");
+        let text = &permissions.question.question;
+        assert!(
+            text.contains("network access")
+                && text.contains("/tmp/out")
+                && text.contains("fetch deps"),
+            "{text}"
+        );
+        assert_eq!(
+            permissions.accept,
+            json!({"permissions": wanted, "scope": "turn"})
+        );
+        assert_eq!(permissions.decline, json!({"permissions": {}}));
+
+        let tool = approval_request(
+            "mcpServer/elicitation/request",
+            &json!({"serverName": "memory", "message": "Run remember?", "mode": "form",
+                "requestedSchema": {"type": "object", "properties": {}},
+                "_meta": {"codex_approval_kind": "mcp_tool_call"}}),
+        )
+        .unwrap();
+        assert_eq!(tool.question.question, "Run remember? Allow it?");
+        assert_eq!(tool.accept, json!({"action": "accept", "content": {}}));
+        assert_eq!(tool.decline, json!({"action": "decline"}));
+
+        // A server's own form is not an approval, and neither is anything else.
+        assert!(
+            approval_request(
+                "mcpServer/elicitation/request",
+                &json!({"serverName": "x", "message": "Your name?", "mode": "form"})
+            )
+            .is_none()
+        );
+        assert!(approval_request("item/tool/call", &json!({})).is_none());
     }
 }

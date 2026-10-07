@@ -6,6 +6,7 @@
 //! snapshot here is "subscribe, take the first item, drop" (drop cancels
 //! server-side), which is exactly what the sidebar does on attach.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
+use zeron_rpc::ipc_auth::{self, IpcSecret};
 use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
@@ -106,6 +108,8 @@ pub enum TurnOutcome {
 
 pub struct Zeron {
     url: String,
+    /// The engine's IPC secret file; every dial authenticates with it.
+    secret_file: Option<PathBuf>,
     origin: Origin,
     rpc: Mutex<Option<Arc<RpcClient>>>,
 }
@@ -113,9 +117,12 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    pub fn new(url: String, origin: Origin) -> Self {
+    /// The secret is read at dial time, so an engine that creates it after
+    /// this server starts is still reachable.
+    pub fn new(url: String, secret_file: Option<PathBuf>, origin: Origin) -> Self {
         Self {
             url,
+            secret_file,
             origin,
             rpc: Mutex::new(None),
         }
@@ -125,6 +132,7 @@ impl Zeron {
     pub fn with_client(client: RpcClient, origin: Origin) -> Self {
         Self {
             url: String::new(),
+            secret_file: None,
             origin,
             rpc: Mutex::new(Some(Arc::new(client))),
         }
@@ -142,12 +150,30 @@ impl Zeron {
         if self.url.is_empty() {
             bail!("engine connection closed");
         }
+        let secret = self
+            .secret_file
+            .as_deref()
+            .map(IpcSecret::read)
+            .transpose()
+            .context("reading the Zeron engine's IPC secret")?;
         let client = connect_ws(&self.url).await.map_err(|e| {
             anyhow!(
                 "no Zeron engine listening at {} ({e}) — is Zeron running?",
                 self.url
             )
         })?;
+        match &secret {
+            Some(secret) => match ipc_auth::authenticate(&client, secret).await {
+                Ok(()) => {}
+                // An engine from before IPC authentication serves anyone.
+                Err(err) if ipc_auth::predates_authentication(&err) => {}
+                Err(err) => bail!("the Zeron engine at {} refused this server ({err})", self.url),
+            },
+            None => tracing::warn!(
+                "{} is unset; the engine will refuse this connection",
+                ipc_auth::SECRET_FILE_ENV
+            ),
+        }
         let client = Arc::new(client);
         *slot = Some(client.clone());
         Ok(client)
@@ -716,6 +742,49 @@ mod tests {
             .snapshot(methods::WATCH_DEVICES, json!({}))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dials_authenticate_with_the_engines_secret_file() {
+        struct Echo;
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Echo {
+            async fn handle(
+                &self,
+                method: &str,
+                params: Value,
+            ) -> Result<zeron_rpc::RpcReply, RpcError> {
+                Ok(zeron_rpc::RpcReply::Value(json!({ "method": method, "params": params })))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let secret = IpcSecret::load_or_create(dir.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(ipc_auth::serve(listener, Arc::new(Echo), secret));
+
+        let zeron = Zeron::new(
+            url.clone(),
+            Some(IpcSecret::path(dir.path())),
+            Origin::default(),
+        );
+        let reply = zeron
+            .call(methods::WATCH_CHATS, json!({ "n": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(reply["method"], methods::WATCH_CHATS);
+
+        // Without the secret file the engine answers nothing.
+        let stranger = Zeron::new(url.clone(), None, Origin::default());
+        let err = stranger.call(methods::WATCH_CHATS, json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("unauthorized"), "{err:#}");
+
+        // Another install's secret is refused at dial time.
+        let other = tempfile::tempdir().unwrap();
+        IpcSecret::load_or_create(other.path()).unwrap();
+        let wrong = Zeron::new(url, Some(IpcSecret::path(other.path())), Origin::default());
+        let err = wrong.call(methods::WATCH_CHATS, json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("refused"), "{err:#}");
     }
 
     fn chat(id: &str, title: Option<&str>) -> Chat {

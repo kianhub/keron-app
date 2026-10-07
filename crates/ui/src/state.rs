@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
+use zeron_engine::ipc_auth::{self, IpcSecret};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
@@ -242,17 +243,36 @@ async fn wait_for_deferred_engine(
     }
 }
 
+/// Authenticate a daemon connection. A daemon from before IPC
+/// authentication doesn't know the call and serves every connection, so it
+/// is accepted until it restarts into a current build.
+async fn authenticate_to_daemon(client: &RpcClient, secret: &IpcSecret) -> Result<(), RpcError> {
+    match ipc_auth::authenticate(client, secret).await {
+        Err(err) if ipc_auth::predates_authentication(&err) => {
+            tracing::warn!("engine daemon predates IPC authentication; attaching until it restarts");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
+    /// Every connection to the daemon authenticates with this.
+    secret: Option<IpcSecret>,
     lifecycle_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[async_trait]
 impl EngineBackend for RemoteEngine {
     async fn media_client(&self) -> Result<RpcClient, RpcError> {
-        connect_ws(&self.url).await
+        let client = connect_ws(&self.url).await?;
+        if let Some(secret) = &self.secret {
+            authenticate_to_daemon(&client, secret).await?;
+        }
+        Ok(client)
     }
     fn client(&self) -> &RpcClient {
         &self.client
@@ -294,7 +314,7 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port).await {
+        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, &config.data_dir).await {
             return Ok(handle);
         }
 
@@ -324,7 +344,10 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port).await {
+                    if let Some(handle) =
+                        Self::attach_to_daemon(engine_config.ipc_port, &engine_config.data_dir)
+                            .await
+                    {
                         return Ok(handle);
                     }
                 }
@@ -354,15 +377,26 @@ impl EngineHandle {
         // its data subscriptions wait exactly as this window's do.
         //
         // Best-effort — losing the bind race with another engine costs other
-        // viewports, not this one.
-        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service.clone()).await
-        {
-            Ok(task) => Some(task),
+        // viewports, not this one. Never served without its secret.
+        let ipc_task = match IpcSecret::load_or_create(&engine_config.data_dir) {
+            Ok(secret) => {
+                match zeron_engine::serve_ipc(engine_config.ipc_port, service.clone(), secret).await
+                {
+                    Ok(task) => Some(task),
+                    Err(err) => {
+                        tracing::warn!(
+                            port = engine_config.ipc_port,
+                            error = %err,
+                            "IPC port unavailable; other viewports cannot attach to this window"
+                        );
+                        None
+                    }
+                }
+            }
             Err(err) => {
                 tracing::warn!(
-                    port = engine_config.ipc_port,
                     error = %err,
-                    "IPC port unavailable; other viewports cannot attach to this window"
+                    "IPC secret unavailable; other viewports cannot attach to this window"
                 );
                 None
             }
@@ -373,6 +407,7 @@ impl EngineHandle {
         // Agents only learn a port THIS window serves: a lost bind race must
         // not point their injected MCP server at some other engine.
         let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
+        let ipc_secret_file = IpcSecret::path(&engine_config.data_dir);
         // The instance lock rides into the boot task and is consumed by
         // assembly — held through sign-in onboarding too, because this process
         // owns the data dir from the moment it decided to embed.
@@ -410,6 +445,10 @@ impl EngineHandle {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
                     if let Some(port) = served_ipc_port {
                         engine_runtime.core().sessions.set_ipc_port(port);
+                        engine_runtime
+                            .core()
+                            .sessions
+                            .set_ipc_secret_file(ipc_secret_file);
                     }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
@@ -450,9 +489,14 @@ impl EngineHandle {
     }
 
     /// Probe the IPC port and, if a live engine answers, attach as a remote
-    /// viewport. `None` means embed: nothing listening, a non-engine listener,
-    /// or a listener without an identity.
-    async fn attach_to_daemon(ipc_port: u16) -> Option<EngineHandle> {
+    /// viewport, authenticating with the secret in `data_dir`. `None` means
+    /// embed: nothing listening, a non-engine listener, a listener without an
+    /// identity, or one that refused this install's secret. A daemon from
+    /// before IPC authentication (no secret file yet, `AuthenticateIpc`
+    /// unknown) is attached as it is: it holds the data dir, so embedding
+    /// beside it would fail, and it serves every client anyway until it
+    /// restarts into this build.
+    async fn attach_to_daemon(ipc_port: u16, data_dir: &std::path::Path) -> Option<EngineHandle> {
         let url = format!("ws://127.0.0.1:{ipc_port}");
         let probe = tokio::time::timeout(
             std::time::Duration::from_millis(750),
@@ -463,7 +507,28 @@ impl EngineHandle {
             return None;
         }
         tracing::info!(%url, "engine daemon detected; connecting");
-        match connect_ws(&url).await {
+        let secret = match IpcSecret::load(data_dir) {
+            Ok(secret) => Some(secret),
+            Err(err) => {
+                // A current engine always writes its secret before serving,
+                // so only an older daemon can be listening without one.
+                tracing::warn!(%url, error = %err, "no IPC secret for this data dir; trying an older daemon");
+                None
+            }
+        };
+        let connected = match connect_ws(&url).await {
+            Ok(client) => match &secret {
+                Some(secret) => authenticate_to_daemon(&client, secret)
+                    .await
+                    .map(|()| client)
+                    .inspect_err(|err| {
+                        tracing::warn!(%url, error = %err, "engine refused this install's IPC secret");
+                    }),
+                None => Ok(client),
+            },
+            Err(err) => Err(err),
+        };
+        match connected {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
                     let client = Arc::new(client);
@@ -491,6 +556,7 @@ impl EngineHandle {
                         inner: Arc::new(RemoteEngine {
                             client,
                             url,
+                            secret,
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                         }),
                         engine_info,
@@ -522,6 +588,7 @@ impl EngineHandle {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
                 url: "memory://test".into(),
+                secret: None,
                 lifecycle_task: tokio::sync::Mutex::new(None),
             }),
             engine_info: EngineInfo {
@@ -3359,11 +3426,13 @@ mod tests {
     async fn remote_viewport_treats_legacy_daemon_as_ready() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(zeron_rpc::serve_ws_listener(
+        let dir = tempfile::tempdir().unwrap();
+        let secret = IpcSecret::load_or_create(dir.path()).unwrap();
+        let server = tokio::spawn(ipc_auth::serve(
             listener,
             Arc::new(LegacyIdentityRpc),
+            secret,
         ));
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3475,7 +3544,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let server = tokio::spawn(zeron_rpc::serve_ws_listener(
+        let dir = tempfile::tempdir().unwrap();
+        let secret = IpcSecret::load_or_create(dir.path()).unwrap();
+        let server = tokio::spawn(ipc_auth::serve(
             listener,
             Arc::new(DeferredIdentityRpc {
                 engine_info: EngineInfo {
@@ -3486,9 +3557,9 @@ mod tests {
                 },
                 state: state_rx,
             }),
+            secret,
         ));
 
-        let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
@@ -3540,8 +3611,19 @@ mod tests {
         .unwrap();
         assert_eq!(handle.mode(), EngineMode::InProcess);
 
+        // A process that merely reaches the port can't drive the engine.
+        let stranger = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        assert!(
+            stranger
+                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .await
+                .is_err(),
+            "an unauthenticated client must be refused"
+        );
+
         // Attach the way an external viewport would, and speak the same protocol.
-        let attached = connect_ws(&format!("ws://127.0.0.1:{port}"))
+        let secret = IpcSecret::load(dir.path()).expect("the embedded engine wrote its secret");
+        let attached = ipc_auth::connect(port, &secret)
             .await
             .expect("a second viewport must be able to attach");
         let harnesses = attached
@@ -3762,9 +3844,11 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(zeron_rpc::serve_ws_listener(listener, core.rpc_service()));
-
+        // The daemon serves the UI's data dir, so both read one secret.
         let ui_dir = tempfile::tempdir().unwrap();
+        let secret = IpcSecret::load_or_create(ui_dir.path()).unwrap();
+        tokio::spawn(ipc_auth::serve(listener, core.rpc_service(), secret));
+
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: ui_dir.path().to_path_buf(),
             ipc_port: port,
@@ -3799,6 +3883,40 @@ mod tests {
                 .await,
             Err(RpcError::UnknownMethod(method)) if method == methods::STOP_ENGINE
         ));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_never_attaches_to_an_engine_holding_another_secret() {
+        // An engine on the port that this install's secret doesn't open:
+        // the window keeps its own engine rather than attaching.
+        let daemon_dir = tempfile::tempdir().unwrap();
+        let core = EngineCore::assemble(
+            daemon_dir.path(),
+            Arc::new(default_registry()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let foreign = IpcSecret::load_or_create(daemon_dir.path()).unwrap();
+        tokio::spawn(ipc_auth::serve(listener, core.rpc_service(), foreign));
+
+        let ui_dir = tempfile::tempdir().unwrap();
+        IpcSecret::load_or_create(ui_dir.path()).unwrap();
+        let handle = EngineHandle::bootstrap(EngineBootConfig {
+            data_dir: ui_dir.path().to_path_buf(),
+            ipc_port: port,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: HarnessId::Mock,
+        })
+        .await
+        .unwrap();
+        assert_eq!(handle.mode(), EngineMode::InProcess);
+        handle.shutdown().await;
     }
 
     fn chat(id: &str, created_min: i64, last_msg_min: Option<i64>) -> Chat {

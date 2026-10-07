@@ -12,10 +12,15 @@
 //!    transcript (A → edge → B), and the session-status row round-trips.
 //!
 //! Prints `PASS`/`FAIL` lines; exits nonzero on failure.
+//!
+//! Usage: `e2e_driver <a_port> <b_port> <a_data_dir> <b_data_dir>`; each
+//! engine only serves clients presenting its data dir's IPC secret.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use zeron_rpc::{RpcClient, connect_ws, methods};
+use zeron_rpc::ipc_auth::{self, IpcSecret};
+use zeron_rpc::{RpcClient, methods};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(90);
 const MOCK_TEXT: &str = "Mock harness reporting in.";
@@ -119,10 +124,17 @@ async fn main() {
         .parse()
         .expect("B port");
 
-    let a = connect_ws(&format!("ws://127.0.0.1:{a_port}"))
+    let a_dir = args.next().unwrap_or_else(|| "/tmp/e2e-a".into());
+    let b_dir = args.next().unwrap_or_else(|| "/tmp/e2e-b".into());
+    let secret = |dir: &str, name: &str| {
+        IpcSecret::load(Path::new(dir))
+            .unwrap_or_else(|err| fail(&format!("read device {name}'s IPC secret in {dir}: {err}")))
+    };
+
+    let a = ipc_auth::connect(a_port, &secret(&a_dir, "A"))
         .await
         .unwrap_or_else(|err| fail(&format!("connect device A ipc :{a_port}: {err}")));
-    let b = connect_ws(&format!("ws://127.0.0.1:{b_port}"))
+    let b = ipc_auth::connect(b_port, &secret(&b_dir, "B"))
         .await
         .unwrap_or_else(|err| fail(&format!("connect device B ipc :{b_port}: {err}")));
 
@@ -225,7 +237,7 @@ async fn main() {
                     "reasoning": null,
                     "cwd": "/tmp",
                     "sandbox": "workspace-write",
-                    "autoApprove": true,
+                    "autoApprove": false,
                     "resume": null,
                 },
             },

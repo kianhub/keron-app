@@ -284,6 +284,11 @@ pub(crate) fn allow_response(updated_input: Value) -> Value {
     json!({ "behavior": "allow", "updatedInput": updated_input })
 }
 
+/// `can_use_tool` deny payload; the CLI tells the model `message`.
+pub(crate) fn deny_response(message: &str) -> Value {
+    json!({ "behavior": "deny", "message": message })
+}
+
 /// Client→CLI interrupt control request.
 pub(crate) fn interrupt_request_line(request_id: &str) -> String {
     json!({

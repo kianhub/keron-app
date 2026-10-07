@@ -25,7 +25,13 @@ impl EngineRpc {
     /// The chat a call on this device runs in: reused, rotated or created.
     /// Callers hold the voice preparation lock and have checked that no call
     /// is live, so nothing is rotated from under one.
-    pub(super) async fn voice_chat(&self, config: ChatConfig) -> Result<String, VoiceRejection> {
+    /// The orchestrator always starts asking: it drives other sessions, so a
+    /// client can't hand it full access through the call's config.
+    pub(super) async fn voice_chat(
+        &self,
+        mut config: ChatConfig,
+    ) -> Result<String, VoiceRejection> {
+        crate::run_access::start_asking(&mut config);
         let device = self.engine_info.device_id.clone();
         let chats = self
             .workspace
@@ -206,6 +212,32 @@ mod tests {
         assert_eq!(rpc.voice_chat(config("b")).await.unwrap(), retry);
         assert!(core.workspace.chat(&first).unwrap().is_none());
         assert!(core.workspace.chat(&foreign).unwrap().is_some());
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_call_cannot_hand_the_orchestrator_full_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let mut full = config("a");
+        full.sandbox = zeron_proto::SandboxLevel::DangerFullAccess;
+
+        // Neither when the call creates the chat...
+        let chat = rpc.voice_chat(full.clone()).await.unwrap();
+        let row = core.workspace.chat(&chat).unwrap().unwrap();
+        assert_eq!(row.config, Some(config("a")));
+        // ...nor when it reconfigures the one it resumes.
+        full.model = Some("b".into());
+        assert_eq!(rpc.voice_chat(full).await.unwrap(), chat);
+        let row = core.workspace.chat(&chat).unwrap().unwrap();
+        assert_eq!(row.config, Some(config("b")));
         core.sessions.shutdown().await;
     }
 }

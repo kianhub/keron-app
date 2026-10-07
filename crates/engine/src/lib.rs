@@ -25,6 +25,7 @@ pub mod doc_host;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
+pub mod ipc_auth;
 pub mod local_import;
 mod model_catalogs;
 pub mod profile;
@@ -32,6 +33,7 @@ pub mod project_actions;
 pub mod registry;
 pub mod repos;
 pub mod rpc;
+mod run_access;
 pub mod run_journal;
 pub mod sessions;
 pub mod source_control;
@@ -906,10 +908,15 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let secret = ipc_auth::IpcSecret::load_or_create(&config.data_dir)?;
+        let server = serve_ipc(config.ipc_port, service, secret).await?;
         // Only a port this process actually serves goes to agents: the
         // injected MCP server must dial back into THIS engine.
         runtime.core().sessions.set_ipc_port(config.ipc_port);
+        runtime
+            .core()
+            .sessions
+            .set_ipc_secret_file(ipc_auth::IpcSecret::path(&config.data_dir));
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -973,16 +980,17 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// Serving here means any viewport can just attach.
 ///
 /// Localhost only, exactly as before: this widens *which process* can serve the
-/// port, not who can reach it.
+/// port, not who can reach it. And reaching it is not enough: every
+/// connection must authenticate with this install's `secret` before its
+/// first command (see [`ipc_auth`]).
 pub async fn serve_ipc(
     port: u16,
     service: std::sync::Arc<dyn zeron_rpc::RpcService>,
+    secret: ipc_auth::IpcSecret,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
-        listener, service,
-    )))
+    Ok(tokio::spawn(ipc_auth::serve(listener, service, secret)))
 }
 
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the

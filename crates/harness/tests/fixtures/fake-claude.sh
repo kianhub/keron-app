@@ -81,6 +81,24 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"wrapped up","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-wake"}'
   ;;
 
+*scenario:tool-approval*)
+  # One permission-gated tool call; the result reports how it was answered
+  # and whether the CLI was started with the bypass flag.
+  bypass=no
+  for arg in "$@"; do
+    [ "$arg" = "--dangerously-skip-permissions" ] && bypass=yes
+  done
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-approval"}'
+  emit '{"type":"control_request","request_id":"cr-a","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"}}}'
+  read -r resp || exit 1
+  case "$resp" in
+  *'"request_id":"cr-a"'*'"behavior":"allow"'*) decision=allowed ;;
+  *'"request_id":"cr-a"'*'"behavior":"deny"'*) decision=denied ;;
+  *) decision=unanswered ;;
+  esac
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$decision bypass=$bypass\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-approval\"}"
+  ;;
+
 *scenario:askuser*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-ask"}'
   # A plain tool permission request: must be auto-allowed.

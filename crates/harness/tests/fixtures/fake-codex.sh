@@ -204,15 +204,19 @@ case "$turnline" in
 
 *scenario:happy*)
   # Verify the turn/start + thread/start params the harness must send.
+  # A sandboxed session: on-request approvals in its workspace-write sandbox.
   for want in '"method":"turn/start"' '"effort":"ultra"' '"model":"gpt-5.6-sol"' \
-    '"sandboxPolicy":{"type":"dangerFullAccess"}' \
-    '"approvalPolicy":"never"' '"summary":"auto"' \
+    '"type":"workspaceWrite"' '"networkAccess":true' \
+    '"approvalPolicy":"on-request"' '"summary":"auto"' \
     '"serviceTier":"fast"'; do
     has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
-  for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"' \
+  for want in '"approvalPolicy":"on-request"' '"sandbox":"workspace-write"' '"cwd":"/tmp"' \
     '"serviceTier":"fast"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
+  done
+  for unwanted in 'dangerFullAccess' 'danger-full-access' '"approvalPolicy":"never"'; do
+    has "$turnline$thread_line" "$unwanted" && { fail_turn "$tid" "unexpected param: $unwanted"; exit 0; }
   done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
@@ -335,13 +339,12 @@ case "$turnline" in
   ;;
 
 *scenario:approve*)
-  # Wire policy is always "never" (unattended parity with the Claude
-  # adapter); the requests below are the STRAY-approval path, which must
-  # still round-trip as input questions.
-  has "$thread_line" '"approvalPolicy":"never"' ||
-    { fail_turn "$tid" "thread approvalPolicy should be never"; exit 0; }
-  has "$turnline" '"approvalPolicy":"never"' ||
-    { fail_turn "$tid" "turn approvalPolicy should be never"; exit 0; }
+  # A sandboxed session asks: the requests below must round-trip as input
+  # questions.
+  has "$thread_line" '"approvalPolicy":"on-request"' ||
+    { fail_turn "$tid" "thread approvalPolicy should be on-request"; exit 0; }
+  has "$turnline" '"approvalPolicy":"on-request"' ||
+    { fail_turn "$tid" "turn approvalPolicy should be on-request"; exit 0; }
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /tmp/x"}}'
@@ -352,6 +355,43 @@ case "$turnline" in
   read -r a2 || exit 1
   { has "$a2" '"id":102' && has "$a2" '"decision":"accept"'; } ||
     { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file approval not accepted"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:full-access*)
+  # The session chose full access: no approvals, no sandbox, and a stray
+  # approval request is accepted without asking anyone.
+  for want in '"approvalPolicy":"never"' '"sandboxPolicy":{"type":"dangerFullAccess"}'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
+  done
+  for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
+  done
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":301,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"make deploy"}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":301' && has "$a1" '"decision":"accept"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"full access did not accept"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:extra-approvals*)
+  # Newer approval kinds must be asked too, and answered in their own shape.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":401,"method":"item/permissions/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"p1","cwd":"/tmp","startedAtMs":1,"reason":"fetch deps","permissions":{"network":{"enabled":true}}}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":401' && has "$a1" '"enabled":true' && has "$a1" '"scope":"turn"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"permissions not granted"}}}}'; exit 0; }
+  emit '{"id":402,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","turnId":"t-1","serverName":"memory","mode":"form","message":"Allow the memory server to run remember?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call"}}}'
+  read -r a2 || exit 1
+  { has "$a2" '"id":402' && has "$a2" '"action":"accept"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"tool approval not accepted"}}}}'; exit 0; }
+  emit '{"id":403,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"forms","mode":"form","message":"Your name?","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}}}}}'
+  read -r a3 || exit 1
+  { has "$a3" '"id":403' && has "$a3" '"action":"decline"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"form not declined"}}}}'; exit 0; }
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 

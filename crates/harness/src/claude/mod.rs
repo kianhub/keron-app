@@ -11,9 +11,10 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. Tool calls
-//!   auto-allow (zeron sessions run unattended, parity with the ACP
-//!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
-//!   through [`RunControls::request_input`].
+//!   ask the user (a yes/no question through [`RunControls::request_input`])
+//!   unless the session chose full access ([`crate::permissions`]), which
+//!   alone starts the CLI with `--dangerously-skip-permissions`;
+//!   `AskUserQuestion` round-trips through the same bridge either way.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -56,7 +57,7 @@ use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
-use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
+use wire::{ControlRequestFrame, Frame, allow_response, control_response_line, deny_response};
 
 /// Locate the device's installed Claude Code CLI: our own PATH, then the
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
@@ -206,7 +207,10 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
-        if request.auto_approve {
+        // Bypass is the session's explicit full-access choice, never a
+        // default: everything else runs in the CLI's default mode, where
+        // tool calls reach us as `can_use_tool` and ask the user.
+        if crate::permissions::full_access(request) {
             cmd.args([
                 "--permission-mode",
                 "bypassPermissions",
@@ -513,6 +517,8 @@ impl Harness for ClaudeHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
+        // Title runs never inherit the session's full access.
+        request.sandbox = zeron_proto::SandboxLevel::ReadOnly;
         self.run_with_mode(request, controls, true).await
     }
 }
@@ -601,6 +607,7 @@ impl ClaudeHarness {
         tokio::spawn(run_session(Session {
             normalizer,
             title_only,
+            full_access: crate::permissions::full_access(&request),
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -726,6 +733,8 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 struct Session {
     normalizer: Normalizer,
     title_only: bool,
+    /// The session chose full access: tool calls are allowed without asking.
+    full_access: bool,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -744,6 +753,7 @@ async fn run_session(session: Session) {
     let Session {
         normalizer: mut norm,
         title_only,
+        full_access,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -808,7 +818,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, full_access, &request_input, &stdin_tx);
                         }
                         continue;
                     }
@@ -976,15 +986,18 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one `can_use_tool` control request. Every tool is auto-approved
-/// (unattended parity — the CLI still blocks until SOME response arrives, so
-/// every request must be answered); `AskUserQuestion` is intercepted —
-/// surface the questions through the engine's input bridge (which owns the
+/// Serve one `can_use_tool` control request (the CLI blocks until SOME
+/// response arrives, so every request must be answered). With full access
+/// every tool is allowed outright. Otherwise the tool call becomes a yes/no
+/// approval question through the engine's input bridge, and anything but
+/// "Yes" denies it. `AskUserQuestion` is intercepted in both modes — surface
+/// the questions through the input bridge (which owns the
 /// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
 /// (in a subtask so the frame loop keeps flowing), and hand them back keyed
 /// by question text, as the tool expects.
 fn handle_control_request(
     req: ControlRequestFrame,
+    full_access: bool,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -995,9 +1008,29 @@ fn handle_control_request(
         );
         return;
     }
-    if req.request.tool_name != "AskUserQuestion" {
+    if req.request.tool_name != "AskUserQuestion" && full_access {
         let line = control_response_line(&req.request_id, allow_response(req.request.input));
         let _ = stdin_tx.send(StdinMsg::Line(line));
+        return;
+    }
+    if req.request.tool_name != "AskUserQuestion" {
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let question = tool_question(&req.request.tool_name, &req.request.input);
+            // A dropped sender (caller went away) is a refusal, never a
+            // silent allow.
+            let answers = (request_input)(vec![question.clone()])
+                .await
+                .unwrap_or_default();
+            let response = if crate::permissions::approved(&question, &answers) {
+                allow_response(req.request.input)
+            } else {
+                deny_response("The user declined this tool call.")
+            };
+            let line = control_response_line(&req.request_id, response);
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+        });
         return;
     }
     let request_input = Arc::clone(request_input);
@@ -1020,6 +1053,51 @@ fn handle_control_request(
         let line = control_response_line(&request_id, allow_response(updated));
         let _ = stdin_tx.send(StdinMsg::Line(line));
     });
+}
+
+/// The approval question for one tool call, phrased from its input where the
+/// tool is a familiar one (a command, a file edit, a fetch).
+fn tool_question(tool: &str, input: &Value) -> UserInputQuestion {
+    let field = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let (header, question) = match tool {
+        "Bash" => (
+            "Approve command",
+            match field("command") {
+                Some(command) => format!("Claude wants to run `{command}`. Allow it?"),
+                None => "Claude wants to run a command. Allow it?".to_owned(),
+            },
+        ),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => (
+            "Approve file change",
+            match field("file_path").or_else(|| field("notebook_path")) {
+                Some(path) => format!("Claude wants to modify {path}. Allow it?"),
+                None => "Claude wants to modify files. Allow it?".to_owned(),
+            },
+        ),
+        "WebFetch" => (
+            "Approve tool",
+            match field("url") {
+                Some(url) => format!("Claude wants to fetch {url}. Allow it?"),
+                None => "Claude wants to fetch a web page. Allow it?".to_owned(),
+            },
+        ),
+        _ => (
+            "Approve tool",
+            match tool.strip_prefix("mcp__").and_then(|t| t.split_once("__")) {
+                Some((server, name)) => {
+                    format!("Claude wants to use {name} from the {server} MCP server. Allow it?")
+                }
+                None => format!("Claude wants to use {tool}. Allow it?"),
+            },
+        ),
+    };
+    crate::permissions::approval_question(header.to_owned(), question)
 }
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
@@ -1134,6 +1212,92 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use zeron_proto::SandboxLevel;
+
+    fn request(sandbox: SandboxLevel, auto_approve: bool) -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: String::new(),
+            sandbox,
+            auto_approve,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+        }
+    }
+
+    fn argv(request: &RunRequest) -> Vec<String> {
+        let exe = PathBuf::from("/bin/true");
+        ClaudeHarness::new()
+            .build_command(&exe, request)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn mode(argv: &[String]) -> &str {
+        let at = argv
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .expect("--permission-mode is always passed");
+        &argv[at + 1]
+    }
+
+    #[test]
+    fn sessions_default_to_asking() {
+        for sandbox in [SandboxLevel::WorkspaceWrite, SandboxLevel::ReadOnly] {
+            // Not even a client's auto_approve flag turns bypass on.
+            for auto_approve in [false, true] {
+                let argv = argv(&request(sandbox, auto_approve));
+                assert!(
+                    !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+                    "{argv:?}"
+                );
+                assert_eq!(mode(&argv), "default");
+                assert!(
+                    argv.windows(2)
+                        .any(|w| w[0] == "--permission-prompt-tool" && w[1] == "stdio"),
+                    "tool calls must reach us to be asked: {argv:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_access_is_the_only_bypass() {
+        let argv = argv(&request(SandboxLevel::DangerFullAccess, true));
+        assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert_eq!(mode(&argv), "bypassPermissions");
+    }
+
+    #[test]
+    fn tool_questions_name_what_the_tool_will_do() {
+        let q = tool_question("Bash", &serde_json::json!({"command": "rm -rf build"}));
+        assert_eq!(q.header, "Approve command");
+        assert!(q.question.contains("`rm -rf build`"), "{}", q.question);
+        assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
+        let q = tool_question(
+            "Edit",
+            &serde_json::json!({"file_path": "/repo/src/lib.rs"}),
+        );
+        assert_eq!(q.header, "Approve file change");
+        assert!(q.question.contains("/repo/src/lib.rs"));
+        let q = tool_question("mcp__memory__remember", &serde_json::json!({}));
+        assert!(q.question.contains("remember from the memory MCP server"));
+        let q = tool_question("Glob", &serde_json::Value::Null);
+        assert_eq!(q.question, "Claude wants to use Glob. Allow it?");
     }
 }
 

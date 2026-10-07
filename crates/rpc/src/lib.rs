@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 mod client;
 pub mod device_room;
+pub mod ipc_auth;
 mod server;
 
 pub use client::{RpcClient, RpcSubscription, connect_ws};
@@ -28,7 +29,7 @@ pub use device_room::{
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -525,11 +526,9 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_round_trip() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let (port, secret, _dir) = serve_test_ipc().await;
 
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = ipc_auth::connect(port, &secret).await.unwrap();
         let echoed = client
             .call("Echo", serde_json::json!("hello"))
             .await
@@ -549,9 +548,7 @@ mod tests {
     async fn handshake_with_origin_header_is_rejected() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let (port, secret, _dir) = serve_test_ipc().await;
 
         // A browser page opening ws://127.0.0.1:{port} always sends Origin;
         // the server must refuse the handshake before serving any RPC.
@@ -568,9 +565,50 @@ mod tests {
 
         // A native viewport (no Origin) still connects and can call RPC — the
         // reject must not be a blanket denial.
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = ipc_auth::connect(port, &secret).await.unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    /// An IPC acceptor for [`TestService`] with a fresh secret. Keep the
+    /// returned dir alive for as long as the secret file is needed.
+    async fn serve_test_ipc() -> (u16, ipc_auth::IpcSecret, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = ipc_auth::IpcSecret::load_or_create(dir.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(ipc_auth::serve(
+            listener,
+            Arc::new(TestService),
+            secret.clone(),
+        ));
+        (port, secret, dir)
+    }
+
+    #[tokio::test]
+    async fn ipc_connections_must_authenticate_first() {
+        let (port, secret, _dir) = serve_test_ipc().await;
+        let url = format!("ws://127.0.0.1:{port}");
+
+        // Missing: a command as the first frame is refused and the socket
+        // closed, so a second attempt on it can't get through either.
+        let bare = connect_ws(&url).await.unwrap();
+        let err = bare.call("Echo", serde_json::json!(1)).await.unwrap_err();
+        assert!(err.to_string().contains("unauthorized"), "{err}");
+        assert!(bare.call("Echo", serde_json::json!(1)).await.is_err());
+
+        // Wrong: another install's secret.
+        let other = tempfile::tempdir().unwrap();
+        let wrong = ipc_auth::IpcSecret::load_or_create(other.path()).unwrap();
+        let Err(err) = ipc_auth::connect(port, &wrong).await else {
+            panic!("another install's secret was accepted");
+        };
+        assert!(err.to_string().contains("wrong secret"), "{err}");
+
+        // Accepted: the install's own secret, then ordinary calls.
+        let client = ipc_auth::connect_url(&url, &secret).await.unwrap();
+        let echoed = client.call("Echo", serde_json::json!(2)).await.unwrap();
+        assert_eq!(echoed, serde_json::json!(2));
     }
 
     #[tokio::test]

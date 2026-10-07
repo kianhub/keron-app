@@ -11,6 +11,7 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
+mod access;
 mod compact;
 
 use crate::roll_text::{roll_text, rolling};
@@ -509,6 +510,8 @@ pub enum PickerKind {
     /// New-session canvas only: the device project-less sessions run on (a
     /// project pick implies its own host and overrides this).
     Device,
+    /// The session footer's permission mode: ask first, or full access.
+    Access,
 }
 
 pub(crate) struct ReturnComposerFocus;
@@ -1389,6 +1392,7 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
+            PickerKind::Access => usize::from(self.session_full_access(cx)),
         };
         if kind == PickerKind::HarnessModel {
             // scroll_to_item below may land anywhere; the first note of the
@@ -1447,8 +1451,9 @@ impl Pickers {
                 // timeout/fallback result until the application restarts.
                 self.prefetch_models(true, cx);
             }
-            // Projects and devices are already synced state — nothing to load.
-            PickerKind::Space | PickerKind::Device => {}
+            // Projects, devices and the session's access are already synced
+            // state — nothing to load.
+            PickerKind::Space | PickerKind::Device | PickerKind::Access => {}
         }
         cx.notify();
     }
@@ -3000,7 +3005,7 @@ impl Pickers {
                 let delta = if key == MenuKey::Up { -1 } else { 1 };
                 let count = match self.open_kind() {
                     Some(PickerKind::Branch) => self.filtered_ref_rows(cx).len().min(MAX_REF_ROWS),
-                    Some(PickerKind::Checkout) => 2,
+                    Some(PickerKind::Checkout) | Some(PickerKind::Access) => 2,
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
@@ -3039,6 +3044,8 @@ impl Pickers {
                         CheckoutKind::NewWorktree
                     };
                     self.pick_checkout(kind, cx);
+                } else if self.open_kind() == Some(PickerKind::Access) {
+                    self.pick_access(self.active == 1, cx);
                 } else {
                     self.on_search_submit(cx);
                 }
@@ -3199,6 +3206,7 @@ impl Pickers {
             PickerKind::HarnessModel => "picker-model",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
+            PickerKind::Access => "picker-access",
         };
         // Hover state is keyed globally: two composers on screen (main +
         // side chat) must not light each other's chips, so the key carries
@@ -3337,6 +3345,22 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        self.footer_chip_tinted(kind, id, icon_path, label, None, theme, cx)
+    }
+
+    /// [`Self::footer_chip`] drawn as a badge in `tint` (icon, label and a
+    /// faint wash), for state that must stay noticeable.
+    #[allow(clippy::too_many_arguments)]
+    fn footer_chip_tinted(
+        &self,
+        kind: PickerKind,
+        id: &'static str,
+        icon_path: &'static str,
+        label: SharedString,
+        tint: Option<gpui::Hsla>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let open = self.open_kind() == Some(kind);
         // Per-picker hover key, like the trigger chips.
         let id: SharedString = format!("{id}-{}", cx.entity_id()).into();
@@ -3354,15 +3378,20 @@ impl Pickers {
             .rounded(px(FOOTER_CHIP_RADIUS))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                &id,
-                theme.text_muted.opacity(0.7),
-                theme.text.opacity(0.8),
-            ))
-            .bg(if open {
-                theme.element_hover
-            } else {
-                motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
+            .text_color(match tint {
+                Some(tint) => tint,
+                None => {
+                    motion::hover_blend(&id, theme.text_muted.opacity(0.7), theme.text.opacity(0.8))
+                }
+            })
+            .bg(match (open, tint) {
+                (true, _) => theme.element_hover,
+                (false, Some(tint)) => {
+                    motion::hover_blend(&id, tint.opacity(0.12), tint.opacity(0.2))
+                }
+                (false, None) => {
+                    motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
+                }
             })
             .on_hover(motion::hover_listener(id.clone()))
             .cursor_pointer()
@@ -3377,7 +3406,7 @@ impl Pickers {
                 crate::icons::icon(icon_path)
                     .size(px(12.0))
                     .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
+                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7))),
             )
             .child(roll_text(format!("{id}-label"), label, cx.reduce_motion()))
             .child(
@@ -3612,11 +3641,28 @@ impl Pickers {
         };
 
         if let Some(chat) = &session {
+            // The session's permission mode leads the trailing status group,
+            // in every session: full access must stay visible while it's on.
+            let closing = (self.open.closing_since(), self.menu_geometry().below);
+            let mut access_overlay = self.access_overlay(cx);
+            let access = attach_overlay_end(
+                self.access_chip(&theme, cx),
+                &mut access_overlay,
+                PickerKind::Access,
+                "access-popover",
+                closing,
+            );
             // Sessions never move: read-only checkout-kind + ref labels,
             // LEFT-aligned, only when the session's project has git. The
             // target (project @ device) lives in the titlebar now.
             let Some(space) = space.as_ref().filter(|s| s.git_detected) else {
-                return None;
+                return Some(
+                    row()
+                        .pr_0()
+                        .child(div().flex_1().min_w_0())
+                        .child(div().flex_none().child(access))
+                        .into_any_element(),
+                );
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
             let (icon_path, label) = if is_worktree {
@@ -3658,6 +3704,7 @@ impl Pickers {
                     .child(left)
                     .child(right)
                     .child(div().flex_1().min_w_0())
+                    .child(div().flex_none().child(access))
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
                             crate::change_requests::pull_request_badge(
@@ -3866,8 +3913,8 @@ impl Pickers {
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
-                        // Projects/devices load nothing; no retry surface exists.
-                        PickerKind::Space | PickerKind::Device => {}
+                        // Projects/devices/access load nothing; no retry surface exists.
+                        PickerKind::Space | PickerKind::Device | PickerKind::Access => {}
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -6168,7 +6215,8 @@ impl Render for Pickers {
             Some(PickerKind::Branch)
             | Some(PickerKind::Checkout)
             | Some(PickerKind::Space)
-            | Some(PickerKind::Device) => None,
+            | Some(PickerKind::Device)
+            | Some(PickerKind::Access) => None,
             Some(PickerKind::HarnessModel) => {
                 let menu = if self.compact_model_picker(cx) {
                     self.render_compact_menu(window, cx)
@@ -6308,6 +6356,52 @@ mod tests {
                 .child(div().track_focus(&self.neutral))
                 .child(self.pickers.clone())
         }
+    }
+
+    #[gpui::test]
+    fn full_access_is_an_explicit_per_session_choice(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            for id in ["one", "two"] {
+                state.chats.push(serde_json::from_value(serde_json::json!({
+                    "id": id, "deviceId": "device", "archived": false,
+                    "createdAt": "2026-09-01T00:00:00Z",
+                    "config": {"harness": "claude-code", "model": "opus", "sandbox": "workspace-write"}
+                })).unwrap());
+            }
+            state.selected_chat = Some("one".into());
+            state
+        });
+        let sandbox = |id: &str, cx: &mut gpui::TestAppContext| {
+            state.read_with(cx, |state, _| {
+                let chat = state.chats.iter().find(|c| c.id == id).unwrap();
+                chat.config.as_ref().unwrap().sandbox
+            })
+        };
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![bare_model("opus", "Opus")]),
+            );
+            // Sessions start asking; full access is picked, not inherited.
+            assert!(!pickers.session_full_access(cx));
+            pickers.pick_access(true, cx);
+            assert!(pickers.session_full_access(cx));
+            // Other config changes keep the session's choice.
+            pickers.pick_model("opus".into(), cx);
+            assert!(pickers.session_full_access(cx));
+        });
+        assert_eq!(sandbox("one", cx), SandboxLevel::DangerFullAccess);
+        assert_eq!(sandbox("two", cx), SandboxLevel::WorkspaceWrite);
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_access(false, cx);
+            assert!(!pickers.session_full_access(cx));
+        });
+        assert_eq!(sandbox("one", cx), SandboxLevel::WorkspaceWrite);
     }
 
     #[gpui::test]
