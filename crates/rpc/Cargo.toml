@@ -18,6 +18,11 @@ thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# Local IPC authentication (ipc_auth.rs): the secret's CSPRNG, its
+# constant-time comparison and its atomic, private write.
+getrandom = "0.3"
+subtle = "2.6"
+tempfile.workspace = true
 
 [dev-dependencies]
 zeron-doc.workspace = true

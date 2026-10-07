@@ -3,8 +3,11 @@
 //! Usage:
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 LocalDevice '{}'
 //!   cargo run -p zeron-rpc --example rpc_probe -- ws://127.0.0.1:27801 WatchSessions '{}' --stream 3
+//!
+//! The engine only serves authenticated clients: point
+//! `ZERON_IPC_SECRET_FILE` at its `{data_dir}/ipc-secret`.
 
-use zeron_rpc::connect_ws;
+use zeron_rpc::ipc_auth::{self, IpcSecret};
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +17,15 @@ async fn main() {
         std::process::exit(2);
     };
     let params: serde_json::Value = serde_json::from_str(params).expect("params json");
-    let client = connect_ws(url).await.expect("connect");
+    let secret = IpcSecret::from_env()
+        .unwrap_or_else(|| {
+            eprintln!("set {} to the engine's ipc-secret file", ipc_auth::SECRET_FILE_ENV);
+            std::process::exit(2);
+        })
+        .expect("read the IPC secret");
+    let client = ipc_auth::connect_url(url, &secret)
+        .await
+        .expect("connect");
     if rest.first().map(String::as_str) == Some("--stream") {
         let count: usize = rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(1);
         let mut rx = client.subscribe(method, params).await.expect("subscribe");

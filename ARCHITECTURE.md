@@ -39,6 +39,12 @@ Single binary `zeron`:
   port**. The embedded engine is not private: any other viewport can attach to the running app
   without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
   window still opens, having lost only the ability to host peers.
+- The IPC port is not open to every local process. The first engine to serve a data dir writes a
+  random per-install secret to `{data_dir}/ipc-secret` (mode 0600), and every client (viewports,
+  `zeron sync`, the injected `zeron mcp` server, which gets the file's path in
+  `ZERON_IPC_SECRET_FILE`) sends it in an `AuthenticateIpc` call as its first frame. Any other
+  first frame, or the wrong secret, gets an error and the socket is closed
+  (`zeron_rpc::ipc_auth`). Handshakes carrying a browser `Origin` are refused before that.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles

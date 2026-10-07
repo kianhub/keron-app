@@ -1,11 +1,14 @@
-//! Server side: dispatch loop over string frames + the WebSocket acceptor.
+//! Server side: dispatch loop over string frames + the WebSocket plumbing
+//! the authenticated IPC acceptor ([`crate::ipc_auth::serve`]) runs on.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
@@ -135,30 +138,15 @@ async fn handle_request(
     }
 }
 
-/// Accept WebSocket connections forever, serving each with `service`.
-pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "rpc: accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
-    // Native viewports dial this socket with a bare `connect_async` and send
-    // no `Origin` header. A browser always attaches `Origin` to a WebSocket
-    // handshake and cannot forge or suppress it from script, and WebSockets
-    // are exempt from the Same-Origin Policy — so only rejecting any handshake
-    // that carries `Origin` keeps a page the user happens to visit from
-    // reaching this local socket. Keep this check.
-    //
+/// Complete a local WebSocket handshake, refusing any that carries `Origin`.
+///
+/// Native viewports dial this socket with a bare `connect_async` and send
+/// no `Origin` header. A browser always attaches `Origin` to a WebSocket
+/// handshake and cannot forge or suppress it from script, and WebSockets
+/// are exempt from the Same-Origin Policy — so only rejecting any handshake
+/// that carries `Origin` keeps a page the user happens to visit from
+/// reaching this local socket. Keep this check.
+pub(crate) async fn accept_local_ws(stream: TcpStream) -> Option<WebSocketStream<TcpStream>> {
     // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
     // trait requires; it can't be boxed away here.
     #[allow(clippy::result_large_err)]
@@ -174,14 +162,22 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
         Ok(resp)
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
-        Ok(ws) => ws,
+    match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
+        Ok(ws) => Some(ws),
         Err(err) => {
             tracing::warn!(error = %err, "rpc: websocket handshake failed");
-            return;
+            None
         }
-    };
-    let (mut sink, mut ws_stream) = ws.split();
+    }
+}
+
+/// Serve an accepted (and, for the IPC port, authenticated) socket with
+/// `service` until either side closes.
+pub(crate) async fn serve_ws_halves(
+    mut sink: SplitSink<WebSocketStream<TcpStream>, WsMessage>,
+    mut ws_stream: SplitStream<WebSocketStream<TcpStream>>,
+    service: Arc<dyn RpcService>,
+) {
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
 

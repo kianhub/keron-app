@@ -3,11 +3,31 @@
 //! sandbox) is chosen explicitly from this menu, applies to this session
 //! only, and shows as a warning-tinted badge for as long as it is on. The
 //! host enforces the choice from the session's config row.
+//!
+//! Only Claude Code and Codex enforce it today. The other harnesses (the ACP
+//! agents, OpenCode, Pi, Cursor) still act without asking, so their sessions
+//! show a permanent "No approvals" badge instead of a choice they wouldn't
+//! honour.
 use super::*;
 
 const ACCESS_MENU_WIDTH: f32 = 264.0;
 
+/// Whether `harness` asks before acting unless its session chose full access.
+pub(super) fn enforces_access(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex)
+}
+
 impl Pickers {
+    /// Whether the selected session's harness honours the access choice.
+    /// A session without a config yet offers the choice.
+    fn session_enforces_access(&self, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.config.as_ref())
+            .is_none_or(|config| enforces_access(config.harness))
+    }
+
     /// Whether the selected session chose full access.
     pub(super) fn session_full_access(&self, cx: &App) -> bool {
         self.state
@@ -18,12 +38,23 @@ impl Pickers {
     }
 
     /// The footer trigger: a quiet "Ask first", or the "Full access" badge.
+    /// A harness that never asks gets a fixed "No approvals" badge.
     pub(super) fn access_chip(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        if self.session_full_access(cx) {
+        if !self.session_enforces_access(cx) {
+            Self::footer_label(
+                crate::icons::DANGER_TRIANGLE,
+                SharedString::from("No approvals"),
+                theme,
+            )
+            .text_color(theme.warning)
+            .bg(theme.warning.opacity(0.12))
+            .rounded(px(FOOTER_CHIP_RADIUS))
+            .id("picker-access-unenforced")
+        } else if self.session_full_access(cx) {
             self.footer_chip_tinted(
                 PickerKind::Access,
                 "picker-access",
@@ -99,7 +130,8 @@ impl Pickers {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
                         "Full access turns off approval prompts and the \
-                         sandbox, for this session only.",
+                         sandbox, for this session only. Turning it off \
+                         applies from the next turn.",
                     )),
             )
             .into_any_element()
@@ -108,7 +140,7 @@ impl Pickers {
     /// Apply the session's permission mode. Turning full access off returns
     /// the session to asking in its workspace sandbox.
     pub(super) fn pick_access(&mut self, full: bool, cx: &mut Context<Self>) {
-        if full != self.session_full_access(cx) {
+        if self.session_enforces_access(cx) && full != self.session_full_access(cx) {
             self.update_chat_config(cx, move |config| {
                 config.sandbox = if full {
                     SandboxLevel::DangerFullAccess
@@ -132,5 +164,28 @@ impl Pickers {
                 self.popover_frame(ACCESS_MENU_WIDTH, content, cx),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_harnesses_that_ask_offer_the_choice() {
+        assert!(enforces_access(HarnessId::ClaudeCode));
+        assert!(enforces_access(HarnessId::Codex));
+        for harness in [
+            HarnessId::Cursor,
+            HarnessId::Devin,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Pi,
+            HarnessId::Opencode,
+            HarnessId::Antigravity,
+            HarnessId::Mock,
+        ] {
+            assert!(!enforces_access(harness), "{harness:?}");
+        }
     }
 }

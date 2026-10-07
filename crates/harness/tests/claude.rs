@@ -362,6 +362,69 @@ async fn tool_calls_ask_the_user_unless_the_session_chose_full_access() {
 }
 
 #[tokio::test]
+async fn an_unanswered_approval_is_a_denial() {
+    // The engine's input bridge went away without answering (the viewer
+    // closed, the run was torn down): the tool is denied, never allowed.
+    let mut req = request("scenario:tool-approval");
+    req.sandbox = SandboxLevel::WorkspaceWrite;
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let _steer = steer_tx;
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(|_| oneshot::channel().1),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("denied bypass=no"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn approvals_and_agent_questions_interleave_in_a_session_that_asks() {
+    // Asking mode: the Bash call becomes a yes/no approval, then the
+    // AskUserQuestion still reaches the user as its own question.
+    let mut req = request("scenario:askuser");
+    req.sandbox = SandboxLevel::WorkspaceWrite;
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let _steer = steer_tx;
+    let seen = asked.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec![if q.options.iter().any(|o| o == "Yes") {
+                        "Yes".into()
+                    } else {
+                        "B".into()
+                    }],
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    let events = run_to_end(&harness(), req, controls).await;
+    let asked = asked.lock().unwrap().clone();
+    let headers: Vec<_> = asked.iter().map(|q| q.header.as_str()).collect();
+    assert_eq!(headers, ["Approve command", "Choice"], "{asked:?}");
+    assert_eq!(final_result(&events).as_deref(), Some("answered"), "{events:?}");
+}
+
+#[tokio::test]
 async fn ask_user_question_round_trips_through_the_control_channel() {
     // The questions must reach the ENGINE's input bridge (`request_input`) —
     // and the harness must NOT emit its own `InputRequested`/`InputResolved`

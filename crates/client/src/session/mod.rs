@@ -1051,7 +1051,9 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    // The host derives approvals from the session's own
+                    // config row; a client can't skip them.
+                    auto_approve: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
