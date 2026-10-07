@@ -245,13 +245,13 @@ final class RemoteVoiceController {
 
     static func message(for reason: VoiceEndReason, host: String) -> String {
         switch reason {
-        case .microphoneDenied: return "Zeron needs microphone access to talk with Codex."
+        case .microphoneDenied: return "Keron needs microphone access to talk with Codex."
         case .audioUnavailable: return "The audio connection closed. Start a new call to reconnect."
         case .signInRequired: return "Sign in to Codex with ChatGPT on \(host)."
         case .usageUnavailable: return "Codex usage is currently unavailable on \(host)."
         case .busy: return "\(host) is already on a voice call."
         case .hostUnavailable: return "\(host) isn't reachable right now."
-        case .hostIncompatible: return "Update Zeron on \(host) and enable remote voice there."
+        case .hostIncompatible: return "Update Keron on \(host) and enable remote voice there."
         case .connectionLost: return "The call dropped. Start a new one to reconnect."
         }
     }

@@ -1,7 +1,6 @@
 name: Cursor SDK updates
+# Keron: manual runs only (no daily automation PRs on the fork).
 on:
-  schedule:
-    - cron: '17 9 * * *'
   workflow_dispatch:
 permissions:
   contents: write

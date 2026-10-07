@@ -23,6 +23,7 @@ members = [
     "crates/client",
     "crates/mcp",
     "crates/text",
+    "crates/keron-config",
     "apps/zeron",
 ]
 

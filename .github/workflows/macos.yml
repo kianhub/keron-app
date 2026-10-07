@@ -36,6 +36,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # The iOS core builds with the release-based `mobile` profile, which refuses
+  # keron.toml placeholders; tests don't need the owner's values.
+  KERON_ALLOW_PLACEHOLDERS: "1"
   # Tests run on the dev profile (workspace crates at opt-level 0, dependencies at 2 as configured in
   # Cargo.toml) instead of --release: a cold build is several times cheaper. No debug info is needed.
   CARGO_PROFILE_DEV_DEBUG: 0

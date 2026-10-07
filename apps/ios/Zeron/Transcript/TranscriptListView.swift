@@ -20,7 +20,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     private var cacheOrder: [ModelKey] = []
     private var knownKeys = Set<UInt64>()
     private var inflight = Set<ModelKey>()
-    private let prefetchQueue = DispatchQueue(label: "sh.zeron.transcript.prefetch", qos: .userInitiated)
+    private let prefetchQueue = DispatchQueue(label: "keron.transcript.prefetch", qos: .userInitiated)
 
     /// Rows are realized this far beyond the viewport (and prefetched further).
     var overscan: CGFloat = 700

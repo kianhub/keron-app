@@ -3,15 +3,16 @@
 //! (its own report-only checker, the "Check for Updates…" menu item, the
 //! sidebar update strip, and the desktop install paths).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
+//! Keron: update checks are off unless keron.toml sets `updates.enabled`; then
+//! they use the owner's relay, never Zeron's. Nothing here talks to zeron.sh.
+//!
+//! Release layout: artifacts live in the relay's `keron-releases` R2 bucket,
+//! served pre-auth at `{edge}/releases/*`. `manifest.json` carries the latest version plus a
 //! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
 //! releases published before the manifest existed.
 //!
 //! Install kinds and their update paths:
-//! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
-//!   installer and the Linux tarball's `install.sh`): download the headless
+//! - **Managed** (`~/.keron/app/install/<ver>` + `current` symlink): download the headless
 //!   tarball into a new versioned dir, flip the symlink, then restart the
 //!   service (daemon) or relaunch (desktop). Same flow the installer script
 //!   performs, natively.
@@ -41,6 +42,11 @@ use tokio::sync::watch;
 
 #[cfg(windows)]
 pub mod windows;
+
+/// The binary inside managed installs and app bundles.
+const BIN: &str = keron_config::BINARY_NAME;
+/// The app bundle inside the macOS update tarball (scripts/package-macos.sh).
+const MAC_APP: &str = "Keron.app";
 
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
@@ -133,16 +139,16 @@ fn require_mac_app_update_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+/// `keron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
 pub fn headless_artifact(version: &str) -> String {
     let (os, arch) = platform_key();
-    format!("zeron-{version}-{os}-{arch}.tar.gz")
+    format!("keron-{version}-{os}-{arch}.tar.gz")
 }
 
-/// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+/// `keron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
-    format!("zeron-{version}-macos-{arch}-app.tar.gz")
+    format!("keron-{version}-macos-{arch}-app.tar.gz")
 }
 
 fn parse_version(v: &str) -> Option<Vec<u64>> {
@@ -282,7 +288,7 @@ fn http_client_with_timeouts(connect: Duration, read: Duration) -> anyhow::Resul
         // Inactivity timeout, not a total download cap: slow progressing
         // updates remain viable on constrained links.
         .read_timeout(read)
-        .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("keron/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many update redirects");
@@ -314,20 +320,46 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-/// The project's GitHub releases page — the advisory update strip opens this
-/// for unmanaged installs (source builds, hand-copied binaries), where no
-/// updater flow exists to drive.
-pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
+/// The fork's releases page (keron.toml `updates.releases_page`) — the
+/// advisory update strip opens this for unmanaged installs (source builds,
+/// hand-copied binaries), where no updater flow exists to drive.
+pub const RELEASES_PAGE: &str = keron_config::RELEASES_PAGE;
 
 /// The newest release's page — the download destination offered when this
 /// installation cannot replace itself.
-pub const LATEST_RELEASE_PAGE: &str = "https://github.com/zeronsh/zeron/releases/latest";
+pub const LATEST_RELEASE_PAGE: &str = keron_config::LATEST_RELEASE_PAGE;
+
+/// Whether this build checks for releases at all: keron.toml's
+/// `updates.enabled`, or an explicit `ZERON_RELEASES_URL` feed.
+pub fn checks_enabled() -> bool {
+    feed_configured() || release_override().is_some()
+}
+
+/// keron.toml's switch. Unit tests serve their own feeds, so they count as on.
+fn feed_configured() -> bool {
+    keron_config::RELEASES_URL.is_some() || cfg!(test)
+}
+
+fn release_override() -> Option<String> {
+    std::env::var("ZERON_RELEASES_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+}
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
-    if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
-        && !url.trim().is_empty()
-    {
+    release_base_with(edge_url, release_override(), feed_configured())
+}
+
+fn release_base_with(
+    edge_url: &str,
+    override_url: Option<String>,
+    configured: bool,
+) -> anyhow::Result<String> {
+    if let Some(url) = override_url {
         return validate_release_override(&url);
+    }
+    if !configured {
+        bail!("update checks are off in this Keron build (keron.toml updates.enabled)");
     }
     #[cfg(windows)]
     if let Some(url) = windows::release_url()? {
@@ -373,12 +405,12 @@ impl std::fmt::Display for UpdateBlocker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Translocated | Self::DiskImage => f.write_str(
-                "Zeron is running from a temporary, read-only location. Move Zeron to your \
+                "Keron is running from a temporary, read-only location. Move Keron to your \
                  Applications folder and reopen it to turn on updates.",
             ),
             Self::NotWritable(dir) => write!(
                 f,
-                "Zeron doesn't have permission to replace itself in {}.",
+                "Keron doesn't have permission to replace itself in {}.",
                 dir.display()
             ),
         }
@@ -459,7 +491,7 @@ impl InstallKind {
                     .context("staged install has no version directory")?;
                 apply_headless(app_root, version)?;
                 if relaunch {
-                    let binary = app_root.join("current").join("zeron");
+                    let binary = app_root.join("current").join(keron_config::BINARY_NAME);
                     relaunch_after_exit(&binary, Path::new(""));
                 }
                 Ok(())
@@ -530,14 +562,14 @@ fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> Inst
             directory: exe.parent().unwrap().to_owned(),
         };
     }
-    // Never interpret a coincidental Windows `%HOME%\.zeron\app` layout as
+    // Never interpret a coincidental Windows `%HOME%\.keron\app\install` layout as
     // the Unix symlink-managed installation.
     if !managed_updates_supported(os) {
         return InstallKind::Unmanaged;
     }
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
-        let app_root = home.join(".zeron").join("app");
+        let app_root = keron_config::managed_install_root(home);
         if exe.starts_with(&app_root) {
             return InstallKind::Managed { app_root };
         }
@@ -671,8 +703,8 @@ async fn verify_staged_binary(binary: &Path, version: &str) -> anyhow::Result<()
     .with_context(|| format!("running {} --version", binary.display()))?;
     let reported = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     anyhow::ensure!(
-        output.status.success() && reported == format!("zeron {version}"),
-        "staged binary reported {reported:?} (exit {}), expected \"zeron {version}\"",
+        output.status.success() && reported == format!("{BIN} {version}"),
+        "staged binary reported {reported:?} (exit {}), expected \"{BIN} {version}\"",
         output.status
     );
     Ok(())
@@ -697,7 +729,7 @@ pub async fn stage_headless(
         "invalid release version {version:?}"
     );
     let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
+    if dest.join(BIN).exists() {
         return Ok(dest);
     }
     let file = headless_artifact(version);
@@ -721,14 +753,14 @@ pub async fn stage_headless(
                 "--strip-components=1",
             ],
         )?;
-        if !unpacked.join("zeron").is_file() {
-            bail!("tarball {file} did not contain a zeron binary");
+        if !unpacked.join(BIN).is_file() {
+            bail!("tarball {file} did not contain a {BIN} binary");
         }
-        verify_staged_binary(&unpacked.join("zeron"), version).await?;
+        verify_staged_binary(&unpacked.join(BIN), version).await?;
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            Err(_) if dest.join(BIN).exists() => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -746,7 +778,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let target = app_root.join(version);
-        if !target.join("zeron").exists() {
+        if !target.join(BIN).exists() {
             bail!("{} is not a staged install", target.display());
         }
         let tmp = app_root.join(format!(".current-{}", std::process::id()));
@@ -768,7 +800,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
 /// `XPC_SERVICE_NAME`.
 pub fn running_as_installed_service() -> bool {
     if cfg!(target_os = "macos") {
-        std::env::var("XPC_SERVICE_NAME").is_ok_and(|label| label == "sh.zeron.app")
+        std::env::var("XPC_SERVICE_NAME").is_ok_and(|label| label == keron_config::MACOS_BUNDLE_ID)
     } else if cfg!(target_os = "linux") {
         std::fs::read_to_string("/proc/self/cgroup")
             .is_ok_and(|cgroups| in_zeron_service_cgroup(&cgroups))
@@ -781,7 +813,10 @@ fn in_zeron_service_cgroup(cgroups: &str) -> bool {
     cgroups
         .lines()
         .filter_map(|line| line.rsplit(':').next())
-        .any(|path| path.split('/').any(|part| part == "zeron.service"))
+        .any(|path| {
+            path.split('/')
+                .any(|part| part == keron_config::SYSTEMD_UNIT)
+        })
 }
 
 /// Restart the installed engine service (the same units `zeron daemon` and the
@@ -795,12 +830,21 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
+            &[
+                "kickstart",
+                "-k",
+                &format!("gui/{uid}/{}", keron_config::MACOS_BUNDLE_ID),
+            ],
         )
     } else {
         run(
             "systemctl",
-            &["--user", "--no-block", "restart", "zeron.service"],
+            &[
+                "--user",
+                "--no-block",
+                "restart",
+                keron_config::SYSTEMD_UNIT,
+            ],
         )
     }
 }
@@ -827,8 +871,8 @@ pub async fn stage_mac_app(
     );
     let updates = data_dir.join("updates");
     let dir = updates.join(version);
-    let staged = dir.join("Zeron.app");
-    let staged_binary = staged.join("Contents/MacOS/zeron");
+    let staged = dir.join(MAC_APP);
+    let staged_binary = staged.join("Contents/MacOS").join(BIN);
     if staged_binary.exists() && verify_staged_binary(&staged_binary, version).await.is_ok() {
         return Ok(staged);
     }
@@ -849,13 +893,13 @@ pub async fn stage_mac_app(
             &unpack.to_string_lossy(),
         ],
     )
-    .map(|()| unpack.join("Zeron.app"));
+    .map(|()| unpack.join(MAC_APP));
     std::fs::remove_file(&tarball).ok();
     let unpacked = unpacked?;
-    let unpacked_binary = unpacked.join("Contents/MacOS/zeron");
+    let unpacked_binary = unpacked.join("Contents/MacOS").join(BIN);
     if !unpacked_binary.exists() {
         let _ = std::fs::remove_dir_all(&dir);
-        bail!("app tarball {file} did not contain Zeron.app");
+        bail!("app tarball {file} did not contain {MAC_APP}");
     }
     if let Err(err) = verify_staged_binary(&unpacked_binary, version).await {
         let _ = std::fs::remove_dir_all(&dir);
@@ -931,7 +975,7 @@ if [ -n "$3" ]; then exec "$2" "$3"; else exec "$2"; fi"#;
         command
             .arg("-c")
             .arg(script)
-            .arg("zeron-relaunch")
+            .arg("keron-relaunch")
             .arg(&pid)
             .arg(program)
             .arg(argument)
@@ -1160,7 +1204,9 @@ impl Updater {
                 loop {
                     let forced = self.forced.swap(false, Ordering::SeqCst);
                     if forced || schedule.due(SystemTime::now()) {
-                        let ok = self.check_once().await;
+                        // Checks off: keep the schedule (and the superseded-
+                        // binary restart below) without any request.
+                        let ok = !checks_enabled() || self.check_once().await;
                         schedule.record(SystemTime::now(), ok);
                         if ok
                             && self.status_tx.borrow().update_available
@@ -1624,12 +1670,12 @@ mod tests {
     fn install_kind_detection() {
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/home/u/.zeron/app/0.1.1/zeron"),
+                Path::new("/home/u/.keron/app/install/0.1.1/keron"),
                 Some(Path::new("/home/u")),
                 "linux",
             ),
             InstallKind::Managed {
-                app_root: PathBuf::from("/home/u/.zeron/app")
+                app_root: PathBuf::from("/home/u/.keron/app/install")
             }
         );
         assert_eq!(
@@ -1658,12 +1704,32 @@ mod tests {
     }
 
     #[test]
+    fn checks_stay_off_unless_keron_toml_turns_them_on() {
+        let off = release_base_with("https://relay.example.com", None, false).unwrap_err();
+        assert!(format!("{off:#}").contains("update checks are off"));
+        assert_eq!(
+            release_base_with("https://relay.example.com/", None, true).unwrap(),
+            "https://relay.example.com/releases"
+        );
+        // An explicit feed is the owner's choice and still wins.
+        assert_eq!(
+            release_base_with(
+                "https://relay.example.com",
+                Some("https://feed.example.com/r/".into()),
+                false
+            )
+            .unwrap(),
+            "https://feed.example.com/r"
+        );
+    }
+
+    #[test]
     fn artifact_names_match_packaging() {
         let (os, arch) = platform_key();
-        assert!(headless_artifact("0.2.0").starts_with("zeron-0.2.0-"));
+        assert!(headless_artifact("0.2.0").starts_with("keron-0.2.0-"));
         assert_eq!(
             headless_artifact("0.2.0"),
-            format!("zeron-0.2.0-{os}-{arch}.tar.gz")
+            format!("keron-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
     }
@@ -1753,7 +1819,7 @@ mod tests {
         let app_root = tmp.path().join("app");
         for ver in ["0.1.0", "0.1.1"] {
             std::fs::create_dir_all(app_root.join(ver)).unwrap();
-            std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
+            std::fs::write(app_root.join(ver).join(BIN), ver).unwrap();
         }
         apply_headless(&app_root, "0.1.0").unwrap();
         assert_eq!(
@@ -1830,16 +1896,16 @@ mod tests {
     #[test]
     fn systemd_service_cgroup_is_recognized() {
         assert!(in_zeron_service_cgroup(
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron.service\n"
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/keron.service\n"
         ));
         assert!(in_zeron_service_cgroup(
-            "12:pids:/user.slice/user@1000.service/zeron.service\n1:name=systemd:/x\n"
+            "12:pids:/user.slice/user@1000.service/keron.service\n1:name=systemd:/x\n"
         ));
         assert!(!in_zeron_service_cgroup(
             "0::/user.slice/user-1000.slice/session-3.scope\n"
         ));
         assert!(!in_zeron_service_cgroup(
-            "0::/user.slice/user@1000.service/app.slice/zeron.service.d\n"
+            "0::/user.slice/user@1000.service/app.slice/keron.service.d\n"
         ));
     }
 
@@ -1857,7 +1923,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         std::fs::create_dir_all(app_root.join("0.4.0")).unwrap();
-        std::fs::write(app_root.join("0.4.0").join("zeron"), "").unwrap();
+        std::fs::write(app_root.join("0.4.0").join(BIN), "").unwrap();
         let managed = InstallKind::Managed {
             app_root: app_root.clone(),
         };
@@ -1957,14 +2023,14 @@ mod tests {
         server.abort();
     }
 
-    /// A headless tarball whose `zeron` reports `reported` from `--version`.
+    /// A headless tarball whose `keron` reports `reported` from `--version`.
     #[cfg(unix)]
     fn fake_headless_tarball(dir: &Path, reported: &str) -> Vec<u8> {
         use std::os::unix::fs::PermissionsExt as _;
         let root = dir.join("zeron-pkg");
         std::fs::create_dir_all(&root).unwrap();
-        let binary = root.join("zeron");
-        std::fs::write(&binary, format!("#!/bin/sh\necho \"zeron {reported}\"\n")).unwrap();
+        let binary = root.join(BIN);
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"keron {reported}\"\n")).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let tarball = dir.join("pkg.tar.gz");
         run(
@@ -2005,7 +2071,7 @@ mod tests {
             .unwrap_err();
         server.abort();
         assert!(
-            format!("{error:#}").contains("expected \"zeron 9.9.9\""),
+            format!("{error:#}").contains("expected \"keron 9.9.9\""),
             "unexpected error: {error:#}"
         );
         assert!(!app_root.join("9.9.9").exists());
@@ -2018,6 +2084,6 @@ mod tests {
             .unwrap();
         server.abort();
         assert_eq!(staged, app_root.join("9.9.9"));
-        assert!(staged.join("zeron").is_file());
+        assert!(staged.join(BIN).is_file());
     }
 }

@@ -5,17 +5,15 @@ name: release
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows per-user installer, portable zip, and updater exe (x86_64) via
 #     scripts/package-windows.ps1
-# then create a GitHub Release AND upload everything to the
-# `comet-native-releases` R2 bucket (served at zeron.sh/releases/* for
-# `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
+# then create a GitHub Release AND upload everything to an R2 releases bucket,
+# bumping latest.txt.
 #
-# Trigger: push a tag `v<version>` matching the workspace version in
-# Cargo.toml (bump it in the same commit), or run manually via
-# workflow_dispatch (builds + uploads artifacts, no release/R2 publish).
+# Keron: off. The fork publishes no releases (keron.toml updates.enabled is
+# false), and this pipeline still expects Zeron's artifact names.
+# Every job is `if: false`; the tag trigger is gone. Re-enable deliberately
+# once a Keron release flow exists.
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -23,9 +21,11 @@ permissions:
 
 jobs:
   cursor-compatibility:
+    if: false # Keron publishes no releases (see the header)
     uses: ./.github/workflows/cursor-compatibility.yml
 
   linux:
+    if: false # Keron publishes no releases (see the header)
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +64,7 @@ jobs:
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
+    if: false # Keron publishes no releases (see the header)
     runs-on: macos-latest # Apple silicon
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -116,6 +117,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    if: false # Keron publishes no releases (see the header)
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
@@ -143,7 +145,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Zeron's condition was: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: false # Keron publishes no releases (see the header)
     needs: [cursor-compatibility, linux, macos, windows]
     runs-on: ubuntu-latest
     env:
@@ -182,18 +185,18 @@ jobs:
             dist/*
             manifest.json
           generate_release_notes: true
-      - name: upload to R2 (zeron.sh/releases/*)
+      - name: upload to R2 ({relay}/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           for f in dist/*; do
-            npx wrangler@4 r2 object put "comet-native-releases/$(basename "$f")" \
+            npx wrangler@4 r2 object put "keron-releases/$(basename "$f")" \
               --file "$f" --remote
           done
           # manifest.json: version + per-artifact sha256 — the auto-updater
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
-          npx wrangler@4 r2 object put comet-native-releases/manifest.json \
+          npx wrangler@4 r2 object put keron-releases/manifest.json \
             --file manifest.json --remote
           printf '%s' "$VERSION" > latest.txt
-          npx wrangler@4 r2 object put comet-native-releases/latest.txt \
+          npx wrangler@4 r2 object put keron-releases/latest.txt \
             --file latest.txt --remote

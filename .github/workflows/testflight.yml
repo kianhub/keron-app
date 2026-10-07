@@ -1,5 +1,10 @@
 name: TestFlight
 
+# Keron: off. This uploads to App Store Connect for Zeron's app id. The owner
+# installs the iPhone app from Xcode for now (docs/guide/relay-and-iphone.md);
+# re-enable with the owner's bundle id and API key secrets if TestFlight is
+# wanted later.
+
 run-name: TestFlight (${{ inputs.audience || 'internal' }}) from ${{ github.ref_name }} by @${{ github.actor }}
 
 on:
@@ -22,7 +27,7 @@ concurrency:
 
 jobs:
   upload:
-    if: github.ref == 'refs/heads/main'
+    if: false # Keron: see the header
     runs-on: macos-latest
     # Cold Rust core build (release profile, thin LTO) + archive + processing.
     timeout-minutes: 90

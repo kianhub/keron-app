@@ -109,6 +109,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXFileReference section */
+		A1000000000000000000XC01 /* Keron.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Keron.xcconfig; sourceTree = "<group>"; };
 		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -165,6 +166,7 @@
 				A3000000000000000000G001 /* ZeronUITests */,
 				A4000000000000000000G001 /* ZeronLiveActivity */,
 				A5000000000000000000G001 /* ZeronShared */,
+				A1000000000000000000XC01 /* Keron.xcconfig */,
 				A1000000000000000000G002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -389,6 +391,7 @@
 /* Begin XCBuildConfiguration section */
 		A1000000000000000000BC01 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000XC01 /* Keron.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -417,6 +420,7 @@
 		};
 		A1000000000000000000BC02 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000XC01 /* Keron.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -458,7 +462,7 @@
 				CODE_SIGN_ENTITLEMENTS = Zeron.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				DEVELOPMENT_TEAM = "$(KERON_APPLE_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -466,7 +470,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -497,7 +501,7 @@
 				CODE_SIGN_ENTITLEMENTS = Zeron.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				DEVELOPMENT_TEAM = "$(KERON_APPLE_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Zeron/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -505,7 +509,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -525,7 +529,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -543,7 +547,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).uitests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -563,7 +567,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -581,7 +585,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).uitests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -597,17 +601,17 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				DEVELOPMENT_TEAM = "$(KERON_APPLE_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ZeronLiveActivity/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Zeron;
+				INFOPLIST_KEY_CFBundleDisplayName = Keron;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.LiveActivity;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).LiveActivity";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -624,17 +628,17 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				DEVELOPMENT_TEAM = "$(KERON_APPLE_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ZeronLiveActivity/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Zeron;
+				INFOPLIST_KEY_CFBundleDisplayName = Keron;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.LiveActivity;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KERON_IOS_BUNDLE_ID).LiveActivity";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

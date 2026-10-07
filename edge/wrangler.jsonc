@@ -1,32 +1,32 @@
 {
-  // Zeron edge: per-session + per-workspace Loro sync DOs, per-device
-  // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
+  // Keron relay (a fork of Zeron's edge): per-chat and per-workspace sync
+  // DOs, per-device relay DOs, R2 blobs, and the WorkOS auth routes.
   // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
   // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
   // backups); ARCHITECTURE.md §6.
-  // NOTE: the worker name and R2 bucket names keep the historical "comet"
-  // prefix on purpose — Durable Object storage is bound to the script name,
-  // so renaming the worker would orphan every session/registry/chat room.
+  //
+  // Every "change-me" value is the owner's to fill in; edge/RELAY.md has the
+  // steps. WORKOS_CLIENT_ID, APNS_TEAM_ID, APNS_TOPIC and the route's host
+  // must match the app root's keron.toml:
+  //   cargo run -p keron-config --features cli -- check
+  //
+  // Durable Object storage is bound to the worker name: once deployed, never
+  // rename "keron-edge", or every chat and registry room is orphaned.
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Deployed by .github/workflows/deploy.yml on pushes to main that touch
-  // edge/ (CLOUDFLARE_API_TOKEN repo secret).
-  "name": "comet-native-edge",
+  // Deployed by hand (`npx wrangler deploy`, see RELAY.md);
+  // .github/workflows/deploy.yml can also deploy it on demand.
+  "name": "keron-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
-  "account_id": "b57dde68ee5964dccc025437b5478a5b",
-  "workers_dev": true,
-  // Public hostname on the zeron.sh zone, plus the install surface carved out
-  // of the landing host: path routes beat the landing worker's custom
-  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
-  // while the rest of zeron.sh serves the landing page.
+  // Cloudflare dashboard → Workers & Pages → Account ID.
+  "account_id": "change-me",
+  // Only the custom domain below serves the relay; no *.workers.dev URL.
+  "workers_dev": false,
+  // The relay's hostname on a zone in the same Cloudflare account. It must
+  // equal keron.toml's relay.host. Cloudflare creates the DNS record and the
+  // certificate on deploy.
   "routes": [
-    { "pattern": "edge.zeron.sh", "custom_domain": true },
-    { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
-    { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
-    // Legacy comet hostnames — keep until 0.1.x clients are gone.
-    { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
-    { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
-    { "pattern": "comet.zeron.sh/releases/*", "zone_name": "zeron.sh" }
+    { "pattern": "relay.change-me.invalid", "custom_domain": true }
   ],
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
@@ -66,25 +66,32 @@
   "r2_buckets": [
     {
       "binding": "BLOBS",
-      "bucket_name": "comet-native-blobs"
+      "bucket_name": "keron-blobs"
     },
     {
-      // Release artifacts for /releases/* (curl-install + dmg downloads).
+      // Release artifacts for /releases/*. Empty unless you publish builds
+      // there and turn on keron.toml's updates.enabled.
       "binding": "RELEASES",
-      "bucket_name": "comet-native-releases"
+      "bucket_name": "keron-releases"
     }
   ],
   "vars": {
-    // WorkOS AuthKit client id — JWTs verified against its JWKS. Placeholder;
-    // set the real client id before deploying. Set AUTH_MODE=dev locally to
-    // accept bearer==userId. WORKOS_API_KEY is a wrangler secret
-    // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
-    // Session push notifications (registry-room.ts) need two more secrets:
-    // `wrangler secret put APNS_KEY_P8` (the AuthKey_XXXX.p8 file's contents)
-    // and `wrangler secret put APNS_KEY_ID`. Unset ⇒ decided and logged on
-    // /registry/:org/stats, not sent.
-    "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
-    "AUTH_MODE": "workos"
+    // WorkOS AuthKit client id of the relay's own AuthKit app (keron.toml
+    // relay.workos_client_id); JWTs are verified against its JWKS.
+    "WORKOS_CLIENT_ID": "client_change-me",
+    // Always "workos" here. "dev" accepts any bearer without verifying it:
+    // only ever pass it to a local `wrangler dev` (npm run dev does).
+    "AUTH_MODE": "workos",
+    // Push notifications: your Apple team id (keron.toml apple.team_id) and
+    // the iPhone app's bundle id, <bundle_prefix>.keron.ios.
+    "APNS_TEAM_ID": "CHANGE-ME",
+    "APNS_TOPIC": "invalid.change-me.keron.ios"
+    // Secrets, set with `npx wrangler secret put <NAME>` (RELAY.md):
+    //   WORKOS_API_KEY  the AuthKit app's API key; unset ⇒ /auth/* answers 501
+    //   APNS_KEY_P8     contents of the AuthKey_XXXXXXXXXX.p8 file
+    //   APNS_KEY_ID     that key's id
+    // Without the two APNS secrets, pushes are decided and logged on
+    // /registry/:org/stats (pushConfigured: false), not sent.
   },
   "observability": {
     "enabled": true

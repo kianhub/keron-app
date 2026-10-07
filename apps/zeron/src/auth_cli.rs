@@ -62,14 +62,14 @@ fn account_status(scope: WorkspaceScope, auth: &AuthState) -> AccountStatus {
             AuthState::NeedsOrganization { user } => AccountStatus {
                 mode: "synced",
                 auth: format!(
-                    "signed in as {} but no workspace selected — run `zeron login`",
+                    "signed in as {} but no workspace selected — run `keron login`",
                     user.email
                 ),
                 healthy: false,
             },
             AuthState::SignedOut => AccountStatus {
                 mode: "synced",
-                auth: "saved session is no longer valid — run `zeron login`".into(),
+                auth: "saved session is no longer valid — run `keron login`".into(),
                 healthy: false,
             },
         },
@@ -94,12 +94,12 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                 .map(|org| format!(" (workspace {org})"))
                 .unwrap_or_default()
         );
-        println!("Run `zeron logout` first to switch accounts.");
+        println!("Run `keron logout` first to switch accounts.");
         println!("The next engine start will use the synced workspace.");
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("zeron login needs an interactive terminal");
+        anyhow::bail!("keron login needs an interactive terminal");
     }
     zeron_engine::terminal_sign_in(&auth).await?;
     match auth.state() {
@@ -112,7 +112,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             println!(
-                "Sync is ready. Start or restart Zeron to open the synced workspace; existing local sessions will stay local."
+                "Sync is ready. Start or restart Keron to open the synced workspace; existing local sessions will stay local."
             );
         }
         // terminal_sign_in only returns Ok once signed in; keep an honest fallback.
@@ -214,7 +214,7 @@ fn engine_lock(config: &EngineConfig, verb: &str) -> anyhow::Result<InstanceLock
     InstanceLock::acquire(&config.data_dir).map_err(|err| {
         anyhow::anyhow!(
             "{err}\nCannot {verb} while an engine is running — stop it first \
-             (`zeron daemon stop`, or quit the Zeron app), or use the running UI instead."
+             (`keron daemon stop`, or quit the Keron app), or use the running UI instead."
         )
     })
 }

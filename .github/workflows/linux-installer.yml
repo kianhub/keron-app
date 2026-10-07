@@ -1,25 +1,8 @@
 name: Linux installer
 
+# Keron: off. The relay's /install.sh no longer installs anything (Keron ships
+# no Linux installer), so these installer checks no longer apply.
 on:
-  pull_request:
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
   workflow_dispatch:
 
 permissions:
@@ -31,6 +14,7 @@ concurrency:
 
 jobs:
   desktop-entry:
+    if: false # Keron ships no Linux installer
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

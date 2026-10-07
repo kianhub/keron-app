@@ -101,9 +101,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
-    /// `zeron://voice` (the call's Live Activity) returns to the stage.
+    /// `keron://voice` (the call's Live Activity) returns to the stage.
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
+        guard URLContexts.contains(where: { $0.url.scheme == Endpoints.callbackScheme && $0.url.host == "voice" }),
               app.voice.live, let root = window?.rootViewController
         else { return }
         root.presentVoiceStage(app: app, source: nil)

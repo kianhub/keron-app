@@ -1,4 +1,8 @@
 //! Application storage paths. Provider credentials keep their own locations.
+//!
+//! Keron keeps the app's data in `~/.keron/app` (the rest of `~/.keron`
+//! belongs to Keron's other parts). Engine and harness code that finds its
+//! folders through `ZERON_*` variables follows it via [`export_defaults`].
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -7,8 +11,29 @@ pub fn data_dir() -> PathBuf {
     resolve_data_dir(|name| std::env::var_os(name))
 }
 
+/// Set the `ZERON_*` folder variables the engine and harnesses read (data
+/// dir, managed worktrees, Cursor state) to Keron's data root, unless the
+/// environment already chose them. Children inherit them, so `keron mcp`
+/// and agent processes agree with this one.
+///
+/// Must run before any other thread starts: setting the environment races
+/// with concurrent reads.
+pub fn export_defaults() {
+    let data = data_dir();
+    for (name, dir) in [
+        ("ZERON_DATA_DIR", data.clone()),
+        ("ZERON_WORKTREES_DIR", data.join("worktrees")),
+        ("ZERON_CURSOR_STATE_DIR", data.join("cursor-state")),
+    ] {
+        if std::env::var_os(name).is_none_or(|value| value.is_empty()) {
+            // SAFETY: called first thing in `main`, before any thread exists.
+            unsafe { std::env::set_var(name, dir) };
+        }
+    }
+}
+
 fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
-    if let Some(dir) = env("ZERON_DATA_DIR") {
+    if let Some(dir) = env("ZERON_DATA_DIR").filter(|dir| !dir.is_empty()) {
         return PathBuf::from(dir);
     }
     #[cfg(windows)]
@@ -25,20 +50,12 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
-        local.join("Zeron")
+        local.join("Keron")
     }
     #[cfg(not(windows))]
     {
         let home = PathBuf::from(env("HOME").expect("HOME not set"));
-        let dir = home.join(".zeron");
-        // One-shot 0.2.0 migration: adopt the pre-rename data dir.
-        if !dir.exists() {
-            let old = home.join(".comet-native");
-            if old.exists() && std::fs::rename(&old, &dir).is_ok() {
-                eprintln!("migrated data dir {} -> {}", old.display(), dir.display());
-            }
-        }
-        dir
+        keron_config::data_dir_in(&home)
     }
 }
 
@@ -62,12 +79,25 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn default_is_keron_app_folder() {
+        assert_eq!(
+            resolve(&[("HOME", "/Users/someone")]),
+            PathBuf::from("/Users/someone/.keron/app"),
+        );
+        assert_eq!(
+            resolve(&[("HOME", "/Users/someone"), ("ZERON_DATA_DIR", "")]),
+            PathBuf::from("/Users/someone/.keron/app"),
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn explorer_launch_without_home_uses_local_app_data() {
         assert_eq!(
             resolve(&[("LOCALAPPDATA", r"C:\Users\Test User\AppData\Local")]),
-            PathBuf::from(r"C:\Users\Test User\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\Test User\AppData\Local\Keron"),
         );
     }
 
@@ -76,7 +106,7 @@ mod tests {
     fn windows_profile_fallback_handles_unicode_and_apostrophes() {
         assert_eq!(
             resolve(&[("USERPROFILE", r"C:\Users\O'Brien 日本語")]),
-            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Keron"),
         );
     }
 
@@ -85,7 +115,7 @@ mod tests {
     fn windows_default_does_not_depend_on_shell_home() {
         assert_eq!(
             resolve(&[("HOME", r"D:\msys-home"), ("LOCALAPPDATA", r"C:\Local")]),
-            PathBuf::from(r"C:\Local\Zeron"),
+            PathBuf::from(r"C:\Local\Keron"),
         );
     }
 }

@@ -1,6 +1,8 @@
-//! zeron — headed by default; `zeron headless` runs the engine alone. Both start
-//! local-only without credentials. `zeron login` and `zeron logout` select the
-//! profile used by the next engine start without mutating a live runtime.
+//! keron (Zeron's binary, renamed) — headed by default; `keron headless` runs
+//! the engine alone. Both start local-only without credentials. `keron login`
+//! and `keron logout` select the profile used by the next engine start without
+//! mutating a live runtime. The relay and WorkOS defaults come from keron.toml
+//! (crates/keron-config), not the environment.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -13,14 +15,14 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "keron",
     version,
-    about = "Multi-device controller for coding agents"
+    about = "Keron: your coding agents across your devices"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Open a Zeron conversation URL.
+    /// Open a Keron conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
     #[cfg(windows)]
@@ -44,11 +46,11 @@ enum Command {
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
-    /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
+    /// Serve the Keron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
-    /// Manage `zeron headless` as a background service (launchd / systemd --user).
+    /// Manage `keron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -77,15 +79,22 @@ enum DaemonCommand {
     Status,
 }
 
-/// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
-/// `ZERON_EDGE_URL` overrides (local dev / self-hosting).
-const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
+/// The owner's relay (Cloudflare Worker + Durable Objects), from keron.toml.
+/// `ZERON_EDGE_URL` overrides (local dev).
+const DEFAULT_EDGE_URL: &str = keron_config::RELAY_URL;
 
-/// Production WorkOS AuthKit client id — public knowledge (it appears in every
-/// authorize URL), so baking it in is safe. Overridden by `ZERON_WORKOS_CLIENT_ID`;
-/// set it to the empty string — or set a dev bearer via `ZERON_EDGE_TOKEN` — to
-/// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
+/// The relay's WorkOS AuthKit client id, from keron.toml — public knowledge (it
+/// appears in every authorize URL), so baking it in is safe. Overridden by
+/// `ZERON_WORKOS_CLIENT_ID`; set it to the empty string — or set a dev bearer
+/// via `ZERON_EDGE_TOKEN` — to force dev-mode auth instead.
+const DEFAULT_WORKOS_CLIENT_ID: &str = keron_config::WORKOS_CLIENT_ID;
+
+/// True when the relay settings come from keron.toml rather than the
+/// environment, so placeholders there are what this process would use.
+fn relay_from_keron_toml() -> bool {
+    let set = |name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
+    !set("ZERON_EDGE_URL") && !set("ZERON_EDGE_TOKEN")
+}
 
 fn edge_url_from_env() -> String {
     std::env::var("ZERON_EDGE_URL")
@@ -148,6 +157,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
         return Ok(());
     }
+    // Before any thread exists: the engine's own path lookups and every child
+    // process follow Keron's data root.
+    paths::export_defaults();
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
@@ -214,6 +226,19 @@ fn main() -> anyhow::Result<()> {
                     .init(),
                 None => registry.init(),
             }
+        }
+    }
+
+    // Placeholder relay settings: refuse to sign in, and say so in the log of
+    // every long-running start (a Finder launch has no other output).
+    if relay_from_keron_toml()
+        && let Some(message) = keron_config::unconfigured_message()
+    {
+        if matches!(&cli.command, Some(Command::Login)) {
+            anyhow::bail!("{message}");
+        }
+        if long_running {
+            tracing::error!("{message}");
         }
     }
 
@@ -363,14 +388,14 @@ fn harness_from_env() -> zeron_engine::HarnessId {
     }
 }
 
-/// `zeron sync`: dial the running engine's IPC and print per-room sync state.
+/// `keron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
+            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is keron running?")
         })?;
     let status = client
         .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))

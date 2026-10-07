@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # macOS packaging: build the release binary for the host arch and produce
-#   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
-#   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
-# containing Zeron.app (unsigned unless CODESIGN_IDENTITY is set).
+#   target/package/keron-<version>-macos-<arch>.dmg          (user download)
+#   target/package/keron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
+# containing Keron.app (unsigned unless CODESIGN_IDENTITY is set). The bundle
+# id comes from keron.toml; the release build refuses placeholders there.
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
@@ -17,17 +18,18 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
-APP="$OUT_DIR/Zeron.app"
-DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+APP="$OUT_DIR/Keron.app"
+DMG="$OUT_DIR/keron-$VERSION-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/keron-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
 cargo build --release -p zeron
+BUNDLE_ID="$(cargo run -q -p keron-config --features cli -- get macos-bundle-id)"
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
-sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+install -m 755 "$ROOT/target/release/keron" "$APP/Contents/MacOS/keron"
+sed -e "s/__VERSION__/$VERSION/" -e "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
@@ -38,14 +40,14 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses"/parakeet-v3
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
 # applied ahead of time; dist/zeron.png stays the full-bleed shared artwork).
-ICONSET="$OUT_DIR/zeron.iconset"
+ICONSET="$OUT_DIR/keron.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   retina=$((size * 2))
   sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/keron.icns"
 rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
@@ -73,7 +75,7 @@ if $NOTARIZE; then
   # Staple the bundle BEFORE tarring it: the auto-updater swaps the .app with
   # no dmg involved, so the tarball copy must carry its own ticket to pass
   # Gatekeeper offline.
-  ZIP="$OUT_DIR/zeron-notarize.zip"
+  ZIP="$OUT_DIR/keron-notarize.zip"
   ditto -c -k --keepParent "$APP" "$ZIP"
   notarize "$ZIP"
   rm -f "$ZIP"
@@ -81,7 +83,7 @@ if $NOTARIZE; then
 fi
 
 # The auto-updater artifact.
-tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
+tar -czf "$APP_TARBALL" -C "$OUT_DIR" Keron.app
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
@@ -105,12 +107,12 @@ import dmgbuild
 app = os.environ["APP"]
 dmgbuild.build_dmg(
     filename=os.environ["DMG"],
-    volume_name="Zeron",
+    volume_name="Keron",
     settings={
         "format": "UDZO",
         "files": [app],
         "symlinks": {"Applications": "/Applications"},
-        "icon": os.path.join(app, "Contents/Resources/zeron.icns"),
+        "icon": os.path.join(app, "Contents/Resources/keron.icns"),
         "background": os.environ["BG_TIFF"],
         "show_status_bar": False,
         "show_tab_view": False,
@@ -122,7 +124,7 @@ dmgbuild.build_dmg(
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,
-        "icon_locations": {"Zeron.app": (165, 195), "Applications": (495, 195)},
+        "icon_locations": {"Keron.app": (165, 195), "Applications": (495, 195)},
     },
 )
 PY

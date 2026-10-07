@@ -1,35 +1,9 @@
 name: Windows tests
 
+# Keron: manual runs only. Keron targets macOS and iOS, and the packaging job
+# still expects Zeron's binary name (zeron.exe).
 on:
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
-      - 'dist/windows/**'
-      - 'crates/**'
-      - 'scripts/test-windows-*.ps1'
-      - 'scripts/package-windows.ps1'
-      - '.github/workflows/windows.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'apps/zeron/**'
-      - 'dist/windows/**'
-      - 'crates/**'
-      - 'scripts/test-windows-*.ps1'
-      - 'scripts/package-windows.ps1'
-      - '.github/workflows/windows.yml'
   workflow_dispatch:
-    inputs:
-      native_gui:
-        description: 'Run native GUI/pixel probes (requires a usable desktop and Direct3D)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
