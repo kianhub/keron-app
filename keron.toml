@@ -1,0 +1,39 @@
+# Keron's owner settings: every value that points this build at the owner's
+# own relay, WorkOS app and Apple account. crates/keron-config reads this file
+# at build time, so the desktop app, the daemon and the iPhone app's Rust core
+# all carry the same values (a Finder-launched app sees no environment).
+#
+# Any value containing "change-me" is a placeholder. Debug builds accept
+# placeholders: the app runs local-only and sign-in fails against a
+# never-resolving `.invalid` host. Release builds refuse to compile while any
+# placeholder is left (KERON_ALLOW_PLACEHOLDERS=1 lifts that for CI tests).
+#
+# After editing:
+#   cargo run -p keron-config --features cli -- xcconfig > apps/ios/Keron.xcconfig
+#   cargo run -p keron-config --features cli -- check
+# `check` also compares edge/wrangler.jsonc with these values.
+
+[relay]
+# Hostname of your relay Worker (the custom domain in edge/wrangler.jsonc),
+# without https://. Example: relay.example.com
+host = "relay.change-me.invalid"
+# Client id of the relay's WorkOS AuthKit app (not the public door's app).
+# Public by design: it appears in every sign-in URL.
+workos_client_id = "client_change-me"
+
+[apple]
+# Your Apple Developer team id (10 characters, from developer.apple.com).
+team_id = "CHANGE-ME"
+# A reverse-DNS prefix you own, e.g. com.example. Every id derives from it:
+#   <prefix>.keron              macOS app bundle id and the daemon's launchd label
+#   <prefix>.keron.dev          the macOS dev bundle
+#   <prefix>.keron.ios          iPhone app bundle id and the APNs topic
+bundle_prefix = "invalid.change-me"
+
+[updates]
+# false: the app never checks for new releases. true: it checks
+# https://<relay host>/releases (the relay's RELEASES bucket), which needs
+# a release pipeline that uploads there.
+enabled = false
+# Opened by the app's "release notes" and "download" links.
+releases_page = "https://github.com/kianhub/keron-app/releases"

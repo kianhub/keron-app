@@ -1,0 +1,31 @@
+[package]
+name = "keron-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Keron's owner settings (relay host, WorkOS client id, Apple team, bundle id
+# prefix), read from the app root's keron.toml at build time. No runtime
+# dependencies: every crate that needs an owner value links this one.
+
+[features]
+# The `keron-config` command (xcconfig rendering, cross-file checks).
+cli = ["dep:json5", "dep:serde_json"]
+
+[dependencies]
+json5 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[build-dependencies]
+serde.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+json5.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "keron-config"
+path = "src/bin/keron-config.rs"
+required-features = ["cli"]

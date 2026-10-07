@@ -7,7 +7,7 @@ fn main() {
         // declarations from this Mach-O section, so source builds can request
         // microphone access without requiring a separate packaging step.
         println!(
-            "cargo:rustc-link-arg-bin=zeron=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+            "cargo:rustc-link-arg-bin=keron=-Wl,-sectcreate,__TEXT,__info_plist,{}",
             plist.display()
         );
     }
@@ -16,7 +16,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resource::compile_for(
             "../../dist/windows/zeron.rc",
-            &["zeron"],
+            &["keron"],
             embed_resource::NONE,
         )
         .manifest_required()

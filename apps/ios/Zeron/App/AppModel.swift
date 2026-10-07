@@ -78,7 +78,7 @@ final class AppModel {
         path.pathUpdateHandler = { [weak self] p in
             DispatchQueue.main.async { self?.client?.setNetworkOnline(online: p.status == .satisfied) }
         }
-        path.start(queue: DispatchQueue(label: "sh.zeron.path"))
+        path.start(queue: DispatchQueue(label: "keron.path"))
         let args = ProcessInfo.processInfo.arguments
         #if DEBUG
         // Test hooks (never in release builds): wipe the Keychain, or run
@@ -463,7 +463,7 @@ final class AppModel {
     var accountDetail: String {
         if isDemo { return "Offline demo workspace" }
         let p = AccountProfile.load()
-        return [p.name != nil ? p.email : nil, p.orgName].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Zeron account"
+        return [p.name != nil ? p.email : nil, p.orgName].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Keron account"
     }
 
     /// Logins from before profiles were saved: recover the org name (the
@@ -584,7 +584,7 @@ extension Credentials {
         return false
     }
 
-    private static let service = "sh.zeron.ios"
+    private static let service = Bundle.main.bundleIdentifier ?? "keron.ios"
     private static let account = "credentials"
 
     static func stored() -> Credentials? {
@@ -670,7 +670,7 @@ struct AccountProfile: Codable {
     var email: String?
     var orgName: String?
 
-    private static let service = "sh.zeron.ios"
+    private static let service = Bundle.main.bundleIdentifier ?? "keron.ios"
     private static let account = "profile"
 
     static func load() -> AccountProfile {

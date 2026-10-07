@@ -1,21 +1,16 @@
 import AuthenticationServices
 import UIKit
 
+/// The owner's relay, WorkOS app and URL scheme. They come from the Rust core,
+/// which bakes them in from keron.toml (crates/keron-config), so the phone and
+/// the desktop can't disagree. A release archive refuses to build while
+/// keron.toml still has placeholders.
 enum Endpoints {
-    static let edgeURL = URL(string: "https://edge.zeron.sh")!
-    static let workosClientId = "client_01KWD0EAKZKD50YCQJNYSRE4BY"
-    static let callbackScheme = "zeron"
+    static let edgeURL = URL(string: authProductionEdgeUrl())!
+    static let callbackScheme = authCallbackScheme()
 
     static func authorizeURL(state: String) -> URL {
-        var c = URLComponents(string: "https://api.workos.com/user_management/authorize")!
-        c.queryItems = [
-            URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "client_id", value: workosClientId),
-            URLQueryItem(name: "redirect_uri", value: "\(callbackScheme)://callback"),
-            URLQueryItem(name: "provider", value: "authkit"),
-            URLQueryItem(name: "state", value: state),
-        ]
-        return c.url!
+        URL(string: workosAuthorizeUrl(state: state))!
     }
 }
 
@@ -39,7 +34,7 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
         let mark = UIImageView(image: UIImage(systemName: "sparkle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .light)))
         mark.tintColor = Palette.text
         let title = UILabel()
-        title.text = "Zeron"
+        title.text = "Keron"
         title.font = Fonts.ui(.sansSemibold, 34)
         title.textColor = Palette.text
         let tagline = UILabel()

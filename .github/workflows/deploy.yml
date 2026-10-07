@@ -1,16 +1,15 @@
 name: deploy
 
-# Autodeploy the edge Worker + Durable Objects (session/device rooms, R2,
-# WorkOS auth routes) on every push to main that touches edge/. Skips
-# gracefully until the CLOUDFLARE_API_TOKEN secret is configured (until then:
-# `npm -C edge run deploy` from a wrangler-authenticated machine).
+# Keron: deploys the relay (edge/) to the owner's Cloudflare account, and only
+# when run by hand. Usually the owner deploys from a terminal instead
+# (edge/RELAY.md). Skips the deploy step until the CLOUDFLARE_API_TOKEN secret
+# is configured on the fork.
 #
-# The token needs: Workers Scripts (edit), Workers Routes (edit) on zeron.sh,
-# Workers R2 Storage (edit). Account id is pinned in edge/wrangler.jsonc.
+# The token needs: Workers Scripts (edit), Workers Routes (edit) on the
+# relay's zone, Workers R2 Storage (edit). Account id is in edge/wrangler.jsonc.
+# Zeron's landing and www-redirect sites are not Keron's and never deploy.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -66,8 +65,9 @@ jobs:
         working-directory: edge
         run: npx wrangler deploy
 
-  # Static landing page (zeron.sh) — assets-only worker, no build step.
+  # Zeron's static landing page: not part of Keron, never deployed from the fork.
   landing:
+    if: false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -102,8 +102,9 @@ jobs:
         working-directory: apps/landing
         run: npx wrangler@4 deploy
 
-  # www.zeron.sh → zeron.sh 301 (see apps/www-redirect/wrangler.jsonc).
+  # Zeron's www redirect: not part of Keron, never deployed from the fork.
   www-redirect:
+    if: false
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

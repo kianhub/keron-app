@@ -1,6 +1,6 @@
-//! `zeron update` — check for and apply a newer release, natively (the same
-//! flow `edge/src/install.sh` performs: download → verify → symlink swap →
-//! service restart). macOS app bundles swap the bundle instead; source builds
+//! `keron update` — check for and apply a newer release, natively (download →
+//! verify → symlink swap → service restart). Off unless keron.toml turns on
+//! `updates.enabled`. macOS app bundles swap the bundle instead; source builds
 //! are report-only.
 
 use anyhow::bail;
@@ -13,12 +13,12 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
     let current = current_version();
     if !version_newer(&manifest.version, current) {
         println!(
-            "zeron {current} is up to date (latest: {}).",
+            "keron {current} is up to date (latest: {}).",
             manifest.version
         );
         return Ok(());
     }
-    println!("zeron {current} → {} available", manifest.version);
+    println!("keron {current} → {} available", manifest.version);
     if check_only {
         std::process::exit(1);
     }
@@ -56,7 +56,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             let data_dir = super::paths::data_dir();
             let staged = zeron_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
             zeron_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Zeron to finish.", bundle.display());
+            println!("updated {} — relaunch Keron to finish.", bundle.display());
             Ok(())
         }
         #[cfg(windows)]
@@ -64,7 +64,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             let staged = zeron_update::windows::stage(edge_url, &manifest, &directory).await?;
             zeron_update::windows::apply(&staged, &directory, false)?;
             println!(
-                "updated to {} — relaunch Zeron to finish.",
+                "updated to {} — relaunch Keron to finish.",
                 manifest.version
             );
             Ok(())
@@ -72,9 +72,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: curl -fsSL https://zeron.sh/install.sh | sh, or run install.sh from the release tarball\n\
-                 macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: install with the Zeron setup .exe from {}, or rebuild from source.",
+                 Rebuild from source (scripts/package-macos.sh on macOS), or download a build from {}.",
                 zeron_update::LATEST_RELEASE_PAGE
             )
         }

@@ -1,5 +1,10 @@
 # Packaging
 
+Keron: only the macOS path is maintained. `scripts/package-macos.sh` builds
+`Keron.app` (binary `keron`, bundle id `<bundle_prefix>.keron` from the app
+root's `keron.toml`); the release build refuses placeholder values there. The
+Linux and Windows sections below are Zeron's and still use Zeron's names.
+
 ## Linux (implemented)
 
 ```sh

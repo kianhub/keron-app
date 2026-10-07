@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The crate keeps Zeron's name (easier rebases); the binary is Keron's.
 [[bin]]
-name = "zeron"
+name = "keron"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,6 +16,7 @@ zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 zeron-mcp.workspace = true
+keron-config = { path = "../../crates/keron-config" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

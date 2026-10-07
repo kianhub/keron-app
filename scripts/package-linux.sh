@@ -5,6 +5,9 @@
 # that installs them into the self-updating ~/.zeron/app layout and links
 # ~/.local (XDG) paths to it.
 #
+# Keron: Linux packages are not maintained (Keron runs on macOS and iOS), and
+# this still uses Zeron's names and layout. The workflows that ran it are off.
+#
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
 
@@ -41,8 +44,7 @@ cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 # Install Zeron for this user (no root needed), in the layout the in-app
-# updater manages: ~/.zeron/app/<version> behind a `current` symlink — the
-# same layout `curl -fsSL https://zeron.sh/install.sh | sh` uses — with
+# updater manages: ~/.zeron/app/<version> behind a `current` symlink — with
 # ~/.local/bin/zeron and the desktop entry pointing through it.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

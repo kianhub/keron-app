@@ -17,6 +17,7 @@ zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-sync.workspace = true
 zeron-rpc.workspace = true
+keron-config = { path = "../keron-config" }
 loro.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
