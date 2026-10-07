@@ -335,9 +335,15 @@ pub fn checks_enabled() -> bool {
     feed_configured() || release_override().is_some()
 }
 
-/// keron.toml's switch. Unit tests serve their own feeds, so they count as on.
+/// keron.toml's switch. A unit test can flip it for its own thread (each
+/// test runs on its own thread, and `#[tokio::test]` keeps spawned tasks on
+/// it), so tests cover both the on and off paths without leaking.
 fn feed_configured() -> bool {
-    keron_config::RELEASES_URL.is_some() || cfg!(test)
+    #[cfg(test)]
+    if let Some(on) = tests::FEED.with(std::cell::Cell::get) {
+        return on;
+    }
+    keron_config::RELEASES_URL.is_some()
 }
 
 fn release_override() -> Option<String> {
@@ -1460,6 +1466,18 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// This test thread's answer to `feed_configured()`; `None` follows
+        /// keron.toml.
+        pub(super) static FEED: std::cell::Cell<Option<bool>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Serve releases from the test's own fake feed, whatever keron.toml says.
+    fn feed_on() {
+        FEED.with(|feed| feed.set(Some(true)));
+    }
+
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
         use std::time::Duration;
@@ -1985,14 +2003,29 @@ mod tests {
 
     /// Serves `body` for every request until aborted.
     async fn serve_forever(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let (base, _, server) = serve_counting(body).await;
+        (base, server)
+    }
+
+    /// Like `serve_forever`, also counting the connections it accepts.
+    async fn serve_counting(
+        body: Vec<u8>,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = requests.clone();
         let server = tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
+                counted.fetch_add(1, Ordering::SeqCst);
                 let body = body.clone();
                 tokio::spawn(async move {
                     let mut request = [0; 4096];
@@ -2006,11 +2039,41 @@ mod tests {
                 });
             }
         });
-        (base, server)
+        (base, requests, server)
+    }
+
+    #[tokio::test]
+    async fn check_loop_sends_nothing_while_checks_are_off() {
+        let (base, requests, server) =
+            serve_counting(br#"{"version":"999.0.0","files":{}}"#.to_vec()).await;
+
+        FEED.with(|feed| feed.set(Some(false)));
+        let updater = Updater::spawn_desktop(base.clone());
+        updater.check_now();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(updater.watch().borrow().latest_version, None);
+        updater.shutdown().await;
+
+        // The same forced check reaches the feed once it's on, so the zero
+        // above isn't the loop sleeping through the wake.
+        feed_on();
+        let updater = Updater::spawn_desktop(base);
+        updater.check_now();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while requests.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the check loop requested the feed");
+        updater.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]
     async fn desktop_checker_reports_a_newer_release_on_demand() {
+        feed_on();
         let (base, server) = serve_forever(br#"{"version":"999.0.0","files":{}}"#.to_vec()).await;
         let updater = Updater::spawn_desktop(base);
         let status = updater.check().await.unwrap();
@@ -2064,6 +2127,7 @@ mod tests {
             .into(),
         };
 
+        feed_on();
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");
         let (base, server) = serve_forever(wrong.clone()).await;
         let error = stage_headless(&base, &manifest(&wrong), &app_root)

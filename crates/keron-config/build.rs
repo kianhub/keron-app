@@ -77,12 +77,18 @@ fn main() {
         fail(&path, "relay.workos_client_id must start with client_");
     }
     let team = file.apple.team_id.trim().to_string();
-    if team.is_empty()
-        || !team
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    // The placeholder is let through here and caught by the release check
+    // below; a real id is exactly 10 uppercase letters or digits.
+    if !is_placeholder(&team)
+        && (team.len() != 10
+            || !team
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
     {
-        fail(&path, "apple.team_id must be your 10-character team id");
+        fail(
+            &path,
+            "apple.team_id must be your 10-character team id (uppercase letters and digits)",
+        );
     }
     let prefix = file.apple.bundle_prefix.trim().to_string();
     let segments: Vec<&str> = prefix.split('.').collect();

@@ -19,17 +19,32 @@ pub fn data_dir() -> PathBuf {
 /// Must run before any other thread starts: setting the environment races
 /// with concurrent reads.
 pub fn export_defaults() {
-    let data = data_dir();
-    for (name, dir) in [
-        ("ZERON_DATA_DIR", data.clone()),
-        ("ZERON_WORKTREES_DIR", data.join("worktrees")),
-        ("ZERON_CURSOR_STATE_DIR", data.join("cursor-state")),
-    ] {
+    for (name, dir) in folder_defaults(|name| std::env::var_os(name)) {
         if std::env::var_os(name).is_none_or(|value| value.is_empty()) {
             // SAFETY: called first thing in `main`, before any thread exists.
             unsafe { std::env::set_var(name, dir) };
         }
     }
+}
+
+/// Worktrees and Cursor state hang off the home folder's Keron root, not a
+/// `ZERON_DATA_DIR` override: worktrees are user-facing checkouts, and a dev
+/// or test data dir must not swallow them (upstream kept them in `~/.zeron`
+/// for the same reason). Without a home folder the engine's own fallback
+/// applies.
+fn folder_defaults(
+    mut env: impl FnMut(&str) -> Option<OsString>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut defaults = vec![("ZERON_DATA_DIR", resolve_data_dir(&mut env))];
+    let home = env("HOME")
+        .or_else(|| if cfg!(windows) { env("USERPROFILE") } else { None })
+        .filter(|home| !home.is_empty());
+    if let Some(home) = home {
+        let root = keron_config::data_dir_in(std::path::Path::new(&home));
+        defaults.push(("ZERON_WORKTREES_DIR", root.join("worktrees")));
+        defaults.push(("ZERON_CURSOR_STATE_DIR", root.join("cursor-state")));
+    }
+    defaults
 }
 
 fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
@@ -89,6 +104,31 @@ mod tests {
         assert_eq!(
             resolve(&[("HOME", "/Users/someone"), ("ZERON_DATA_DIR", "")]),
             PathBuf::from("/Users/someone/.keron/app"),
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn worktrees_stay_in_the_home_folder_when_the_data_dir_moves() {
+        let vars = [("HOME", "/Users/someone"), ("ZERON_DATA_DIR", "/tmp/dev-data")];
+        let defaults = folder_defaults(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.into())
+        });
+        assert_eq!(
+            defaults,
+            [
+                ("ZERON_DATA_DIR", PathBuf::from("/tmp/dev-data")),
+                (
+                    "ZERON_WORKTREES_DIR",
+                    PathBuf::from("/Users/someone/.keron/app/worktrees")
+                ),
+                (
+                    "ZERON_CURSOR_STATE_DIR",
+                    PathBuf::from("/Users/someone/.keron/app/cursor-state")
+                ),
+            ]
         );
     }
 
