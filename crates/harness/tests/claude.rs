@@ -279,6 +279,88 @@ async fn eager_done_forwards_wake_turn_as_second_done() {
     }
 }
 
+/// Controls whose `request_input` records every question and answers
+/// `answer_label`.
+fn recording_controls(
+    answer_label: &'static str,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let seen = asked.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec![answer_label.into()],
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+    };
+    (controls, asked, steer_tx)
+}
+
+fn final_result(events: &[AgentEvent]) -> Option<String> {
+    events.iter().rev().find_map(|e| match e {
+        AgentEvent::Done { result, .. } => result.clone(),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn tool_calls_ask_the_user_unless_the_session_chose_full_access() {
+    // A sandboxed session asks, even when a client sets auto_approve.
+    let mut req = request("scenario:tool-approval");
+    req.sandbox = SandboxLevel::WorkspaceWrite;
+    req.auto_approve = true;
+
+    let (controls, asked, _steer) = recording_controls("Yes");
+    let events = run_to_end(&harness(), req.clone(), controls).await;
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("allowed bypass=no"),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].header, "Approve command");
+    assert!(asked[0].question.contains("rm -rf build"));
+    assert_eq!(asked[0].options, vec!["Yes".to_string(), "No".to_string()]);
+
+    let (controls, _asked, _steer) = recording_controls("No");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("denied bypass=no"),
+        "{events:?}"
+    );
+
+    // Full access: the CLI runs with the bypass flag and nothing is asked.
+    let mut req = request("scenario:tool-approval");
+    req.sandbox = SandboxLevel::DangerFullAccess;
+    let (controls, asked, _steer) = recording_controls("No");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("allowed bypass=yes"),
+        "{events:?}"
+    );
+    assert!(asked.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn ask_user_question_round_trips_through_the_control_channel() {
     // The questions must reach the ENGINE's input bridge (`request_input`) —
