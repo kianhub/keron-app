@@ -826,6 +826,48 @@ impl WorkspaceHost {
         }
     }
 
+    /// The chat row's config as the host enforces it (`run_access::enforced`):
+    /// full access only when the session chose it after its row was minted.
+    pub fn session_config(&self, chat_id: &str) -> Option<ChatConfig> {
+        self.session_access(chat_id).map(|(config, _)| config)
+    }
+
+    /// Rewrite a row that was minted with full access (a client's
+    /// createSession, a claimed, imported or re-homed row) to start asking,
+    /// so every device shows what the host enforces. Full access the session
+    /// chose afterwards is left alone.
+    pub fn settle_session_access(&self, chat_id: &str) {
+        if let Some((config, true)) = self.session_access(chat_id)
+            && let Err(err) = self.set_chat_config(chat_id, &config)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "starting a minted full-access row asking failed");
+        }
+    }
+
+    /// The enforced config, and whether it narrows the row's.
+    fn session_access(&self, chat_id: &str) -> Option<(ChatConfig, bool)> {
+        let read = self.read(|doc| {
+            doc.chat(chat_id).map(|chat| {
+                (
+                    chat.and_then(|c| c.config),
+                    doc.chat_config_set_after_mint(chat_id),
+                )
+            })
+        });
+        let (config, chosen) = match read {
+            Ok((Some(config), chosen)) => (config, chosen),
+            Ok((None, _)) => return None,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "registry chat read failed");
+                return None;
+            }
+        };
+        let row = config.sandbox;
+        let enforced = crate::run_access::enforced(config, chosen);
+        let narrowed = enforced.sandbox != row;
+        Some((enforced, narrowed))
+    }
+
     // ── host-side row writes ────────────────────────────────────────────────
 
     /// Sidebar freshness on message persist: preview = first 120 chars of the last

@@ -45,6 +45,11 @@ Single binary `zeron`:
   `ZERON_IPC_SECRET_FILE`) sends it in an `AuthenticateIpc` call as its first frame. Any other
   first frame, or the wrong secret, gets an error and the socket is closed
   (`zeron_rpc::ipc_auth`). Handshakes carrying a browser `Origin` are refused before that.
+  Clients refuse an engine that doesn't know `AuthenticateIpc` (no Keron engine ever ran
+  without it): the viewport embeds its own engine instead, and `keron mcp`/`keron sync`
+  fail with that reason. Keron's defaults are its own, IPC on 27754 and the sign-in
+  callback on 27741 (`keron_config::IPC_PORT`, `SIGN_IN_CALLBACK_PORT`), so a stock Zeron
+  on 27654/27641 never meets it; `ZERON_IPC_PORT` and `ZERON_CALLBACK_PORT` override them.
 - Known limitation (Keron): the secret keeps out other users and browsers, not the agents the
   engine runs. Codex's default sandbox is `workspace-write` with network access on
   (`crates/harness/src/codex/catalog.rs`), and that sandbox can read the whole disk, so an agent
@@ -52,6 +57,12 @@ Single binary `zeron`:
   the engine like the UI does — for example switch its own session to full access, or start
   other chats. Nothing changes this today. The owner decides between turning network access off
   in the default sandbox and moving the secret into a Keychain item the sandbox can't read.
+  Separately, the injected Keron MCP server lets an agent in an "Ask first" session create a
+  chat on a harness that never asks (Cursor, OpenCode, Pi and the ACP agents run without
+  approvals; only Claude Code and Codex ask). That chat's agent then acts without approvals,
+  gated only by the user approving that one `create_chat` call. New chats never start with
+  full access (`create_chat` refuses `danger-full-access`, and the host starts every new
+  row asking), but that doesn't bind a harness that never asks.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles

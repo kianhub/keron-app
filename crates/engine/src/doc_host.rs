@@ -5244,6 +5244,10 @@ impl DocHost {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
+                // Adopting the row: one minted with full access starts asking.
+                if let Some(ws) = self.workspace() {
+                    ws.settle_session_access(chat_id);
+                }
                 if sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
                     self.hold_until_turn_end(
                         handle,

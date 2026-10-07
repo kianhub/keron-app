@@ -19,14 +19,14 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   // Cloudflare dashboard → Workers & Pages → Account ID.
-  "account_id": "change-me",
+  "account_id": "d22f95059b79fcde04a54c82c9a95c4b",
   // Only the custom domain below serves the relay; no *.workers.dev URL.
   "workers_dev": false,
   // The relay's hostname on a zone in the same Cloudflare account. It must
   // equal keron.toml's relay.host. Cloudflare creates the DNS record and the
   // certificate on deploy.
   "routes": [
-    { "pattern": "relay.change-me.invalid", "custom_domain": true }
+    { "pattern": "relay.kianpasani.com", "custom_domain": true }
   ],
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
@@ -84,8 +84,8 @@
     "AUTH_MODE": "workos",
     // Push notifications: your Apple team id (keron.toml apple.team_id) and
     // the iPhone app's bundle id, <bundle_prefix>.keron.ios.
-    "APNS_TEAM_ID": "CHANGE-ME",
-    "APNS_TOPIC": "invalid.change-me.keron.ios"
+    "APNS_TEAM_ID": "9ZTE89T3KC",
+    "APNS_TOPIC": "com.kianpasani.keron.ios"
     // Secrets, set with `npx wrangler secret put <NAME>` (RELAY.md):
     //   WORKOS_API_KEY  the AuthKit app's API key; unset ⇒ /auth/* answers 501
     //   APNS_KEY_P8     contents of the AuthKey_XXXXXXXXXX.p8 file

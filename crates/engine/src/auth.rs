@@ -9,11 +9,14 @@
 //! - **Dev** (no WorkOS client id configured, or the edge reports `auth: "dev"`): always
 //!   signed in; the bearer IS the configured user id (current M2/M3 behavior).
 //! - **WorkOS**: authorization-code flow. Headed devices use a loopback callback server
-//!   on an ephemeral port; headless devices use the paste-code flow (the redirect is the
-//!   edge's hosted `/auth/cli/callback` page, which shows `state.code` to paste back via
-//!   stdin or the `CompleteSignIn` RPC). The refresh token is persisted 0600 in the data
-//!   dir; access tokens are cached with dual-clock expiry (monotonic AND wall, whichever
-//!   aged more — see [`AccessEntry`]) and refreshed on demand plus by a background loop,
+//!   on [`keron_config::SIGN_IN_CALLBACK_PORT`] (`ZERON_CALLBACK_PORT` overrides it; see
+//!   `Engine::build_auth`), so the relay's WorkOS app lists
+//!   `http://127.0.0.1:27741/callback` as a redirect URI; headless devices use the
+//!   paste-code flow (the redirect is the edge's hosted `/auth/cli/callback` page, which
+//!   shows `state.code` to paste back via stdin or the `CompleteSignIn` RPC). The
+//!   refresh token is persisted 0600 in the data dir; access tokens are cached with
+//!   dual-clock expiry (monotonic AND wall, whichever aged more — see [`AccessEntry`])
+//!   and refreshed on demand plus by a background loop,
 //!   so the device-room relay and room clients always dial with a live `?token=`, even
 //!   on the first redial after a laptop wakes from sleep. Org onboarding: an org-less session is `NeedsOrganization`; `SelectOrg`
 //!   runs an org-scoped refresh and the state follows the returned token's `org_id`.
@@ -164,7 +167,8 @@ pub struct AuthConfig {
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
-    /// Loopback callback port; `None` = ephemeral.
+    /// Loopback callback port; `None` = ephemeral (tests). The app sets
+    /// [`keron_config::SIGN_IN_CALLBACK_PORT`].
     pub callback_port: Option<u16>,
 }
 
@@ -501,7 +505,9 @@ impl Auth {
     // -- sign-in flows ------------------------------------------------------
 
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
-    /// loopback callback server (bound lazily on an ephemeral port).
+    /// loopback callback server, `http://127.0.0.1:{port}/callback`, bound lazily on
+    /// [`AuthConfig::callback_port`] ([`keron_config::SIGN_IN_CALLBACK_PORT`] in the
+    /// app; the redirect URI must be registered with WorkOS for that port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
         if self.inner.workos.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)

@@ -1,5 +1,5 @@
 // Generated from keron.toml by
 //   cargo run -p keron-config --features cli -- xcconfig > apps/ios/Keron.xcconfig
 // Edit keron.toml, not this file.
-KERON_APPLE_TEAM_ID = CHANGE-ME
-KERON_IOS_BUNDLE_ID = invalid.change-me.keron.ios
+KERON_APPLE_TEAM_ID = 9ZTE89T3KC
+KERON_IOS_BUNDLE_ID = com.kianpasani.keron.ios

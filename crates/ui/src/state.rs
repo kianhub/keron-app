@@ -243,24 +243,12 @@ async fn wait_for_deferred_engine(
     }
 }
 
-/// Authenticate a daemon connection. A daemon from before IPC
-/// authentication doesn't know the call and serves every connection, so it
-/// is accepted until it restarts into a current build.
-async fn authenticate_to_daemon(client: &RpcClient, secret: &IpcSecret) -> Result<(), RpcError> {
-    match ipc_auth::authenticate(client, secret).await {
-        Err(err) if ipc_auth::predates_authentication(&err) => {
-            tracing::warn!("engine daemon predates IPC authentication; attaching until it restarts");
-            Ok(())
-        }
-        other => other,
-    }
-}
-
 /// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
-    /// Every connection to the daemon authenticates with this.
+    /// Every connection to the daemon authenticates with this (`None` only
+    /// for the in-memory test client).
     secret: Option<IpcSecret>,
     lifecycle_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -270,7 +258,7 @@ impl EngineBackend for RemoteEngine {
     async fn media_client(&self) -> Result<RpcClient, RpcError> {
         let client = connect_ws(&self.url).await?;
         if let Some(secret) = &self.secret {
-            authenticate_to_daemon(&client, secret).await?;
+            ipc_auth::authenticate(&client, secret).await?;
         }
         Ok(client)
     }
@@ -490,12 +478,10 @@ impl EngineHandle {
 
     /// Probe the IPC port and, if a live engine answers, attach as a remote
     /// viewport, authenticating with the secret in `data_dir`. `None` means
-    /// embed: nothing listening, a non-engine listener, a listener without an
-    /// identity, or one that refused this install's secret. A daemon from
-    /// before IPC authentication (no secret file yet, `AuthenticateIpc`
-    /// unknown) is attached as it is: it holds the data dir, so embedding
-    /// beside it would fail, and it serves every client anyway until it
-    /// restarts into this build.
+    /// embed: nothing listening, no secret in `data_dir` (a Keron engine
+    /// writes it before it serves), a non-engine listener, a listener
+    /// without an identity, one that refused this install's secret, or one
+    /// that doesn't authenticate at all (not a Keron engine).
     async fn attach_to_daemon(ipc_port: u16, data_dir: &std::path::Path) -> Option<EngineHandle> {
         let url = format!("ws://127.0.0.1:{ipc_port}");
         let probe = tokio::time::timeout(
@@ -508,24 +494,18 @@ impl EngineHandle {
         }
         tracing::info!(%url, "engine daemon detected; connecting");
         let secret = match IpcSecret::load(data_dir) {
-            Ok(secret) => Some(secret),
+            Ok(secret) => secret,
             Err(err) => {
-                // A current engine always writes its secret before serving,
-                // so only an older daemon can be listening without one.
-                tracing::warn!(%url, error = %err, "no IPC secret for this data dir; trying an older daemon");
-                None
+                // An engine always writes its secret before serving, so the
+                // listener isn't the engine of this data dir.
+                tracing::warn!(%url, error = %err, "no IPC secret for this data dir; embedding instead");
+                return None;
             }
         };
         let connected = match connect_ws(&url).await {
-            Ok(client) => match &secret {
-                Some(secret) => authenticate_to_daemon(&client, secret)
-                    .await
-                    .map(|()| client)
-                    .inspect_err(|err| {
-                        tracing::warn!(%url, error = %err, "engine refused this install's IPC secret");
-                    }),
-                None => Ok(client),
-            },
+            Ok(client) => ipc_auth::authenticate(&client, &secret)
+                .await
+                .map(|()| client),
             Err(err) => Err(err),
         };
         match connected {
@@ -556,7 +536,7 @@ impl EngineHandle {
                         inner: Arc::new(RemoteEngine {
                             client,
                             url,
-                            secret,
+                            secret: Some(secret),
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                         }),
                         engine_info,
@@ -572,11 +552,12 @@ impl EngineHandle {
                     None
                 }
             },
-            // Something is on the port but it is not an engine (or it is
-            // wedged). Fall through and embed: a stranger holding 27654
-            // should cost other viewports, not this window.
+            // Something is on the port but it is not this install's engine
+            // (another secret, no authentication at all, not an engine, or
+            // wedged). Fall through and embed: a stranger holding the IPC
+            // port should cost other viewports, not this window.
             Err(err) => {
-                tracing::warn!(%url, error = %err, "not an engine; embedding instead");
+                tracing::warn!(%url, error = %err, "not attaching to the listener on the IPC port; embedding instead");
                 None
             }
         }

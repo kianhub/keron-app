@@ -158,23 +158,30 @@ fn private(_: &std::fs::Metadata) -> bool {
 }
 
 /// Authenticate a freshly dialed connection. Must be the first call on it.
+///
+/// An engine that doesn't know [`AUTHENTICATE`] serves anyone who dials it,
+/// so it is refused like a wrong secret: no Keron engine ever ran without
+/// authentication, so it is someone else's (a stock Zeron, say).
 pub async fn authenticate(client: &RpcClient, secret: &IpcSecret) -> Result<(), RpcError> {
     let call = client.call(
         AUTHENTICATE,
         serde_json::json!({ "secret": secret.expose() }),
     );
-    tokio::time::timeout(AUTH_DEADLINE, call)
+    match tokio::time::timeout(AUTH_DEADLINE, call)
         .await
         .map_err(|_| RpcError::Transport("timed out authenticating to the engine".into()))?
-        .map(drop)
+    {
+        Ok(_) => Ok(()),
+        Err(RpcError::UnknownMethod(method)) if method == AUTHENTICATE => {
+            Err(RpcError::Failed(UNAUTHENTICATED_ENGINE.into()))
+        }
+        Err(err) => Err(err),
+    }
 }
 
-/// Whether `err` is an engine from before IPC authentication declining the
-/// [`AUTHENTICATE`] call. Such an engine serves every connection anyway, so
-/// a client may keep talking to it until it restarts into a current build.
-pub fn predates_authentication(err: &RpcError) -> bool {
-    matches!(err, RpcError::UnknownMethod(method) if method == AUTHENTICATE)
-}
+/// Why a client refuses an engine that doesn't authenticate its clients.
+pub const UNAUTHENTICATED_ENGINE: &str = "the engine on this port doesn't authenticate its \
+     clients, so it isn't a Keron engine (a stock Zeron uses the same protocol); refusing it";
 
 /// Dial the engine on `port` and authenticate with `secret`.
 pub async fn connect(port: u16, secret: &IpcSecret) -> Result<RpcClient, RpcError> {
@@ -407,17 +414,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_an_unknown_authenticate_call_marks_an_older_engine() {
-        assert!(predates_authentication(&RpcError::UnknownMethod(
-            AUTHENTICATE.into()
-        )));
-        assert!(!predates_authentication(&RpcError::UnknownMethod(
-            "ListChats".into()
-        )));
-        assert!(!predates_authentication(&RpcError::Failed(
-            "unauthorized: wrong secret".into()
-        )));
-        assert!(!predates_authentication(&RpcError::Closed));
+    /// An engine that serves anyone: no authentication, and an
+    /// [`AUTHENTICATE`] call is just an unknown method to it.
+    async fn serve_without_authentication(listener: TcpListener) {
+        struct Open;
+        #[async_trait::async_trait]
+        impl RpcService for Open {
+            async fn handle(
+                &self,
+                method: &str,
+                _: serde_json::Value,
+            ) -> Result<crate::RpcReply, RpcError> {
+                Err(RpcError::UnknownMethod(method.into()))
+            }
+        }
+        while let Ok((stream, _)) = listener.accept().await {
+            if let Some(ws) = crate::server::accept_local_ws(stream).await {
+                let (sink, stream) = ws.split();
+                tokio::spawn(crate::server::serve_ws_halves(sink, stream, Arc::new(Open)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_does_not_authenticate_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_without_authentication(listener));
+        let dir = tempfile::tempdir().unwrap();
+        let secret = IpcSecret::load_or_create(dir.path()).unwrap();
+        let Err(err) = connect(port, &secret).await else {
+            panic!("attached to an engine that doesn't authenticate");
+        };
+        assert_eq!(err.to_string(), UNAUTHENTICATED_ENGINE);
     }
 }

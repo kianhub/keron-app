@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::{Chat, ChatConfig, SandboxLevel, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -754,6 +754,14 @@ impl Client {
                 (device_id.clone(), None, "~".to_owned())
             }
         };
+        // Sessions start asking (the host enforces it too): full access is
+        // chosen on the session afterwards, never at creation.
+        let config = new.config.map(|mut config| {
+            if config.sandbox == SandboxLevel::DangerFullAccess {
+                config.sandbox = SandboxLevel::WorkspaceWrite;
+            }
+            config
+        });
         let now = Utc::now();
         let chat = Chat {
             id: crate::new_id(),
@@ -764,7 +772,7 @@ impl Client {
             branch: new.branch,
             checkout_id: None,
             source_context: None,
-            config: new.config,
+            config,
             last_message_preview: None,
             last_message_at: None,
             created_at: now,

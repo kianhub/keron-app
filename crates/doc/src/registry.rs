@@ -976,6 +976,20 @@ impl RegistryDoc {
             .map(Chat::from))
     }
 
+    /// Whether the chat row's `config` was written after the row was minted:
+    /// by a later `setChatConfig` (the session's own controls), not by the
+    /// create, claim, import or re-home upsert that wrote the whole row at
+    /// once. Compares the field clocks of `config` and `id` (every row write
+    /// that mints or re-mints a chat writes `id`).
+    pub fn chat_config_set_after_mint(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id).is_some_and(|row| {
+            match (row.clocks.get("config"), row.clocks.get("id")) {
+                (Some(config), Some(minted)) => config > minted,
+                _ => false,
+            }
+        })
+    }
+
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
         let mut chats: Vec<Chat> = self
             .read_kind::<crate::workspace::RawChat>(KIND_CHATS)

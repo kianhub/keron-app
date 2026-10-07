@@ -114,34 +114,25 @@ cargo test -p zeron-sync --lib socket:: -- --nocapture
 cargo clippy -p zeron-sync -p zeron-rpc --all-targets --features zeron-sync/mock-server
 cargo build -p zeron-sync --example transport_live
 
-# Requires authenticated Wrangler and an account with Workers/R2 enabled.
-cd edge
-npm ci
-node_modules/.bin/wrangler r2 bucket create zeron-transport-385-20260915
-node_modules/.bin/wrangler deploy --config wrangler.transport-test.jsonc
-cd ..
-
-# Use the isolated workers.dev URL printed by deployment.
+# Live matrix, against an HTTPS origin (scripts/transport-proxy.py refuses
+# anything else):
 python3 scripts/run-transport-matrix.py \
   --binary target/debug/examples/transport_live \
-  --origin https://zeron-transport-385-20260915.YOUR-SUBDOMAIN.workers.dev \
+  --origin https://YOUR-TEST-WORKER \
   --profile stream --output /tmp/transport-stream.json
 # Repeat with: very-slow, outage, http, catchup, upload.
 ```
+
+Keron note: Zeron ran the live matrix against a throwaway Worker deployed from
+`edge/wrangler.transport-test.jsonc` with `AUTH_MODE=dev`. Keron removed that
+config: a dev-auth Worker checks no tokens, so anyone who finds its URL can use
+it. Keron hasn't rerun the live matrix; the measurements above are Zeron's.
 
 For the baseline, create a detached worktree at `67c960f4`, copy only
 `crates/sync/examples/transport_live.rs` into its examples directory, and build
 that same example there. Run the same proxy and streaming/catchup profiles with
 its binary. The matrix driver owns and stops each proxy. Large transfers allow
 up to 360 seconds for completion; the driver has a 420-second process limit.
-
-After testing, delete only the isolated resources:
-
-```sh
-cd edge
-node_modules/.bin/wrangler delete --config wrangler.transport-test.jsonc
-node_modules/.bin/wrangler r2 bucket delete zeron-transport-385-20260915
-```
 
 ## Scope and remaining limits
 

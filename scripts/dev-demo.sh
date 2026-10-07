@@ -5,17 +5,18 @@
 #   scripts/dev-demo.sh            # build, seed demo data, open the app
 #   scripts/dev-demo.sh --slow     # pace mock streams (~10s) to watch streaming
 #
-# Everything lives under /tmp/zeron-demo-*; re-runs reuse it. Ctrl-C cleans up.
+# Everything lives under /tmp/zeron-demo-daemon; re-runs reuse it. Ctrl-C
+# cleans up. The viewport shares the daemon's data dir: that is where the
+# engine's ipc-secret lives, and every client must present it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DAEMON_DIR=/tmp/zeron-demo-daemon
-UI_DIR=/tmp/zeron-demo-ui
 IPC=27921
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
 
-echo "▸ building (first run takes a few minutes)…"
+echo "▸ building…"
 cargo build -p zeron -q
 
 echo "▸ starting engine daemon on :$IPC"
@@ -29,7 +30,10 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-probe() { cargo run -q -p zeron-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
+probe() {
+  ZERON_IPC_SECRET_FILE="$DAEMON_DIR/ipc-secret" \
+    cargo run -q -p zeron-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"
+}
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo chats"
@@ -62,4 +66,4 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
 fi
 
 echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
-ZERON_DATA_DIR="$UI_DIR" ZERON_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/keron
+ZERON_DATA_DIR="$DAEMON_DIR" ZERON_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/keron

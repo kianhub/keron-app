@@ -236,3 +236,101 @@ async fn a_queued_run_never_seeds_full_access_into_a_claimed_session() {
         Some(SandboxLevel::WorkspaceWrite)
     );
 }
+
+#[tokio::test]
+async fn a_session_minted_with_full_access_starts_asking() {
+    // A phone or any other client writes its new session's row straight
+    // into the registry, config included. Full access in that row is not
+    // the session's own choice: the host runs it asking and says so in the
+    // row, and only a later choice on the session turns full access on.
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let sandbox = |chat: &str| {
+        core.workspace
+            .chat(chat)
+            .unwrap()
+            .and_then(|c| c.config)
+            .map(|c| c.sandbox)
+    };
+    // The same whole-row upsert a client's createSession writes.
+    core.workspace
+        .import_chat_row(&zeron_proto::Chat {
+            id: "phone".into(),
+            device_id: core.device_id.clone(),
+            title: None,
+            archived: false,
+            cwd: Some("/tmp".into()),
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: Some(zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::DangerFullAccess,
+            }),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+        })
+        .unwrap();
+
+    // Queued from the phone, with the request asking for full access too.
+    let handle = core.doc_host.open("phone").unwrap();
+    handle
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: "cmd-1".into(),
+            payload: SessionCommandPayload::Run {
+                request: request(SandboxLevel::DangerFullAccess, true),
+                message_id: "m1".into(),
+            },
+            issued_by: "phone-device".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
+    let ran = wait_for(&requests, 1).await;
+    assert_eq!(ran.sandbox, SandboxLevel::WorkspaceWrite);
+    assert!(!ran.auto_approve);
+    assert_eq!(sandbox("phone"), Some(SandboxLevel::WorkspaceWrite));
+
+    // Turning it on from the session's own controls still works.
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig", "chatId": "phone",
+                "config": { "harness": "mock", "sandbox": "danger-full-access" },
+            }),
+        )
+        .await
+        .unwrap();
+    core.sessions
+        .dispatch(
+            "phone",
+            HarnessId::Mock,
+            request(SandboxLevel::WorkspaceWrite, false),
+            Some("m2".into()),
+        )
+        .await
+        .unwrap();
+    let ran = wait_for(&requests, 2).await;
+    assert_eq!(ran.sandbox, SandboxLevel::DangerFullAccess);
+    assert!(ran.auto_approve);
+    assert_eq!(sandbox("phone"), Some(SandboxLevel::DangerFullAccess));
+}

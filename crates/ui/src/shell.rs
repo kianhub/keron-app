@@ -1056,8 +1056,8 @@ pub(crate) fn chat_title_editor(
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
-/// Target of the sidebar's "Star on GitHub" banner (same as the landing page).
-const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
+/// Target of the sidebar's "Star on GitHub" banner: Keron's fork.
+const GITHUB_REPO_URL: &str = "https://github.com/kianhub/keron-app";
 
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve

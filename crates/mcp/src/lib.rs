@@ -29,7 +29,8 @@ pub use zeron::{Origin, Zeron};
 /// How `zeron mcp` finds the engine and who it speaks for.
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Loopback IPC port of the engine to proxy (`ZERON_IPC_PORT`, default 27654).
+    /// Loopback IPC port of the engine to proxy (`ZERON_IPC_PORT`, default
+    /// [`keron_config::IPC_PORT`]).
     pub ipc_port: u16,
     /// The engine's IPC secret file (`ZERON_IPC_SECRET_FILE`, which the
     /// engine sets when it injects this server). The engine refuses a
@@ -47,7 +48,7 @@ impl McpConfig {
         let ipc_port = std::env::var("ZERON_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(27654);
+            .unwrap_or(keron_config::IPC_PORT);
         let secret_file = std::env::var_os(zeron_rpc::ipc_auth::SECRET_FILE_ENV)
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from);

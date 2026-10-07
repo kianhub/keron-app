@@ -367,6 +367,35 @@ fn new_sessions_are_born_on_chat2() {
 }
 
 #[test]
+fn new_sessions_start_asking() {
+    // A phone (or any client) can't create a session with full access: it
+    // is chosen on the session afterwards.
+    use zeron_proto::{HarnessId, SandboxLevel};
+    let (client, _dir) = demo(fast());
+    let id = client
+        .create_session(zeron_client::NewSession {
+            target: zeron_client::SessionTarget::Project {
+                space_id: "space-edge".into(),
+            },
+            config: Some(zeron_client::ChatConfig {
+                harness: HarnessId::ClaudeCode,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::DangerFullAccess,
+            }),
+            branch: None,
+            cwd: None,
+            title: None,
+        })
+        .unwrap();
+    assert_eq!(
+        client.session_config(&id).map(|c| c.sandbox),
+        Some(SandboxLevel::WorkspaceWrite)
+    );
+}
+
+#[test]
 fn warm_sessions_are_capped_and_preload_follows_the_front_page() {
     let (client, _dir) = demo(fast());
     client.preload_sessions();

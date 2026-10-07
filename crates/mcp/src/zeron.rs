@@ -150,29 +150,23 @@ impl Zeron {
         if self.url.is_empty() {
             bail!("engine connection closed");
         }
-        let secret = self
-            .secret_file
-            .as_deref()
-            .map(IpcSecret::read)
-            .transpose()
-            .context("reading the Zeron engine's IPC secret")?;
+        // Every Keron engine authenticates its clients: without the secret
+        // there is nothing to prove, so don't dial at all.
+        let Some(secret_file) = self.secret_file.as_deref() else {
+            bail!(
+                "{} is unset, so this server can't authenticate to the engine",
+                ipc_auth::SECRET_FILE_ENV
+            );
+        };
+        let secret = IpcSecret::read(secret_file).context("reading the engine's IPC secret")?;
         let client = connect_ws(&self.url).await.map_err(|e| {
             anyhow!(
-                "no Zeron engine listening at {} ({e}) — is Zeron running?",
+                "no engine listening at {} ({e}) — is Keron running?",
                 self.url
             )
         })?;
-        match &secret {
-            Some(secret) => match ipc_auth::authenticate(&client, secret).await {
-                Ok(()) => {}
-                // An engine from before IPC authentication serves anyone.
-                Err(err) if ipc_auth::predates_authentication(&err) => {}
-                Err(err) => bail!("the Zeron engine at {} refused this server ({err})", self.url),
-            },
-            None => tracing::warn!(
-                "{} is unset; the engine will refuse this connection",
-                ipc_auth::SECRET_FILE_ENV
-            ),
+        if let Err(err) = ipc_auth::authenticate(&client, &secret).await {
+            bail!("can't authenticate to the engine at {}: {err}", self.url);
         }
         let client = Arc::new(client);
         *slot = Some(client.clone());
@@ -774,17 +768,20 @@ mod tests {
             .unwrap();
         assert_eq!(reply["method"], methods::WATCH_CHATS);
 
-        // Without the secret file the engine answers nothing.
+        // Without the secret file it doesn't dial unauthenticated.
         let stranger = Zeron::new(url.clone(), None, Origin::default());
         let err = stranger.call(methods::WATCH_CHATS, json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("unauthorized"), "{err:#}");
+        assert!(
+            err.to_string().contains(ipc_auth::SECRET_FILE_ENV),
+            "{err:#}"
+        );
 
         // Another install's secret is refused at dial time.
         let other = tempfile::tempdir().unwrap();
         IpcSecret::load_or_create(other.path()).unwrap();
         let wrong = Zeron::new(url, Some(IpcSecret::path(other.path())), Origin::default());
         let err = wrong.call(methods::WATCH_CHATS, json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("refused"), "{err:#}");
+        assert!(err.to_string().contains("wrong secret"), "{err:#}");
     }
 
     fn chat(id: &str, title: Option<&str>) -> Chat {

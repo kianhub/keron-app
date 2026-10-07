@@ -7,6 +7,13 @@
 //! for `danger-full-access` through the Zeron MCP tools), and new sessions
 //! and forks always start asking. A session that did choose full access gets
 //! it on every run, whichever device or client queued the prompt.
+//!
+//! The host can't see who wrote a row, only the registry's per-field clocks,
+//! so "chose it" means the row's `config` was written after the row was
+//! minted (`RegistryDoc::chat_config_set_after_mint`). A row minted with
+//! full access in it (a phone's or any client's `createSession`, a claimed,
+//! imported or re-homed row) runs asking, and the host rewrites it to say so
+//! when it adopts or runs it (`WorkspaceHost::settle_session_access`).
 
 use zeron_proto::{ChatConfig, RunRequest, SandboxLevel};
 
@@ -28,6 +35,16 @@ pub(crate) fn start_asking(config: &mut ChatConfig) {
     if config.sandbox == SandboxLevel::DangerFullAccess {
         config.sandbox = SandboxLevel::WorkspaceWrite;
     }
+}
+
+/// A session row's config as the host enforces it. `chosen_later`: the
+/// config was written after the row was minted (see the module docs); full
+/// access minted with the row starts asking instead.
+pub(crate) fn enforced(mut config: ChatConfig, chosen_later: bool) -> ChatConfig {
+    if !chosen_later {
+        start_asking(&mut config);
+    }
+    config
 }
 
 #[cfg(test)]
@@ -92,6 +109,19 @@ mod tests {
             apply(&mut req, Some(&config(SandboxLevel::DangerFullAccess)));
             assert_eq!(req.sandbox, SandboxLevel::DangerFullAccess);
             assert!(req.auto_approve);
+        }
+    }
+
+    #[test]
+    fn only_full_access_chosen_after_the_row_was_minted_counts() {
+        let full = config(SandboxLevel::DangerFullAccess);
+        assert_eq!(
+            enforced(full.clone(), true).sandbox,
+            SandboxLevel::DangerFullAccess
+        );
+        assert_eq!(enforced(full, false).sandbox, SandboxLevel::WorkspaceWrite);
+        for sandbox in [SandboxLevel::ReadOnly, SandboxLevel::WorkspaceWrite] {
+            assert_eq!(enforced(config(sandbox), false).sandbox, sandbox);
         }
     }
 

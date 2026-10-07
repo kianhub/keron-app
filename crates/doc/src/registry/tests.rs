@@ -685,6 +685,40 @@ fn late_create_chat_config_survives_a_prior_claim() {
     }
 }
 
+/// Whether a chat's config came after its row: the host honours full access
+/// only from such a write (the session's own controls), never from the
+/// create, claim or re-home that wrote the whole row.
+#[test]
+fn config_set_after_mint_tracks_the_field_clocks() {
+    let mut phone = RegistryDoc::new("dev-phone");
+    let mut host = RegistryDoc::new("dev-a");
+    assert!(!host.chat_config_set_after_mint("chat-1"));
+
+    phone.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut phone, &mut host]);
+    assert!(
+        !host.chat_config_set_after_mint("chat-1"),
+        "minted with the row"
+    );
+
+    // A later config write, from any device, comes after the row.
+    let mut config = chat("chat-1", "dev-a").config.unwrap();
+    config.sandbox = SandboxLevel::DangerFullAccess;
+    phone.set_chat_config("chat-1", &config).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut phone, &mut host]);
+    assert!(host.chat_config_set_after_mint("chat-1"));
+
+    // Re-homing re-mints the whole row, config included. (The sleep keeps
+    // the host's HLC out of the phone's millisecond.)
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut moved = host.chat("chat-1").unwrap().unwrap();
+    moved.device_id = "dev-b".into();
+    host.upsert_chat(&moved).unwrap();
+    assert!(!host.chat_config_set_after_mint("chat-1"));
+}
+
 #[test]
 fn delete_space_cascades_and_converges() {
     let mut a = RegistryDoc::new("dev-a");

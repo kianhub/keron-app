@@ -9,6 +9,7 @@ publish.workspace = true
 zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-rpc.workspace = true
+keron-config = { path = "../keron-config" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

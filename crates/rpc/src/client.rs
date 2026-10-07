@@ -360,7 +360,7 @@ fn wire_error(error: String) -> RpcError {
 /// This is localhost: a real engine answers in milliseconds. Without a bound,
 /// *any* other process holding the port accepts the TCP connection and then
 /// never completes the WebSocket handshake, and the caller waits forever — a
-/// stranger on port 27654 would hang the app at boot rather than degrade it.
+/// stranger on the IPC port would hang the app at boot rather than degrade it.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).

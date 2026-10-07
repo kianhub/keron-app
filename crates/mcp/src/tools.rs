@@ -127,10 +127,10 @@ fn catalog() -> Vec<ToolDef> {
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
-                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Defaults to claude-code when available." },
+                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Defaults to claude-code when available. Only claude-code and codex ask before acting; the others run without approvals." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
-                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write"], "default": "workspace-write", "description": "New chats always start asking: claude-code and codex ask the user before acting, in this sandbox. Only the user can give a session full access, on the session itself. cursor, opencode, pi, devin, grok, hermes and antigravity never ask: they act without approvals whatever this says." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -736,6 +736,12 @@ impl Tools {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
+        // The engine would start it asking anyway; say so instead.
+        anyhow::ensure!(
+            sandbox != SandboxLevel::DangerFullAccess,
+            "sandbox danger-full-access can't be requested: new chats always start asking, \
+             and only the user can give a session full access"
+        );
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
@@ -1559,6 +1565,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not offered"), "{err}");
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "sandbox": "danger-full-access" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("start asking"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
 
         let created = tools
             .call(

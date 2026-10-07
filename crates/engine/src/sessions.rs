@@ -545,6 +545,9 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        if let Some(ws) = self.inner.workspace() {
+            ws.settle_session_access(chat_id);
+        }
         self.inner.apply_session_access(chat_id, &mut request);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
@@ -1374,10 +1377,7 @@ impl Inner {
     /// Full access is the session's own choice (its chat row), never the
     /// request's — see `run_access`.
     fn apply_session_access(&self, chat_id: &str, request: &mut RunRequest) {
-        let session = self
-            .workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .and_then(|chat| chat.config);
+        let session = self.workspace().and_then(|ws| ws.session_config(chat_id));
         crate::run_access::apply(request, session.as_ref());
     }
 

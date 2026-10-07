@@ -36,7 +36,7 @@ and one organization with your account in it. Add these redirect URIs:
 
 | Redirect URI | Used by | Code |
 |---|---|---|
-| `http://127.0.0.1:27641/callback` | Desktop app sign-in (loopback) | `crates/engine/src/auth.rs` `start_sign_in`; port from `crates/engine/src/lib.rs` (`ZERON_CALLBACK_PORT`, default 27641) |
+| `http://127.0.0.1:27741/callback` | Desktop app sign-in (loopback) | `crates/engine/src/auth.rs` `start_sign_in`; port from `crates/engine/src/lib.rs` (`ZERON_CALLBACK_PORT`, default `keron_config::SIGN_IN_CALLBACK_PORT`, 27741; Zeron's is 27641) |
 | `https://<relay host>/auth/cli/callback` | `keron login` on a headless machine (paste-code page) | `crates/engine/src/auth.rs` `start_headless_sign_in`; page in `edge/src/auth-routes.ts` |
 | `keron://callback` | iPhone app | `crates/client/src/auth.rs` `CALLBACK_SCHEME`; `apps/ios/Zeron/Info.plist` `CFBundleURLSchemes` |
 
@@ -89,10 +89,11 @@ the iPhone registering and each push decision.
 
 ## Other configs in edge/
 
-`wrangler.chat2test.jsonc` and `wrangler.transport-test.jsonc` are Zeron's
-own throwaway test deployments (the first names Zeron's Cloudflare account).
-Both run with `AUTH_MODE=dev`, so never deploy them anywhere reachable. Only
-`wrangler.jsonc` is the relay.
+There are none: `wrangler.jsonc` is the only Worker config. Zeron's
+throwaway test deployments (`wrangler.chat2test.jsonc`,
+`wrangler.transport-test.jsonc`) ran with `AUTH_MODE=dev` under Zeron's
+Cloudflare account and were removed from Keron. For local tests use
+`npm run dev`, which runs `wrangler dev` on this machine only.
 
 ## Redeploying
 

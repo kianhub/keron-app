@@ -2,8 +2,8 @@
 
 `zeron mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$ZERON_IPC_PORT`,
-default 27654) — the same `zeron_rpc` surface the headed app and `zeron sync`
-dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
+default 27754 in Keron, not Zeron's 27654) — the same `zeron_rpc` surface the
+headed app and `zeron sync` dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
 install, a few MB resident.
 
 Crate: `crates/mcp` (`zeron-mcp`). The protocol layer is hand-rolled
@@ -18,9 +18,10 @@ originating chat in the environment:
 
 | Variable          | Meaning                                                       |
 | ----------------- | ------------------------------------------------------------- |
-| `ZERON_IPC_PORT`  | Engine to proxy (default 27654).                              |
+| `ZERON_IPC_PORT`  | Engine to proxy (default 27754).                              |
 | `ZERON_CHAT_ID`   | The chat whose agent spawned this server.                     |
 | `ZERON_DEVICE_ID` | That chat's host device.                                      |
+| `ZERON_IPC_SECRET_FILE` | The engine's `{data_dir}/ipc-secret`; run by hand, `keron mcp` uses its own data dir's. The server never dials without a secret, and refuses an engine that doesn't authenticate. |
 
 When `ZERON_CHAT_ID` is set, every `send_message` is prefixed with a
 `[Message from Zeron chat <title> (<id8>) …]` line so the receiving agent and the
