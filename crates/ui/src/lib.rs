@@ -198,7 +198,7 @@ pub fn run_app(config: UiConfig) {
         terminal::panel::init(cx);
         app_menus::init(cx);
         app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
-        cx.register_url_scheme("zeron").detach();
+        cx.register_url_scheme(keron_config::URL_SCHEME).detach();
 
         let state = cx.new(|_| state::AppState::new());
         let url_state = state.clone();

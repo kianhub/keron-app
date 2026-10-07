@@ -313,8 +313,11 @@ async fn clean_local_auth_construction_does_not_probe_edge_health() {
     edge_task.abort();
 }
 
+/// Keron: update checks are off unless keron.toml turns them on, so a local
+/// runtime keeps its release checker (and the superseded-binary watch) but
+/// never asks the relay, or anyone, for releases.
 #[tokio::test]
-async fn local_runtime_checks_public_releases_without_starting_edge_links() {
+async fn local_runtime_keeps_release_checks_off_without_starting_edge_links() {
     let dir = tempfile::tempdir().unwrap();
     let (edge_url, requests, edge_task) = rejecting_edge().await;
     let config = config(dir.path(), edge_url, Some("client_test"), None);
@@ -333,24 +336,22 @@ async fn local_runtime_checks_public_releases_without_starting_edge_links() {
     let updater = runtime
         .core()
         .updater()
-        .expect("local runtime starts the public release checker");
+        .expect("local runtime starts the release checker");
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     updater.check_now();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while requests.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("release checker requested manifest.json and latest.txt");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "a forced check must not request releases while checks are off"
+    );
     assert!(runtime.core().links().is_none());
 
     runtime.shutdown().await;
-    let stopped_at = requests.load(Ordering::SeqCst);
     updater.check_now();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(requests.load(Ordering::SeqCst), stopped_at);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
     edge_task.abort();
 }
 

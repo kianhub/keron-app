@@ -20,7 +20,7 @@
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { AUTH_USER_HEADER, apnsConfig, type Env } from "./env";
+import { AUTH_USER_HEADER, apnsConfig, apnsStatus, type Env } from "./env";
 import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import {
   apnsPayload,
@@ -223,7 +223,7 @@ export class RegistryRoom implements DurableObject {
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
-        pushConfigured: apnsConfig(this.env) !== undefined,
+        ...apnsStatus(this.env),
         pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[]
       });
     }
@@ -518,7 +518,10 @@ export class RegistryRoom implements DurableObject {
     }
     if (notes.length === 0) return;
     const targets = this.pushTargets();
-    const config = apnsConfig(this.env);
+    // Incomplete push settings fail loudly: logged here and on every entry.
+    const { pushError: misconfigured } = apnsStatus(this.env);
+    if (misconfigured !== undefined) console.error(misconfigured);
+    const config = misconfigured === undefined ? apnsConfig(this.env) : undefined;
     const log: PushLogEntry[] = [];
     const sends: Array<() => Promise<void>> = [];
     for (const note of notes) {
@@ -526,6 +529,10 @@ export class RegistryRoom implements DurableObject {
         if (!target.prefs[note.category]) continue;
         const entry: PushLogEntry = { at: now, chatId: note.chatId, category: note.category, device: target.device, result: "pending" };
         log.push(entry);
+        if (misconfigured !== undefined) {
+          entry.result = `error ${misconfigured}`;
+          continue;
+        }
         if (config === undefined) {
           entry.result = "not configured";
           continue;

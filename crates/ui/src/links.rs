@@ -41,18 +41,30 @@ pub fn workspace_locator(
     Some(format!("{:x}", hash.finalize())[..16].to_string())
 }
 
+/// Scheme of links copied before the Keron rename; still opened, never made.
+const LEGACY_URL_SCHEME: &str = "zeron";
+
+/// The app's own conversation link: `keron://open/chat/<id>?workspace=…`
+/// (keron_config::URL_SCHEME; the name stays upstream's to ease rebasing).
 pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
     format!(
-        "zeron://open/chat/{}?workspace={}",
+        "{}://open/chat/{}?workspace={}",
+        keron_config::URL_SCHEME,
         encode_component(chat_id),
         encode_component(workspace)
     )
 }
 
+/// Parse a conversation link: `keron://`, or a `zeron://` one copied
+/// before the rename.
 pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
-    let rest = url
-        .strip_prefix("zeron://open/chat/")
-        .ok_or("not a Zeron conversation link")?;
+    let rest = [keron_config::URL_SCHEME, LEGACY_URL_SCHEME]
+        .into_iter()
+        .find_map(|scheme| {
+            url.strip_prefix(scheme)
+                .and_then(|rest| rest.strip_prefix("://open/chat/"))
+        })
+        .ok_or("not a Keron conversation link")?;
     let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
     if chat_id.is_empty() || chat_id.contains('/') {
         return Err("invalid conversation id");
@@ -160,10 +172,22 @@ mod tests {
     }
 
     #[test]
+    fn links_use_the_keron_scheme_and_still_open_zeron_ones() {
+        let link = zeron_conversation_link("chat", "workspace");
+        assert_eq!(link, "keron://open/chat/chat?workspace=workspace");
+        assert_eq!(
+            parse_zeron_conversation_link("zeron://open/chat/chat?workspace=workspace"),
+            parse_zeron_conversation_link(&link)
+        );
+    }
+
+    #[test]
     fn malformed_or_foreign_links_are_rejected() {
         assert!(parse_zeron_conversation_link("https://example.com").is_err());
+        assert!(parse_zeron_conversation_link("keron://open/chat/id").is_err());
         assert!(parse_zeron_conversation_link("zeron://open/chat/id").is_err());
         assert!(parse_zeron_conversation_link("zeron://open/chat/%GG?workspace=x").is_err());
+        assert!(parse_zeron_conversation_link("other://open/chat/id?workspace=x").is_err());
     }
 
     #[test]

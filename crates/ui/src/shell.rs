@@ -6115,7 +6115,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
+                            "Could not stop the remote engine: {err}. Run `keron daemon stop`, then quit and reopen Keron."
                         ).into());
                         cx.notify();
                     }
@@ -8680,7 +8680,7 @@ impl Shell {
     /// installs (macOS bundles, Windows installs, Linux managed installs) show
     /// the background download and then "restart to apply"; installs that
     /// can't replace themselves explain why; advisory installs point at
-    /// `zeron update` or the GitHub releases page and dismiss per version.
+    /// `keron update` or the GitHub releases page and dismiss per version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let update = crate::app_update::AppUpdate::global(cx)?;
         let (label, action) = update.read(cx).strip()?;
@@ -8856,7 +8856,7 @@ impl Shell {
                         ) {
                             (
                                 title,
-                                "Run `zeron update` in a terminal to install it.".into(),
+                                "Run `keron update` in a terminal to install it.".into(),
                                 vec![UpdatePromptButton::Close("OK")],
                             )
                         } else {

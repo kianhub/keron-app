@@ -80,8 +80,10 @@ npx wrangler secret list
 
 lists `WORKOS_API_KEY`, `APNS_KEY_ID` and `APNS_KEY_P8` (names only).
 `pushConfigured` in `GET /registry/<org id>/stats` is true exactly when
-`APNS_KEY_P8` and `APNS_KEY_ID` are both set (`edge/src/env.ts`
-`apnsConfig`). That route needs an org-scoped WorkOS access token
+`APNS_KEY_P8` and `APNS_KEY_ID` are both set and `APNS_TEAM_ID` and
+`APNS_TOPIC` are filled in (`edge/src/env.ts` `apnsConfig`). With the key set
+but either var missing, `pushError` names it and every push logs that error:
+there is no fallback to Zeron's Apple identity. That route needs an org-scoped WorkOS access token
 (`Authorization: Bearer …`); the response's `pushTargets` and `pushLog` show
 the iPhone registering and each push decision.
 

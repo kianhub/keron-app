@@ -61,6 +61,7 @@ zeron-engine.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
+keron-config = { path = "../keron-config" }
 zeron-syntax.workspace = true
 zeron-theme.workspace = true
 gpui.workspace = true

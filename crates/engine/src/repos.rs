@@ -4,8 +4,9 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
-//! dir — worktrees are user-facing working checkouts), with an auto-generated name +
+//! created under `~/.keron/app/worktrees/<repoName>/<worktreeName>` (the home
+//! folder's Keron data root, never a `ZERON_DATA_DIR` override — worktrees are
+//! user-facing working checkouts), with an auto-generated name +
 //! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
@@ -119,14 +120,16 @@ fn session_home_dir_with(
     Err("User home directory unavailable on this device")
 }
 
-/// Where new worktrees live. Deliberately NOT under the backend data dir —
-/// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
-/// (test isolation); empty reads as unset.
+/// Where new worktrees live: `~/.keron/app/worktrees`, under the home
+/// folder's Keron data root rather than an overridden backend data dir —
+/// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR`
+/// overrides (the keron binary sets it; tests isolate with it); empty reads
+/// as unset.
 fn default_worktrees_root() -> PathBuf {
     std::env::var_os("ZERON_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+        .unwrap_or_else(|| keron_config::data_dir_in(&home_dir()).join("worktrees"))
 }
 
 struct ReposInner {

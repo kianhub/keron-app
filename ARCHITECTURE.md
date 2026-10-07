@@ -45,6 +45,13 @@ Single binary `zeron`:
   `ZERON_IPC_SECRET_FILE`) sends it in an `AuthenticateIpc` call as its first frame. Any other
   first frame, or the wrong secret, gets an error and the socket is closed
   (`zeron_rpc::ipc_auth`). Handshakes carrying a browser `Origin` are refused before that.
+- Known limitation (Keron): the secret keeps out other users and browsers, not the agents the
+  engine runs. Codex's default sandbox is `workspace-write` with network access on
+  (`crates/harness/src/codex/catalog.rs`), and that sandbox can read the whole disk, so an agent
+  in it can read `{data_dir}/ipc-secret`, dial `127.0.0.1:{ipc_port}`, authenticate, and drive
+  the engine like the UI does — for example switch its own session to full access, or start
+  other chats. Nothing changes this today. The owner decides between turning network access off
+  in the default sandbox and moving the secret into a Keychain item the sandbox can't read.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles

@@ -278,11 +278,19 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
+            let config = engine_config_from_env();
+            runtime.block_on(sync_cli(config.ipc_port, &config.data_dir))
         }
         Some(Command::Mcp) => {
+            let mut config = zeron_mcp::McpConfig::from_env();
+            // Run by hand rather than injected by the engine (which names the
+            // file): authenticate with the secret of the engine serving this
+            // data dir.
+            config
+                .secret_file
+                .get_or_insert_with(|| zeron_rpc::ipc_auth::IpcSecret::path(&paths::data_dir()));
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
+            runtime.block_on(zeron_mcp::run(config))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
@@ -391,11 +399,17 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// `keron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
-async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+async fn sync_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let secret = zeron_rpc::ipc_auth::IpcSecret::load(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "can't read the engine's IPC secret in {} ({e}) — is keron running?",
+            data_dir.display()
+        )
+    })?;
+    let client = zeron_rpc::ipc_auth::connect(ipc_port, &secret)
         .await
         .map_err(|e| {
-            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is keron running?")
+            anyhow::anyhow!("no engine accepted us on 127.0.0.1:{ipc_port} ({e}) — is keron running?")
         })?;
     let status = client
         .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))

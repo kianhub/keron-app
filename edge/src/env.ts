@@ -1,3 +1,5 @@
+import type { ApnsConfig } from "./apns";
+
 export interface Env {
   SESSION_ROOMS: DurableObjectNamespace;
   DEVICE_ROOMS: DurableObjectNamespace;
@@ -26,21 +28,34 @@ export interface Env {
    * key id. Unset ⇒ session notifications are decided and logged, not sent. */
   APNS_KEY_P8?: string;
   APNS_KEY_ID?: string;
-  /** Apple team id and the app's bundle id (defaults: the Zeron iOS app). */
+  /** Apple team id and the iPhone app's bundle id. No defaults: push needs
+   * both once the APNs key is set (see `apnsConfig`). */
   APNS_TEAM_ID?: string;
   APNS_TOPIC?: string;
 }
 
-/** APNs settings, when push is set up for this deployment. */
-export const apnsConfig = (env: Env) =>
-  env.APNS_KEY_P8 && env.APNS_KEY_ID
-    ? {
-        keyP8: env.APNS_KEY_P8,
-        keyId: env.APNS_KEY_ID,
-        teamId: env.APNS_TEAM_ID ?? "5XY3M483YQ",
-        topic: env.APNS_TOPIC ?? "sh.zeron.ios"
-      }
-    : undefined;
+/** APNs settings, when push is set up for this deployment: undefined without
+ * the key secrets. With them, a missing APNS_TEAM_ID or APNS_TOPIC throws —
+ * there is no fallback Apple identity to send as. */
+export const apnsConfig = (env: Env): ApnsConfig | undefined => {
+  const { APNS_KEY_P8: keyP8, APNS_KEY_ID: keyId, APNS_TEAM_ID: teamId, APNS_TOPIC: topic } = env;
+  if (!keyP8 || !keyId) return undefined;
+  if (!teamId || !topic) {
+    const missing = [!teamId && "APNS_TEAM_ID", !topic && "APNS_TOPIC"].filter(Boolean).join(" and ");
+    throw new Error(`push is misconfigured: ${missing} unset (edge/wrangler.jsonc vars)`);
+  }
+  return { keyP8, keyId, teamId, topic };
+};
+
+/** `pushConfigured` for /stats, with `pushError` when the settings are
+ * incomplete (see `apnsConfig`). */
+export const apnsStatus = (env: Env): { pushConfigured: boolean; pushError?: string } => {
+  try {
+    return { pushConfigured: apnsConfig(env) !== undefined };
+  } catch (err) {
+    return { pushConfigured: false, pushError: (err as Error).message };
+  }
+};
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying
  * the caller's JWT. DOs trust it blindly — they are only reachable through
