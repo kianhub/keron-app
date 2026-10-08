@@ -27,7 +27,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, EventEmitter, FocusHandle, Pixels, Point, ScrollHandle,
-    Task, Window, point,
+    Task, WeakFocusHandle, Window, point,
 };
 use gpui_tokio::Tokio;
 use keron_door::{DoorClient, DoorError};
@@ -247,6 +247,10 @@ pub struct Home {
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
+    /// What had focus when Home last drew, and whether the keyboard put it
+    /// there. A click leaves focus on a button; a later key doesn't make
+    /// that keyboard focus.
+    focus_seen: Option<(WeakFocusHandle, bool)>,
     zeron: Option<ZeronSnapshot>,
     /// Loose-ends banners; only the owner's Home posts them.
     notices: Option<notices::Notices>,
@@ -368,6 +372,7 @@ impl Home {
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
             keyboard_row: None,
+            focus_seen: None,
             zeron: None,
             notices: None,
             poster,
@@ -1090,9 +1095,17 @@ impl Home {
     }
 
     /// The row whose action buttons have focus from the keyboard: (widget id,
-    /// row id). A click leaves focus on a button, and that doesn't count.
-    fn keyboard_focused_row(&self, window: &Window, cx: &App) -> Option<(String, String)> {
-        if !window.last_input_was_keyboard() {
+    /// row id). Focus a click left on a button doesn't count, even after a
+    /// key is pressed somewhere else.
+    fn keyboard_focused_row(&mut self, window: &Window, cx: &App) -> Option<(String, String)> {
+        let focused = window.focused(cx);
+        let by_keyboard = match (&focused, &self.focus_seen) {
+            (Some(handle), Some((seen, by_keyboard))) if seen == handle => *by_keyboard,
+            (Some(_), _) => window.last_input_was_keyboard(),
+            (None, _) => false,
+        };
+        self.focus_seen = focused.map(|handle| (handle.downgrade(), by_keyboard));
+        if !by_keyboard || !window.last_input_was_keyboard() {
             return None;
         }
         self.widgets.iter().find_map(|(widget, state)| {
@@ -1301,21 +1314,47 @@ fn visible_list_rows<'a>(
     overrides: &HashMap<String, RowOverride>,
     limit: usize,
 ) -> (Vec<&'a ListItem>, usize) {
-    let (rows, more) = drawn_list_rows(items, overrides, |_| false, limit);
-    (rows.into_iter().map(|(row, _)| row).collect(), more)
+    let drawn = drawn_list_rows(items, overrides, |_| false, limit);
+    (
+        drawn.rows.into_iter().map(|(row, _)| row).collect(),
+        drawn.more,
+    )
 }
 
-/// The rows a list card draws, each with whether it's leaving: as
-/// [`visible_list_rows`], except that a hidden row still collapsing keeps its
-/// place, and its slot under the limit, until it's gone. The rows below it
-/// move up, and the next one joins once it has.
+/// How a list row is drawn while rows close up after Done.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drawn<'a> {
+    Whole,
+    /// Hidden a moment ago and closing up.
+    Leaving,
+    /// Past the limit until the leaving row `with` gave up its place: it
+    /// opens as that row closes, so the card keeps its height.
+    Joining {
+        with: &'a str,
+    },
+}
+
+/// What a list card draws.
+#[derive(Debug, PartialEq)]
+struct DrawnList<'a> {
+    rows: Vec<(&'a ListItem, Drawn<'a>)>,
+    /// Rows past the limit.
+    more: usize,
+    /// The "+N more" line closing up, with the count it showed: the rows
+    /// past the limit all joined while rows above them leave.
+    more_closing: Option<usize>,
+}
+
+/// The rows a list card draws: as [`visible_list_rows`], except that a
+/// hidden row still collapsing keeps its place until it's gone. It doesn't
+/// hold a place under the limit, so the next row joins as it closes.
 fn drawn_list_rows<'a>(
     items: &'a [ListItem],
     overrides: &HashMap<String, RowOverride>,
     leaving: impl Fn(&str) -> bool,
     limit: usize,
-) -> (Vec<(&'a ListItem, bool)>, usize) {
-    let rows: Vec<(&ListItem, bool)> = items
+) -> DrawnList<'a> {
+    let kept: Vec<(&ListItem, Option<&str>)> = items
         .iter()
         .filter_map(|item| {
             let id = item.id.as_deref();
@@ -1323,13 +1362,45 @@ fn drawn_list_rows<'a>(
                 .and_then(|id| overrides.get(id))
                 .is_some_and(|change| change.change == RowChange::Hidden);
             if !hidden {
-                return Some((item, false));
+                return Some((item, None));
             }
-            id.filter(|id| leaving(id)).map(|_| (item, true))
+            id.filter(|id| leaving(id)).map(|id| (item, Some(id)))
         })
         .collect();
-    let more = rows.len().saturating_sub(limit);
-    (rows.into_iter().take(limit).collect(), more)
+    let whole_total = kept.iter().filter(|(_, leaving)| leaving.is_none()).count();
+    let mut rows = Vec::new();
+    let mut whole = 0;
+    let mut leavers: Vec<&str> = Vec::new();
+    let mut joined = 0;
+    for (position, &(item, leaving)) in kept.iter().enumerate() {
+        if whole == limit {
+            break;
+        }
+        // Drawn before the leaving rows started to go: under the limit.
+        let was_drawn = position < limit;
+        match leaving {
+            Some(id) if was_drawn => {
+                leavers.push(id);
+                rows.push((item, Drawn::Leaving));
+            }
+            Some(_) => {}
+            None => {
+                whole += 1;
+                // Each row that joins takes the place of one leaving above it.
+                let with = (!was_drawn).then(|| leavers.get(joined)).flatten();
+                joined += usize::from(with.is_some());
+                let drawn = with.map_or(Drawn::Whole, |&with| Drawn::Joining { with });
+                rows.push((item, drawn));
+            }
+        }
+    }
+    let more = whole_total.saturating_sub(limit);
+    let shown_before = kept.len().saturating_sub(limit);
+    DrawnList {
+        rows,
+        more,
+        more_closing: (more == 0 && shown_before > 0).then_some(shown_before),
+    }
 }
 
 /// Where a card dropped at `over` among the shown cards goes in the full

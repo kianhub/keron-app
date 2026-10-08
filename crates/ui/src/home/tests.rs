@@ -239,6 +239,58 @@ fn list_cards_leave_out_done_rows_then_cap_the_rest() {
 }
 
 #[test]
+fn a_row_past_the_limit_opens_as_a_done_row_closes_so_the_card_keeps_its_height() {
+    let items: Vec<ListItem> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        .iter()
+        .map(|id| ListItem {
+            id: Some(id.to_string()),
+            title: id.to_string(),
+            ..ListItem::default()
+        })
+        .collect();
+    let hidden = HashMap::from([(
+        "b".to_string(),
+        RowOverride {
+            change: RowChange::Hidden,
+            settled: false,
+        },
+    )]);
+    let leaving = |id: &str| id == "b";
+    fn phases<'a>(drawn: &DrawnList<'a>) -> Vec<(String, Drawn<'a>)> {
+        drawn
+            .rows
+            .iter()
+            .map(|(row, drawn)| (row.title.clone(), *drawn))
+            .collect()
+    }
+    let whole = |ids: &[&str]| -> Vec<(String, Drawn<'static>)> {
+        ids.iter()
+            .map(|id| (id.to_string(), Drawn::Whole))
+            .collect()
+    };
+
+    // Eight rows, six shown: b closes while g opens, and "+N more" stays.
+    let drawn = drawn_list_rows(&items, &hidden, leaving, 6);
+    let mut expected = whole(&["a"]);
+    expected.push(("b".to_string(), Drawn::Leaving));
+    expected.extend(whole(&["c", "d", "e", "f"]));
+    expected.push(("g".to_string(), Drawn::Joining { with: "b" }));
+    assert_eq!(phases(&drawn), expected);
+    assert_eq!((drawn.more, drawn.more_closing), (1, None));
+    // Once b is gone, the same rows stand whole.
+    let drawn = drawn_list_rows(&items, &hidden, |_| false, 6);
+    assert_eq!(phases(&drawn), whole(&["a", "c", "d", "e", "f", "g"]));
+    assert_eq!((drawn.more, drawn.more_closing), (1, None));
+
+    // Seven rows, six shown: g joins and "+1 more" closes up with b.
+    let drawn = drawn_list_rows(&items[..7], &hidden, leaving, 6);
+    assert_eq!(drawn.rows.len(), 7);
+    assert_eq!((drawn.more, drawn.more_closing), (0, Some(1)));
+    let drawn = drawn_list_rows(&items[..7], &hidden, |_| false, 6);
+    assert_eq!((drawn.more, drawn.more_closing), (0, None));
+}
+
+#[test]
 fn a_dropped_card_lands_between_the_right_widgets_when_some_are_hidden() {
     let all = ["a", "hidden-1", "b", "c", "hidden-2", "d"];
     let shown = ["a", "b", "c", "d"];
@@ -591,9 +643,10 @@ fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut 
             panic!("the payload went away");
         };
         let leaving = |id: &str| state.leaving.contains_key(id);
-        let (rows, _) = drawn_list_rows(items, &state.overrides, leaving, DEFAULT_LIMIT);
-        rows.into_iter()
-            .map(|(row, leaving)| (row.title.clone(), leaving))
+        drawn_list_rows(items, &state.overrides, leaving, DEFAULT_LIMIT)
+            .rows
+            .into_iter()
+            .map(|(row, drawn)| (row.title.clone(), drawn == Drawn::Leaving))
             .collect()
     };
     let rows = |expected: &[(&str, bool)]| -> Vec<(String, bool)> {

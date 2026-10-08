@@ -3,15 +3,15 @@
 //! both follow it.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{Local, NaiveDate, Utc};
 use gpui::{
-    AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, Div, ElementId,
-    EntityId, FontWeight, Hsla, MouseButton, Role, SharedString, Stateful, Toggled, Window, div,
-    prelude::*, px, relative,
+    AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, DispatchPhase,
+    Div, ElementId, EntityId, FontWeight, HitboxBehavior, Hsla, MouseButton, MouseMoveEvent, Role,
+    SharedString, Stateful, Toggled, Window, div, prelude::*, px, relative,
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
 use keron_home::loose_ends::{Action, snooze_choices};
@@ -19,8 +19,8 @@ use keron_home::{AgendaItem, DeviceItem, Heat, Kind, Stat, TimelineItem};
 use zeron_theme::AccentPreset;
 
 use super::{
-    Body, CardDragPayload, Home, Leaving, ListItem, Manifest, Mode, Payload, RowChange, RowUi,
-    SignIn, Slot, SourceSpec, WidgetState, dense_cells, drawn_list_rows, is_door, limit,
+    Body, CardDragPayload, Drawn, Home, Leaving, ListItem, Manifest, Mode, Payload, RowChange,
+    RowUi, SignIn, Slot, SourceSpec, WidgetState, dense_cells, drawn_list_rows, is_door, limit,
     visible_list_rows,
 };
 use crate::icons::{self, icon};
@@ -42,6 +42,8 @@ const BOTTOM_CLEARANCE: f32 = 64.0;
 const HEAT_PULSE: MotionSpec = MotionSpec::new(1800, motion::EASE_IN_OUT);
 /// Space between a list card's rows.
 const LIST_GAP: f32 = 6.0;
+/// The "+N more" line under a list, in pixels at the default text size.
+const MORE_LINE_HEIGHT: f32 = 15.0;
 /// How far a row's hover wash reaches past the text column on each side.
 const ROW_INSET: f32 = 6.0;
 /// A row action button's square side, and its glyph.
@@ -781,37 +783,71 @@ impl Home {
         view: EntityId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (rows, more) = drawn_list_rows(
+        let drawn = drawn_list_rows(
             items,
             &state.overrides,
             |id| state.leaving.contains_key(id),
             limit(manifest),
         );
-        if rows.is_empty() {
+        if drawn.rows.is_empty() {
             return empty(theme, manifest);
         }
-        let rows: Vec<AnyElement> = rows
+        let rows: Vec<AnyElement> = drawn
+            .rows
             .into_iter()
             .enumerate()
-            .map(|(ix, (item, leaving))| {
+            .map(|(ix, (item, drawn))| {
                 let row = self.render_list_row(theme, manifest, state, item, ix, view, cx);
-                let leaving = item
-                    .id
-                    .as_deref()
-                    .filter(|_| leaving)
-                    .and_then(|id| state.leaving.get(id));
-                match leaving {
-                    Some(leaving) => collapsing(leaving, row),
-                    None => row,
+                match drawn {
+                    Drawn::Whole => row,
+                    Drawn::Leaving => {
+                        match item.id.as_deref().and_then(|id| state.leaving.get(id)) {
+                            Some(leaving) => collapsing(leaving, row),
+                            None => row,
+                        }
+                    }
+                    Drawn::Joining { with } => match state.leaving.get(with) {
+                        Some(leaving) => {
+                            // Its own height once it has been drawn; until
+                            // then, the height of the row it replaces.
+                            let height = item
+                                .id
+                                .as_deref()
+                                .and_then(|id| state.row_ui.borrow().get(id)?.bounds)
+                                .map_or(leaving.height, |bounds| f32::from(bounds.size.height));
+                            joining(leaving, height, row)
+                        }
+                        None => row,
+                    },
                 }
             })
             .collect();
+        // The line goes with the last row past the limit, closing as it opens.
+        let more = match drawn.more_closing {
+            Some(count) => {
+                let t = state
+                    .leaving
+                    .values()
+                    .map(Leaving::progress)
+                    .fold(0.0, f32::max);
+                more_line(theme, count).map(|line| {
+                    div()
+                        .flex_none()
+                        .overflow_hidden()
+                        .h(ui_rems(MORE_LINE_HEIGHT * (1.0 - t)))
+                        .mt(px(-LIST_GAP * t))
+                        .opacity(1.0 - t)
+                        .child(line)
+                })
+            }
+            None => more_line(theme, drawn.more),
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(LIST_GAP))
             .children(rows)
-            .children(more_line(theme, more))
+            .children(more)
             .into_any_element()
     }
 
@@ -925,8 +961,8 @@ impl Home {
                 .is_some_and(|(focus_widget, focus_row)| {
                     focus_widget == widget && focus_row == row
                 });
-            let (cluster, count) =
-                self.render_row_actions(theme, manifest, state, row, item, menu_open, cx);
+            let (cluster, count) = self
+                .render_row_actions(theme, manifest, state, row, item, menu_open, &fade_key, cx);
             (count > 0).then(|| {
                 // Hover shows them; so does an open snooze menu or keyboard focus.
                 let held = motion::state_t(
@@ -955,19 +991,10 @@ impl Home {
             None => right,
         };
         // Where it's drawn whole: a collapse after Done starts from its height.
-        let measure = row_id.filter(|_| has_actions).map(|row| {
-            let (rows, row) = (state.row_ui.clone(), row.to_string());
-            gpui::canvas(
-                move |bounds, _, _| {
-                    if let Some(ui) = rows.borrow_mut().get_mut(&row) {
-                        ui.bounds = Some(bounds);
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0()
-        });
+        let measure = row_id
+            .filter(|_| has_actions)
+            .map(|row| (state.row_ui.clone(), row.to_string()));
+        let probe = interactive.then(|| row_probe(fade_key.clone(), measure));
         let mut row = div()
             .id(SharedString::from(key))
             .relative()
@@ -981,13 +1008,12 @@ impl Home {
             .when(interactive, |el| {
                 let wash = theme.glass_hover();
                 el.bg(motion::hover_blend(&fade_key, wash.opacity(0.0), wash))
-                    .on_hover(motion::hover_listener(fade_key.clone()))
             })
             .when(snoozed, |el| el.opacity(0.6))
             .children(mark)
             .child(text)
             .child(slot)
-            .children(measure);
+            .children(probe);
         if let Some(link) = link {
             let accent = theme.accent;
             row = row
@@ -1015,6 +1041,7 @@ impl Home {
         row: &str,
         item: &ListItem,
         menu_open: bool,
+        row_fade: &str,
         cx: &mut Context<Self>,
     ) -> (Stateful<Div>, usize) {
         let widget = manifest.id.as_str();
@@ -1053,8 +1080,12 @@ impl Home {
             )
             .on_click(cx.listener({
                 let pair = pair.clone();
-                move |this, _: &ClickEvent, _, cx| {
+                let row_fade = row_fade.to_string();
+                move |this, event: &ClickEvent, _, cx| {
                     cx.stop_propagation();
+                    if !actions_showing(event, &row_fade) {
+                        return;
+                    }
                     this.open_snooze_menu(&pair.0, &pair.1, cx);
                 }
             }));
@@ -1077,6 +1108,7 @@ impl Home {
                     icons::CLOSE,
                     tip("Not a thing"),
                     Action::Dismiss,
+                    row_fade,
                     cx,
                 )
                 .aria_label(format!("{} is not a thing", item.title))
@@ -1092,6 +1124,7 @@ impl Home {
                     icons::CHECK,
                     tip("No reply needed"),
                     Action::Done,
+                    row_fade,
                     cx,
                 )
                 .aria_label(format!("Mark {} as needing no reply", item.title))
@@ -1103,6 +1136,7 @@ impl Home {
                     icons::CHECK,
                     tip("Done"),
                     Action::Done,
+                    row_fade,
                     cx,
                 )
                 .aria_label(format!("Mark {} done", item.title))
@@ -1691,9 +1725,11 @@ fn row_action(
     glyph: &'static str,
     tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     action: Action,
+    row_fade: &str,
     cx: &mut Context<Home>,
 ) -> Stateful<Div> {
     let (widget, row) = pair.clone();
+    let row_fade = row_fade.to_string();
     icon_button(
         theme,
         format!("home-{name}-{widget}-{row}"),
@@ -1704,11 +1740,80 @@ fn row_action(
         cx.stop_propagation();
         // A double click's second press lands on the row that moved up
         // into this one's place.
-        if event.click_count() > 1 {
+        if event.click_count() > 1 || !actions_showing(event, &row_fade) {
             return;
         }
         this.act(&widget, &row, action.clone(), cx);
     }))
+}
+
+/// Whether a click on a row's action counts: from the keyboard, or with
+/// the actions shown. Hidden, they're still under the pointer.
+fn actions_showing(event: &ClickEvent, row_fade: &str) -> bool {
+    event.is_keyboard() || motion::hover_t(row_fade) > 0.0
+}
+
+thread_local! {
+    /// The rows hovered as of their last frame, by hover-fade key.
+    static HOVERED_ROWS: RefCell<HashSet<String>> = RefCell::default();
+}
+
+/// Brings the hover fade behind `key` in line with `hovered`; true when it
+/// changed, and the row needs another frame to show it.
+fn sync_row_hover(key: &str, hovered: bool, reduced: bool) -> bool {
+    HOVERED_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        let noted = rows.contains(key);
+        // The fade store forgets a row that went a frame undrawn.
+        let current = noted && motion::hover_t(key) > 0.0;
+        if hovered == current {
+            if noted && !hovered {
+                rows.remove(key);
+            }
+            return false;
+        }
+        if hovered {
+            rows.insert(key.to_string());
+        } else {
+            rows.remove(key);
+        }
+        motion::set_hover(key, hovered, reduced);
+        true
+    })
+}
+
+/// Keeps a row's hover in step with what's under the pointer every frame,
+/// as gpui's own hover styles do. Pointer events alone miss a row moving
+/// under a still pointer: one above it closed up, the card scrolled, or a
+/// refetch added a row. Also notes where a row with actions was drawn.
+fn row_probe(
+    fade_key: String,
+    measure: Option<(Rc<RefCell<HashMap<String, RowUi>>>, String)>,
+) -> impl IntoElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            if let Some((rows, row)) = measure
+                && let Some(ui) = rows.borrow_mut().get_mut(&row)
+            {
+                ui.bounds = Some(bounds);
+            }
+            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        },
+        move |_, hitbox, window, cx| {
+            let hovered = hitbox.is_hovered(window);
+            if sync_row_hover(&fade_key, hovered, motion::reduced_motion(cx)) {
+                window.request_animation_frame();
+            }
+            let view = window.current_view();
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered {
+                    cx.notify(view);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// The slot a row's actions need: buttons and the gaps between them.
@@ -1731,6 +1836,23 @@ fn collapsing(leaving: &Leaving, row: AnyElement) -> AnyElement {
         .h(px(leaving.height * (1.0 - t)))
         .mb(px(-LIST_GAP * t))
         .opacity(1.0 - t)
+        .child(row)
+        .into_any_element()
+}
+
+/// A row joining a list as one above it closes after Done: it opens and
+/// fades in by the same eased amount, bringing its gap along, so the card
+/// keeps its height.
+fn joining(leaving: &Leaving, height: f32, row: AnyElement) -> AnyElement {
+    let t = leaving.progress();
+    div()
+        .flex_none()
+        .mx(px(-ROW_INSET))
+        .px(px(ROW_INSET))
+        .overflow_hidden()
+        .h(px(height * t))
+        .mt(px(-LIST_GAP * (1.0 - t)))
+        .opacity(t)
         .child(row)
         .into_any_element()
 }
@@ -1805,6 +1927,7 @@ fn more_line(theme: &Theme, more: usize) -> Option<Div> {
     (more > 0).then(|| {
         div()
             .text_size(ui_rems(11.5))
+            .line_height(ui_rems(MORE_LINE_HEIGHT))
             .text_color(theme.text_faint)
             .child(SharedString::from(format!("+{more} more")))
     })
