@@ -465,3 +465,103 @@ fn notifications_off_post_nothing_until_turned_on(cx: &mut TestAppContext) {
     assert_eq!(sent.borrow().banners.len(), 1);
     assert_eq!(sent.borrow().records, [(3, "hot".to_string())]);
 }
+
+#[gpui::test]
+fn done_on_a_slack_row_posts_to_its_source_and_hides_the_row(cx: &mut TestAppContext) {
+    let (home, _paths, _dir) = home(cx);
+    let posted = Rc::new(RefCell::new(Vec::new()));
+    let slack_row = |id: &str, title: &str| ListItem {
+        id: Some(id.to_string()),
+        title: title.to_string(),
+        actions: vec!["done".to_string()],
+        ..ListItem::default()
+    };
+    home.update(cx, |home, cx| {
+        home.poster = Some({
+            let posted = posted.clone();
+            Rc::new(move |request: loose_ends::Request, _: &App| {
+                posted.borrow_mut().push((request.path, request.body));
+                Task::ready(Ok(()))
+            })
+        });
+        let mut slack = manifest("slack", "Slack · waiting on you");
+        slack.source = SourceSpec::KeronSources("slack-waiting".to_string());
+        home.apply_catalog(catalog(vec![slack]), cx);
+        home.widgets.entry("slack".to_string()).or_default().payload = Some(Payload {
+            updated: None,
+            errors: Vec::new(),
+            body: Body::List(vec![
+                slack_row("C1:1728300000.000100", "Ana in #launch"),
+                slack_row("D2:1728300100.000200", "Ben"),
+            ]),
+        });
+        home.act("slack", "C1:1728300000.000100", Action::Done, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        *posted.borrow(),
+        [(
+            "/sources/slack-waiting/done".to_string(),
+            serde_json::json!({"ids": ["C1:1728300000.000100"]})
+        )]
+    );
+    home.read_with(cx, |home, _| {
+        let state = &home.widgets["slack"];
+        let Some(Payload {
+            body: Body::List(items),
+            ..
+        }) = &state.payload
+        else {
+            panic!("the payload went away");
+        };
+        let (shown, _) = visible_list_rows(items, &state.overrides, DEFAULT_LIMIT);
+        let ids: Vec<&str> = shown.iter().filter_map(|row| row.id.as_deref()).collect();
+        assert_eq!(ids, ["D2:1728300100.000200"]);
+        assert!(state.action_error.is_none());
+        assert!(state.overrides["C1:1728300000.000100"].settled);
+    });
+}
+
+#[gpui::test]
+fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppContext) {
+    let (home, _paths, _dir) = home(cx);
+    let row = |id: &str| ListItem {
+        id: Some(id.to_string()),
+        title: id.to_string(),
+        actions: vec!["done".to_string()],
+        ..ListItem::default()
+    };
+    home.update(cx, |home, cx| {
+        home.poster = Some(Rc::new(|_: loose_ends::Request, _: &App| {
+            Task::ready(Err(FetchError::Door(DoorError::Http {
+                status: 404,
+                error: Some("unknown_item".to_string()),
+                message: "No row has that id.".to_string(),
+            })))
+        }));
+        let mut slack = manifest("slack", "Slack · waiting on you");
+        slack.source = SourceSpec::KeronSources("slack-waiting".to_string());
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        home.apply_catalog(catalog(vec![slack, ends]), cx);
+        for widget in ["slack", "ends"] {
+            home.widgets.entry(widget.to_string()).or_default().payload = Some(Payload {
+                updated: None,
+                errors: Vec::new(),
+                body: Body::List(vec![row("gone")]),
+            });
+            home.act(widget, "gone", Action::Done, cx);
+        }
+    });
+    cx.run_until_parked();
+
+    home.read_with(cx, |home, _| {
+        let slack = &home.widgets["slack"];
+        assert!(slack.overrides["gone"].settled, "answered elsewhere is done");
+        assert!(slack.action_error.is_none());
+        let ends = &home.widgets["ends"];
+        assert!(!ends.overrides.contains_key("gone"), "a loose end comes back");
+        assert!(ends.action_error.is_some());
+    });
+}

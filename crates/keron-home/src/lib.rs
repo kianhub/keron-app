@@ -16,7 +16,8 @@
 //! - [`script`]: running a `script:` source.
 //! - [`zeron`]: the app's own data as a plain snapshot, turned into payloads.
 //! - [`fetch`]: fetching a widget's payload.
-//! - [`loose_ends`]: snooze, done, dismiss and shown through the door.
+//! - [`loose_ends`]: row actions through the door: snooze, done, dismiss and
+//!   shown on loose ends, done on Gmail and Slack rows.
 
 use std::path::{Path, PathBuf};
 

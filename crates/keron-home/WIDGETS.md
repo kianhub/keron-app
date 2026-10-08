@@ -99,7 +99,8 @@ Rows in `items`. `title` is needed.
 | `link` | Opened when you click the row. Only `http://` and `https://` links open. |
 | `account` | Which account the row belongs to, like `personal` or `work`. |
 | `status` | For agent rows: `working`, `waiting`, `error`, `done` or `idle`. |
-| `id` | A stable id. Loose ends need it for snooze and done. |
+| `id` | A stable id. Rows need it for `actions`. |
+| `actions` | What you can do to the row from Home, shown as buttons when you hover it: `snooze`, `dismiss` ("Not a thing") and `done`. Only door sources take them, and the app posts each one to the row's own source (`/memory/loose-ends/done`, `/sources/slack-waiting/done`). Loose ends offer all three. Gmail and Slack rows offer `done`, meaning nobody needs a reply from you: the row stays hidden until a newer message comes. Rows from `zeron:` and `script:` sources get no buttons. |
 | `notify` | Loose ends only: the heat level (3 hot, 4 burning) a Mac notification is due for, set by the memory server. Other widgets' `notify` is ignored. |
 
 ### timeline

@@ -26,10 +26,10 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{
-    AppContext as _, Bounds, Context, EventEmitter, Pixels, Point, ScrollHandle, Task, point,
+    App, AppContext as _, Bounds, Context, EventEmitter, Pixels, Point, ScrollHandle, Task, point,
 };
 use gpui_tokio::Tokio;
-use keron_door::DoorClient;
+use keron_door::{DoorClient, DoorError};
 use keron_home::catalog::{self, Catalog};
 use keron_home::kinds::{is_openable, parse_chat_link};
 use keron_home::loose_ends::{self, Action};
@@ -54,6 +54,24 @@ const ZERON_TICK: Duration = Duration::from_secs(10);
 const SHOWN_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Rows a card shows when its manifest has no `limit`.
 const DEFAULT_LIMIT: usize = 6;
+
+/// Sends one row action to the door and says whether it took it. Tests use
+/// a fake.
+pub(crate) type Poster = Rc<dyn Fn(loose_ends::Request, &App) -> Task<Result<(), FetchError>>>;
+
+/// The real poster: through the door client, on the Tokio runtime.
+fn door_poster(door: DoorClient) -> Poster {
+    Rc::new(move |request, cx| {
+        let door = door.clone();
+        let send = Tokio::spawn(cx, async move {
+            loose_ends::send(&door, &request).await.map(|_| ())
+        });
+        cx.background_spawn(async move {
+            send.await
+                .unwrap_or_else(|_| Err(FetchError::Unsupported("the request stopped".to_string())))
+        })
+    })
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum HomeEvent {
@@ -103,7 +121,7 @@ struct WidgetState {
     unavailable: Option<String>,
     loading: bool,
     refresh: Option<Task<()>>,
-    /// Optimistic loose-ends changes, by row id.
+    /// Optimistic row changes (snoozed, done, not a thing), by row id.
     overrides: HashMap<String, RowOverride>,
     actions: HashMap<String, Task<()>>,
     /// Why the last action failed, and when. A good fetch that began after
@@ -192,6 +210,9 @@ pub struct Home {
     zeron: Option<ZeronSnapshot>,
     /// Loose-ends banners; only the owner's Home posts them.
     notices: Option<notices::Notices>,
+    /// Row actions go out through this; `None` without a door, and then
+    /// rows offer none.
+    poster: Option<Poster>,
     frame: Frame,
     scroll: ScrollHandle,
     save_pending: bool,
@@ -277,6 +298,7 @@ impl Home {
         cx: &mut Context<Self>,
     ) -> Self {
         let scripts_ready = script.is_some();
+        let poster = door.clone().map(door_poster);
         let fetcher = Fetcher::new(door, paths.widgets_dir.clone(), script.unwrap_or_default());
         let zeron_tick = cx.spawn(async move |this, cx| {
             loop {
@@ -307,6 +329,7 @@ impl Home {
             snooze_menu: Popup::default(),
             zeron: None,
             notices: None,
+            poster,
             frame: Frame::default(),
             scroll: ScrollHandle::new(),
             save_pending: false,
@@ -796,13 +819,15 @@ impl Home {
         cx.notify();
     }
 
-    // ---- loose ends ----
+    // ---- row actions ----
 
-    /// Snooze, done or dismiss one row: shown at once, then sent through the
-    /// door, then the widget fetches again. A failure puts the row back and
-    /// says why on the card.
+    /// Snooze, done or dismiss one row: shown at once, then sent to the
+    /// widget's own source through the door (`/memory/loose-ends/done`,
+    /// `/sources/slack-waiting/done`), then the widget fetches again. A
+    /// failure puts the row back and says why on the card, except a mail or
+    /// Slack row the source has already dropped, which stays hidden.
     pub(crate) fn act(&mut self, widget: &str, row: &str, action: Action, cx: &mut Context<Self>) {
-        let Some(door) = self.fetcher.door().cloned() else {
+        let Some(post) = self.poster.clone() else {
             return;
         };
         let change = match action {
@@ -810,20 +835,17 @@ impl Home {
             Action::Snooze { .. } => RowChange::Snoozed,
             Action::Shown | Action::Notified { .. } => return,
         };
-        let ids = vec![row.to_string()];
-        let send = Tokio::spawn(
-            cx,
-            async move { loose_ends::act(&door, &action, &ids).await },
-        );
+        let Some(manifest) = self.catalog.manifests.iter().find(|m| m.id == widget) else {
+            return;
+        };
+        let Ok(request) = loose_ends::request(&manifest.source, &action, &[row.to_string()]) else {
+            return;
+        };
+        let send = post(request, cx);
         let task = cx.spawn({
             let (widget, row) = (widget.to_string(), row.to_string());
             async move |this, cx| {
-                let result = send
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(FetchError::Unsupported("the request stopped".to_string()))
-                    })
-                    .map(|_| ());
+                let result = send.await;
                 this.update(cx, |this, cx| this.finish_action(&widget, &row, result, cx))
                     .ok();
             }
@@ -848,6 +870,13 @@ impl Home {
         result: Result<(), FetchError>,
         cx: &mut Context<Self>,
     ) {
+        // A mail or Slack row the poller has already dropped (answered
+        // elsewhere) needs no reply: the door's 404 says what the owner
+        // wanted is already true, so the next fetch confirms it's gone.
+        let result = match result {
+            Err(error) if already_gone(&error) && self.from_keron_sources(widget) => Ok(()),
+            other => other,
+        };
         let Some(state) = self.widgets.get_mut(widget) else {
             return;
         };
@@ -868,20 +897,26 @@ impl Home {
         cx.notify();
     }
 
+    fn from_keron_sources(&self, widget: &str) -> bool {
+        self.catalog
+            .manifests
+            .iter()
+            .any(|m| m.id == widget && matches!(m.source, SourceSpec::KeronSources(_)))
+    }
+
     /// Tell the door which loose ends are on screen: when they first show,
     /// then at most once an hour.
     fn maybe_post_shown(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.frame.opacity < 0.5 || self.frame.width <= 0.0 || self.sign_in != SignIn::SignedIn {
             return;
         }
-        let Some(door) = self.fetcher.door().cloned() else {
+        let Some(post) = self.poster.clone() else {
             return;
         };
-        let Some(slot) = self
-            .arranged()
-            .into_iter()
-            .find(|slot| slot.shown && slot.manifest.id == id && is_door(&slot.manifest.source))
-        else {
+        let loose_ends = loose_ends::loose_ends();
+        let Some(slot) = self.arranged().into_iter().find(|slot| {
+            slot.shown && slot.manifest.id == id && slot.manifest.source == loose_ends
+        }) else {
             return;
         };
         let Some(state) = self.widgets.get_mut(id) else {
@@ -909,12 +944,13 @@ impl Home {
         if ids.is_empty() {
             return;
         }
+        let Ok(request) = loose_ends::request(&loose_ends, &Action::Shown, &ids) else {
+            return;
+        };
         state.shown_posted = Some(Instant::now());
-        let post = Tokio::spawn(cx, async move {
-            loose_ends::act(&door, &Action::Shown, &ids).await
-        });
+        let post = post(request, cx);
         state.shown_task = Some(cx.background_spawn(async move {
-            if let Ok(Err(error)) = post.await {
+            if let Err(error) = post.await {
                 tracing::debug!(%error, "home: couldn't report shown loose ends");
             }
         }));
@@ -1107,6 +1143,14 @@ impl Home {
             cx.notify();
         }
     }
+}
+
+/// The door's answer for an action on a row it no longer has.
+fn already_gone(error: &FetchError) -> bool {
+    matches!(
+        error,
+        FetchError::Door(DoorError::Http { status: 404, error: Some(code), .. }) if code == "unknown_item"
+    )
 }
 
 fn is_door(source: &SourceSpec) -> bool {

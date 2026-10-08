@@ -864,11 +864,16 @@ impl Home {
                         .child(SharedString::from(sub)),
                 )
             });
+        // Actions post to the widget's own source, so only door rows offer them.
         let actions = item
             .id
             .as_deref()
-            .filter(|_| !item.actions.is_empty() && self.fetcher.door().is_some())
-            .map(|row| self.render_row_actions(theme, widget, row, item, &key, cx));
+            .filter(|_| {
+                !item.actions.is_empty()
+                    && self.poster.is_some()
+                    && manifest.source.door_path().is_some()
+            })
+            .map(|row| self.render_row_actions(theme, manifest, row, item, &key, cx));
         if actions.is_some() {
             // Snooze and Done take the right side's place while they show.
             let menu_open = self
@@ -915,16 +920,18 @@ impl Home {
     }
 
     /// Snooze and Done, over the row's right side while it's hovered or one
-    /// of them has keyboard focus.
+    /// of them has keyboard focus. Done on a Gmail or Slack row means nobody
+    /// needs a reply.
     fn render_row_actions(
         &self,
         theme: &Theme,
-        widget: &str,
+        manifest: &Manifest,
         row: &str,
         item: &ListItem,
         group: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let widget = manifest.id.as_str();
         let offers = |name: &str| item.actions.iter().any(|action| action == name);
         let menu_open = self
             .snooze_menu
@@ -986,10 +993,13 @@ impl Home {
             );
         }
         if offers("done") {
-            cluster = cluster.child(
-                action_button(theme, &pair, "done", "Done", Action::Done, cx)
-                    .aria_label(format!("Mark {} done", item.title)),
-            );
+            let done = action_button(theme, &pair, "done", "Done", Action::Done, cx);
+            cluster = cluster.child(if matches!(manifest.source, SourceSpec::KeronSources(_)) {
+                done.aria_label(format!("Mark {} as needing no reply", item.title))
+                    .tooltip(widgets::text_tooltip("No reply needed"))
+            } else {
+                done.aria_label(format!("Mark {} done", item.title))
+            });
         }
         cluster.into_any_element()
     }

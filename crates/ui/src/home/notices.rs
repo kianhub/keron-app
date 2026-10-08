@@ -76,7 +76,8 @@ impl Notices {
             Rc::new(move |level, id, cx| {
                 let door = door.clone();
                 let send = Tokio::spawn(cx, async move {
-                    loose_ends::act(&door, &Action::Notified { level }, &[id])
+                    let source = loose_ends::loose_ends();
+                    loose_ends::act(&door, &source, &Action::Notified { level }, &[id])
                         .await
                         .map(|_| ())
                 });

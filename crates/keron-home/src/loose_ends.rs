@@ -1,15 +1,25 @@
-//! Owner actions on loose ends, through the door:
-//! `POST /memory/loose-ends/{snooze|done|dismiss|shown|notified}` with
-//! `{"ids": [...], "until": "..."}` (or `"level"` for notified). The server
-//! changes heat and writes the notes (`[mini/loose-ends] Snoozed: ... until
-//! 14:00`, `Done: ...`); notified writes none.
+//! Owner actions on a widget's rows, through the door: an action posts to
+//! the widget's own source, `<door path>/<action>` with `{"ids": [...]}`.
+//!
+//! - Loose ends: `POST /memory/loose-ends/{snooze|done|dismiss|shown|notified}`,
+//!   plus `"until"` for a snooze or `"level"` for notified. The server
+//!   changes heat and writes the notes (`[mini/loose-ends] Snoozed: ...
+//!   until 14:00`, `Done: ...`); notified writes none.
+//! - keron-sources: `POST /sources/<name>/done` (gmail-needs-reply,
+//!   slack-waiting) marks rows as needing no reply; the door leaves them out
+//!   until a newer message comes. No note is written.
 
 use chrono::{DateTime, Local, Timelike};
 use keron_door::DoorClient;
 use serde_json::{Value, json};
 
 use crate::kinds::parse_payload;
-use crate::{Body, FetchError, Kind, ListItem};
+use crate::{Body, FetchError, Kind, ListItem, SourceSpec};
+
+/// The loose-ends source, `memory:loose-ends`.
+pub fn loose_ends() -> SourceSpec {
+    SourceSpec::Memory("loose-ends".to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -44,18 +54,43 @@ impl Action {
     }
 }
 
-/// Post the action; returns the changed items, in the list shape.
+/// One action as the door takes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    /// `<the source's door path>/<action>`, like `/sources/slack-waiting/done`.
+    pub path: String,
+    pub body: Value,
+}
+
+/// The request for `action` on `source`'s rows `ids`. Only door sources
+/// (`memory:`, `keron-sources:`) take actions.
+pub fn request(
+    source: &SourceSpec,
+    action: &Action,
+    ids: &[String],
+) -> Result<Request, FetchError> {
+    let base = source
+        .door_path()
+        .ok_or_else(|| FetchError::Unsupported(format!("{source} rows don't take actions")))?;
+    Ok(Request {
+        path: format!("{base}/{}", action.name()),
+        body: body(action, ids),
+    })
+}
+
+/// Post the action to `source`; returns the changed items, in the list shape.
 pub async fn act(
     door: &DoorClient,
+    source: &SourceSpec,
     action: &Action,
     ids: &[String],
 ) -> Result<Vec<ListItem>, FetchError> {
-    let answer = door
-        .post_json(
-            &format!("/memory/loose-ends/{}", action.name()),
-            &body(action, ids),
-        )
-        .await?;
+    send(door, &request(source, action, ids)?).await
+}
+
+/// Post a request built by [`request`]; returns the changed items.
+pub async fn send(door: &DoorClient, request: &Request) -> Result<Vec<ListItem>, FetchError> {
+    let answer = door.post_json(&request.path, &request.body).await?;
     match parse_payload(Kind::List, &answer)
         .map_err(FetchError::Payload)?
         .body
@@ -114,6 +149,25 @@ mod tests {
             ["1 hour", "This evening", "Tomorrow", "Next week"]
         );
         assert_eq!(labels(17), ["1 hour", "Tomorrow", "Next week"]);
+    }
+
+    #[test]
+    fn an_action_posts_to_its_widgets_source() {
+        let ids = ["C024BE91L:1728300000.000100".to_string()];
+        let slack = SourceSpec::KeronSources("slack-waiting".to_string());
+        assert_eq!(
+            request(&slack, &Action::Done, &ids).unwrap(),
+            Request {
+                path: "/sources/slack-waiting/done".to_string(),
+                body: json!({"ids": ["C024BE91L:1728300000.000100"]}),
+            }
+        );
+        let level = Action::Notified { level: 3 };
+        let notified = request(&loose_ends(), &level, &["a1".to_string()]).unwrap();
+        assert_eq!(notified.path, "/memory/loose-ends/notified");
+        assert_eq!(notified.body, json!({"ids": ["a1"], "level": 3}));
+        let script = SourceSpec::Script("mine.sh".into());
+        assert!(request(&script, &Action::Done, &ids).is_err());
     }
 
     #[test]
