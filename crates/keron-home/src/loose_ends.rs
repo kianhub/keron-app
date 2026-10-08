@@ -62,6 +62,22 @@ pub struct Request {
     pub body: Value,
 }
 
+impl Request {
+    /// Add the `at` the owner was shown for each row (`"seen": {id: at}`), so
+    /// Done on a mail or Slack row hides only what they saw: a message that
+    /// arrived after Home's last refresh stays visible.
+    pub fn seen<'a>(mut self, shown: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let seen: serde_json::Map<String, Value> = shown
+            .into_iter()
+            .map(|(id, at)| (id.to_string(), Value::String(at.to_string())))
+            .collect();
+        if !seen.is_empty() {
+            self.body["seen"] = Value::Object(seen);
+        }
+        self
+    }
+}
+
 /// The request for `action` on `source`'s rows `ids`. Only door sources
 /// (`memory:`, `keron-sources:`) take actions.
 pub fn request(
@@ -129,6 +145,19 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn done_on_a_source_row_carries_the_time_the_owner_saw() {
+        let source = SourceSpec::parse("keron-sources:gmail-needs-reply").unwrap();
+        let request = request(&source, &Action::Done, &["t1".to_string()])
+            .unwrap()
+            .seen([("t1", "2026-10-08T09:00:00Z")]);
+        assert_eq!(request.path, "/sources/gmail-needs-reply/done");
+        assert_eq!(
+            request.body,
+            json!({"ids": ["t1"], "seen": {"t1": "2026-10-08T09:00:00Z"}})
+        );
+    }
 
     #[test]
     fn evening_is_offered_only_before_five() {

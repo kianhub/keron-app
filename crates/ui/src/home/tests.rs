@@ -558,10 +558,16 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
 
     home.read_with(cx, |home, _| {
         let slack = &home.widgets["slack"];
-        assert!(slack.overrides["gone"].settled, "answered elsewhere is done");
+        assert!(
+            slack.overrides["gone"].settled,
+            "answered elsewhere is done"
+        );
         assert!(slack.action_error.is_none());
         let ends = &home.widgets["ends"];
-        assert!(!ends.overrides.contains_key("gone"), "a loose end comes back");
+        assert!(
+            !ends.overrides.contains_key("gone"),
+            "a loose end comes back"
+        );
         assert!(ends.action_error.is_some());
     });
 }

@@ -838,9 +838,27 @@ impl Home {
         let Some(manifest) = self.catalog.manifests.iter().find(|m| m.id == widget) else {
             return;
         };
-        let Ok(request) = loose_ends::request(&manifest.source, &action, &[row.to_string()]) else {
+        let Ok(mut request) = loose_ends::request(&manifest.source, &action, &[row.to_string()])
+        else {
             return;
         };
+        // Mail and Slack: say which message the owner saw, so a newer one isn't hidden too.
+        if matches!(manifest.source, SourceSpec::KeronSources(_)) {
+            let shown = self
+                .widgets
+                .get(widget)
+                .and_then(|state| state.payload.as_ref())
+                .and_then(|payload| match &payload.body {
+                    Body::List(items) => items
+                        .iter()
+                        .find(|item| item.id.as_deref() == Some(row))
+                        .and_then(|item| item.at.clone()),
+                    _ => None,
+                });
+            if let Some(at) = shown {
+                request = request.seen([(row, at.as_str())]);
+            }
+        }
         let send = post(request, cx);
         let task = cx.spawn({
             let (widget, row) = (widget.to_string(), row.to_string());
