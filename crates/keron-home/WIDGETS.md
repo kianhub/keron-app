@@ -43,7 +43,7 @@ empty  = "Nobody's waiting"
 | `icon` | no | none | One of `flag`, `chat`, `check`, `calendar`, `tree`, `pulse`, `devices`, `pr`, `mail`, `mic`, `bars`, `widget`, `bell`, `star`, `list`, `globe`. |
 | `wide` | no | `false` | Take two columns instead of one, until you resize it in Customize. |
 | `limit` | no | all | The most rows shown, from 1 to 50. |
-| `empty` | no | | The text shown when there are no rows. |
+| `empty` | no | | The text shown when there are no rows (on the card, or in the tooltip of its icon once it's collapsed). |
 
 Any other key is an error, so a typo shows up instead of being ignored. A
 manifest that doesn't parse is listed in Customize with the problem, so it
@@ -206,6 +206,8 @@ Customize on Home writes it for you: toggle widgets, drag to reorder, and
 switch between one and two columns.
 
 ```toml
+collapse_empty = true
+
 [[widget]]
 id = "loose-ends"
 shown = true
@@ -222,6 +224,11 @@ shown = false
 - A widget that isn't listed yet (one you just added) shows at the end.
 - An entry whose manifest is gone is kept, so the widget gets its place back
   if you add it again.
+- `collapse_empty` (on unless set to `false`, also a switch in Customize):
+  a widget whose data is in and has nothing to show leaves the grid and waits
+  as its icon beside Customize. Its tooltip gives the `empty` text, a click
+  opens the card until the next click, and it comes back to the grid by
+  itself once it has something. Errors and sign-in prompts always stay cards.
 
 ## Adding a widget
 

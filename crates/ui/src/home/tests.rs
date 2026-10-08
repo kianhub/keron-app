@@ -723,3 +723,128 @@ fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut 
         assert_eq!(drawn(home), rows(&[("c", false)]));
     });
 }
+
+fn ids(slots: Vec<Slot>) -> Vec<String> {
+    slots.into_iter().map(|slot| slot.manifest.id).collect()
+}
+
+/// Home with one widget per case: `empty` and `blank` (a stat with nothing)
+/// are loaded and have nothing; `full` has a row, `waiting` hasn't loaded,
+/// `broken` failed, `number` is a stat with a value and `mail` is a door
+/// widget, empty but signed out.
+fn quiet_home(cx: &mut TestAppContext) -> (Entity<Home>, tempfile::TempDir) {
+    let (home, _paths, dir) = home(cx);
+    home.update(cx, |home, cx| {
+        let stat = |id: &str| Manifest {
+            kind: Kind::Stat,
+            ..manifest(id, id)
+        };
+        let mut mail = manifest("mail", "Gmail");
+        mail.source = SourceSpec::KeronSources("gmail-waiting".to_string());
+        home.apply_catalog(
+            catalog(vec![
+                manifest("empty", "Loose ends"),
+                manifest("full", "Full"),
+                manifest("waiting", "Waiting"),
+                manifest("broken", "Broken"),
+                stat("number"),
+                stat("blank"),
+                mail,
+            ]),
+            cx,
+        );
+        let stat_payload = |value: &str| Payload {
+            updated: None,
+            errors: Vec::new(),
+            body: Body::Stat(keron_home::Stat {
+                value: value.to_string(),
+                ..keron_home::Stat::default()
+            }),
+        };
+        let mut set = |id: &str, payload: Payload, error: Option<&str>| {
+            let state = home.widgets.entry(id.to_string()).or_default();
+            state.payload = Some(payload);
+            state.error = error.map(str::to_string);
+        };
+        set("empty", rows(&[]), None);
+        set("full", rows(&["a"]), None);
+        set("broken", rows(&[]), Some("the door said no"));
+        set("number", stat_payload("42"), None);
+        set("blank", stat_payload(""), None);
+        set("mail", rows(&[]), None);
+        home.sync_quiet(cx);
+    });
+    (home, dir)
+}
+
+#[gpui::test]
+fn only_loaded_empty_widgets_leave_the_grid_for_chips(cx: &mut TestAppContext) {
+    let (home, _dir) = quiet_home(cx);
+    home.update(cx, |home, cx| {
+        assert_eq!(ids(home.chip_slots()), ["empty", "blank"]);
+        assert_eq!(
+            ids(home.grid_slots()),
+            ["full", "waiting", "broken", "number", "mail"]
+        );
+
+        // Signed in, the empty door widget is quiet too.
+        home.sign_in = SignIn::SignedIn;
+        assert_eq!(ids(home.chip_slots()), ["empty", "blank", "mail"]);
+
+        // A row action in flight keeps the card up.
+        home.widgets.get_mut("empty").unwrap().overrides.insert(
+            "r1".to_string(),
+            RowOverride {
+                change: RowChange::Hidden,
+                settled: false,
+            },
+        );
+        home.sync_quiet(cx);
+        assert_eq!(ids(home.chip_slots()), ["blank", "mail"]);
+    });
+}
+
+#[gpui::test]
+fn a_peek_shows_a_quiet_card_until_its_data_arrives(cx: &mut TestAppContext) {
+    let (home, _dir) = quiet_home(cx);
+    home.update(cx, |home, cx| {
+        home.toggle_peek("empty", cx);
+        assert!(ids(home.grid_slots()).contains(&"empty".to_string()));
+        // Its chip stays, pressed.
+        assert!(ids(home.chip_slots()).contains(&"empty".to_string()));
+        home.toggle_peek("empty", cx);
+        assert!(!ids(home.grid_slots()).contains(&"empty".to_string()));
+
+        // Peeked, then a row arrives: it's a card on its own, peek gone.
+        home.toggle_peek("empty", cx);
+        home.apply_fetch("empty", Instant::now(), Ok(rows(&["a"])), cx);
+        assert!(home.peeks.is_empty());
+        assert!(ids(home.grid_slots()).contains(&"empty".to_string()));
+        assert!(!ids(home.chip_slots()).contains(&"empty".to_string()));
+
+        // Empty again: back to a chip, not peeked.
+        home.apply_fetch("empty", Instant::now(), Ok(rows(&[])), cx);
+        assert!(!ids(home.grid_slots()).contains(&"empty".to_string()));
+        assert!(ids(home.chip_slots()).contains(&"empty".to_string()));
+    });
+}
+
+#[gpui::test]
+fn customize_and_the_switch_off_show_every_card(cx: &mut TestAppContext) {
+    let (home, _dir) = quiet_home(cx);
+    let every = [
+        "empty", "full", "waiting", "broken", "number", "blank", "mail",
+    ];
+    home.update(cx, |home, cx| {
+        home.toggle_customize(cx);
+        assert_eq!(ids(home.grid_slots()), every);
+        assert!(home.chip_slots().is_empty());
+        home.toggle_customize(cx);
+        assert_eq!(ids(home.chip_slots()), ["empty", "blank"]);
+
+        home.set_collapse_empty(false, cx);
+        assert_eq!(ids(home.grid_slots()), every);
+        assert!(home.chip_slots().is_empty());
+        assert!(!home.layout.collapse_empty);
+    });
+}

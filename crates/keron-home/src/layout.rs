@@ -1,6 +1,8 @@
 //! `~/.keron/home.toml`: which widgets show, in what order, how wide.
 //!
 //! ```toml
+//! collapse_empty = true  # widgets with nothing to show sit as icons
+//!
 //! [[widget]]
 //! id = "loose-ends"
 //! shown = true
@@ -20,10 +22,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::Manifest;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
+    /// Widgets with nothing to show leave the grid and sit as icons in
+    /// Home's toolbar. On unless the file says otherwise.
+    #[serde(default = "collapse_by_default")]
+    pub collapse_empty: bool,
     #[serde(default, rename = "widget")]
     pub widgets: Vec<LayoutEntry>,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            collapse_empty: collapse_by_default(),
+            widgets: Vec::new(),
+        }
+    }
+}
+
+fn collapse_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -306,5 +325,27 @@ mod tests {
         let broken = dir.path().join("broken.toml");
         std::fs::write(&broken, "[[widget]]\nshown = true\n").unwrap();
         assert!(matches!(Layout::load(&broken), Err(LayoutError::Parse(_))));
+    }
+
+    #[test]
+    fn collapse_empty_is_on_by_default_and_round_trips_beside_the_widgets() {
+        let manifests = [widget("a", false), widget("b", false)];
+        let older: Layout = toml::from_str("[[widget]]\nid = \"b\"\nwidth = 2\n").unwrap();
+        assert!(older.collapse_empty);
+        assert!(Layout::default().collapse_empty);
+
+        let mut layout = older;
+        layout.collapse_empty = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("home.toml");
+        layout.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("collapse_empty = false\n"), "{text}");
+        let loaded = Layout::load(&path).unwrap();
+        assert_eq!(loaded, layout);
+        assert_eq!(
+            order(&loaded, &manifests),
+            [row("b", true, 2), row("a", true, 1)]
+        );
     }
 }

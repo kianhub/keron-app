@@ -1,6 +1,6 @@
-//! Drawing Home: the toolbar, the Customize tray, and the grid of cards with
-//! one body per widget kind. Colors come from the theme, so light and dark
-//! both follow it.
+//! Drawing Home: the toolbar (with quiet widgets' chips), the Customize
+//! tray, and the grid of cards with one body per widget kind. Colors come
+//! from the theme, so light and dark both follow it.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,14 @@ const ROW_TOOLTIP_GAP: f32 = 2.0;
 /// How far above the pointer the tooltip ends when the row hasn't been
 /// measured: clear of the button wherever the pointer is in it.
 const ROW_TOOLTIP_FALLBACK_LIFT: f32 = 24.0;
+/// A quiet widget's chip in the toolbar: its side, its glyph, the space
+/// between chips, and how small it starts as it fades in.
+const CHIP_SIZE: f32 = 26.0;
+const CHIP_ICON_SIZE: f32 = 14.0;
+const CHIP_GAP: f32 = 2.0;
+const CHIP_START_SCALE: f32 = 0.8;
+/// How far below its place a card that left its chip starts.
+const CARD_RISE: f32 = 6.0;
 
 /// The pointer ghost while a card drags: nothing, the card itself moves.
 struct CardGhost;
@@ -73,8 +81,13 @@ impl Render for Home {
             return div().into_any_element();
         }
         self.keyboard_row = self.keyboard_focused_row(window, cx);
-        // Rows closing up after Done are drawn from the clock, frame by frame.
-        if self.widgets.values().any(|state| !state.leaving.is_empty()) {
+        self.sync_quiet(cx);
+        // Rows closing up after Done, and chips and cards fading in where
+        // they moved, are drawn from the clock, frame by frame.
+        if self.widgets.values().any(|state| !state.leaving.is_empty())
+            || !self.chip_in.is_empty()
+            || !self.card_in.is_empty()
+        {
             window.request_animation_frame();
         }
         let theme = Theme::of(cx).clone();
@@ -92,7 +105,7 @@ impl Render for Home {
             .gap(px(GRID_GAP))
             .child(toolbar)
             .children(tray)
-            .child(grid);
+            .children(grid);
         div()
             .relative()
             .size_full()
@@ -150,7 +163,106 @@ impl Home {
                     .min_w_0()
                     .children(self.render_sign_in(theme, cx)),
             )
+            .children(self.render_chips(theme, cx))
             .child(customize)
+            .into_any_element()
+    }
+
+    /// Quiet widgets as icon chips, in Home's order.
+    fn render_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chips = self.chip_slots();
+        if chips.is_empty() {
+            return None;
+        }
+        let chips: Vec<AnyElement> = chips
+            .iter()
+            .map(|slot| self.render_chip(theme, &slot.manifest, cx))
+            .collect();
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .children(chips)
+                .into_any_element(),
+        )
+    }
+
+    /// A quiet widget's chip: its icon in a quiet round button. The tooltip
+    /// says what the card would; a click opens the card in the grid until
+    /// the next click, and the chip stays pressed meanwhile.
+    fn render_chip(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = manifest.id.clone();
+        let peeked = self.peeks.contains(&id);
+        let nothing = empty_text(manifest);
+        let mut tip = format!("{} · {nothing}", manifest.title);
+        if let Some(note) = self
+            .widgets
+            .get(&id)
+            .and_then(|state| state.payload.as_ref())
+            .and_then(|payload| freshness(manifest, payload))
+        {
+            tip.push_str(" · ");
+            tip.push_str(&note);
+        }
+        let label = format!(
+            "{}: {nothing}. {}",
+            manifest.title,
+            if peeked { "Hide card" } else { "Show card" }
+        );
+        let key = format!("home-chip-{id}");
+        let fade_key = format!("{key}-hover");
+        let wash = theme.glass_hover();
+        let (bg, ink) = if peeked {
+            (wash, theme.text)
+        } else {
+            (
+                motion::hover_blend(&fade_key, wash.opacity(0.0), wash),
+                motion::hover_blend(&fade_key, theme.text_muted, theme.text),
+            )
+        };
+        // Just moved here from the grid: it grows a little as it fades in.
+        let t = Home::swap_t(self.chip_in.get(&id)).unwrap_or(1.0);
+        let scale = CHIP_START_SCALE + (1.0 - CHIP_START_SCALE) * t;
+        let accent = theme.accent;
+        div()
+            .id(SharedString::from(key))
+            .flex_none()
+            .size(px(CHIP_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(fade_key))
+            .tab_index(0)
+            .role(Role::Button)
+            .aria_label(label)
+            .aria_expanded(peeked)
+            .focus_visible(move |s| s.border_1().border_color(accent))
+            .tooltip(widgets::text_tooltip(tip))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_peek(&id, cx)))
+            .child(
+                div()
+                    .size(px(CHIP_SIZE * scale))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(bg)
+                    .opacity(t)
+                    .child(
+                        icon(icon_for(manifest))
+                            .size(px(CHIP_ICON_SIZE * scale))
+                            .text_color(ink),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -285,6 +397,7 @@ impl Home {
                     ),
             )
             .child(div().flex().flex_col().children(rows))
+            .child(self.render_collapse_switch(theme, cx))
             .children(problems)
             .children(self.render_add_builtins(theme, cx))
             .child(
@@ -309,6 +422,51 @@ impl Home {
                     ),
             );
         crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, tray).into_any_element()
+    }
+
+    /// "Collapse empty widgets": quiet widgets leave the grid for chips.
+    fn render_collapse_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.layout.collapse_empty;
+        let accent = theme.accent;
+        let switch = widgets::toggle_switch(theme, on, "home-collapse-empty")
+            .id("home-collapse-empty")
+            .tab_index(0)
+            .role(Role::Switch)
+            .aria_label("Collapse empty widgets")
+            .aria_toggled(toggled(on))
+            .focus_visible(move |s| s.border_2().border_color(accent))
+            .cursor_pointer()
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, _, cx| this.set_collapse_empty(!on, cx)),
+            );
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .pt(px(10.0))
+            .border_t_1()
+            .border_color(widgets::row_divider(theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(ui_rems(13.0))
+                            .text_color(theme.text)
+                            .child("Collapse empty widgets"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                "A widget with nothing to show waits as an icon beside Customize.",
+                            ),
+                    ),
+            )
+            .child(switch)
+            .into_any_element()
     }
 
     /// "Add:" and a button per built-in with no file in the widgets folder.
@@ -464,24 +622,31 @@ impl Home {
 
     // ---- the grid ----
 
-    fn render_grid(&self, theme: &Theme, columns: u16, cx: &mut Context<Self>) -> AnyElement {
-        let slots: Vec<Slot> = self
-            .arranged()
-            .into_iter()
-            .filter(|slot| slot.shown)
-            .collect();
+    /// The cards; nothing when every shown widget is a chip.
+    fn render_grid(
+        &self,
+        theme: &Theme,
+        columns: u16,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let slots = self.grid_slots();
+        if slots.is_empty() && !self.chip_slots().is_empty() {
+            return None;
+        }
         if slots.is_empty() {
             let text = if self.catalog.manifests.is_empty() {
                 "No widgets yet. Describe one in Customize."
             } else {
                 "Every widget is hidden. Turn some on in Customize."
             };
-            return div()
-                .py(px(8.0))
-                .text_size(ui_rems(12.5))
-                .text_color(theme.text_muted)
-                .child(text)
-                .into_any_element();
+            return Some(
+                div()
+                    .py(px(8.0))
+                    .text_size(ui_rems(12.5))
+                    .text_color(theme.text_muted)
+                    .child(text)
+                    .into_any_element(),
+            );
         }
         let count = slots.len();
         // While a card drags, the others make room: the order shown is the
@@ -510,11 +675,15 @@ impl Home {
             let slot = &slots[ix];
             let (row, col) = cells[position];
             let span = u16::from(widths[position]);
-            let card = self
+            let mut card = self
                 .render_card(theme, slot, ix, cx)
                 .row_start(row as i16 + 1)
                 .col_start(col as i16 + 1)
                 .col_end((col + span) as i16 + 1);
+            // Just out of its chip: it fades in and rises into place.
+            if let Some(t) = Home::swap_t(self.card_in.get(&slot.manifest.id)) {
+                card = card.opacity(t).top(px(CARD_RISE * (1.0 - t)));
+            }
             // A card that moved slides from its old slot to its new one.
             let slide = self.drag.as_ref().and_then(|drag| {
                 let before = previous.iter().position(|&other| other == ix)?;
@@ -548,7 +717,7 @@ impl Home {
                     .into_any_element(),
             );
         }
-        div()
+        let grid = div()
             .id("home-grid")
             .w_full()
             .grid()
@@ -575,7 +744,8 @@ impl Home {
                 )
             })
             .children(cards)
-            .into_any_element()
+            .into_any_element();
+        Some(grid)
     }
 
     fn render_card(
@@ -1607,25 +1777,7 @@ fn render_footer(
 ) -> Option<AnyElement> {
     let payload = state?.payload.as_ref()?;
     let problems = payload.errors.len();
-    let now = Utc::now();
-    // Loose ends' `updated` is the mini's last pass (hourly), not this fetch: say
-    // so, always. Other door sources mention it only when it's gone stale.
-    let pass = matches!(&manifest.source, SourceSpec::Memory(name) if name == "loose-ends");
-    let stale = payload
-        .updated
-        .as_deref()
-        .filter(|_| is_door(&manifest.source))
-        .and_then(parse_time)
-        .filter(|at| {
-            pass || now
-                .signed_duration_since(at.with_timezone(&Utc))
-                .to_std()
-                .is_ok_and(|age| age > stale_after(manifest))
-        })
-        .map(|at| {
-            let word = if pass { "checked" } else { "updated" };
-            format!("{word} {} ago", short_age(at, now))
-        });
+    let stale = freshness(manifest, payload);
     if problems == 0 && stale.is_none() {
         return None;
     }
@@ -1658,6 +1810,29 @@ fn render_footer(
             .children(stale.map(SharedString::from))
             .into_any_element(),
     )
+}
+
+/// How old door data is: loose ends' `updated` is the mini's last pass
+/// (hourly), not this fetch, so it's always said ("checked 5m ago"); other
+/// door sources say it only once it's gone stale.
+fn freshness(manifest: &Manifest, payload: &Payload) -> Option<String> {
+    let now = Utc::now();
+    let pass = matches!(&manifest.source, SourceSpec::Memory(name) if name == "loose-ends");
+    payload
+        .updated
+        .as_deref()
+        .filter(|_| is_door(&manifest.source))
+        .and_then(parse_time)
+        .filter(|at| {
+            pass || now
+                .signed_duration_since(at.with_timezone(&Utc))
+                .to_std()
+                .is_ok_and(|age| age > stale_after(manifest))
+        })
+        .map(|at| {
+            let word = if pass { "checked" } else { "updated" };
+            format!("{word} {} ago", short_age(at, now))
+        })
 }
 
 // ---- small pieces ----
@@ -1945,13 +2120,15 @@ fn muted(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
 }
 
 fn empty(theme: &Theme, manifest: &Manifest) -> AnyElement {
-    muted(
-        theme,
-        manifest
-            .empty
-            .clone()
-            .unwrap_or_else(|| "Nothing here".to_string()),
-    )
+    muted(theme, empty_text(manifest))
+}
+
+/// What a widget says when it has nothing to show.
+fn empty_text(manifest: &Manifest) -> String {
+    manifest
+        .empty
+        .clone()
+        .unwrap_or_else(|| "Nothing here".to_string())
 }
 
 fn more_line(theme: &Theme, more: usize) -> Option<Div> {

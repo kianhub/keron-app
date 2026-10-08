@@ -9,6 +9,10 @@
 //! as a snapshot ([`snapshot`]) and where to sit ([`Home::set_frame`]), and
 //! listens for [`HomeEvent`]s. Loose ends the server says are due become Mac
 //! banners ([`notices`]).
+//!
+//! A shown widget with nothing to show (its data is in and empty, nothing
+//! wrong) is quiet: unless the owner turned that off, it leaves the grid and
+//! sits as an icon chip in the toolbar, where a click peeks at its card.
 
 mod bridge;
 mod notices;
@@ -19,7 +23,7 @@ mod view;
 mod tests;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -57,6 +61,8 @@ const ZERON_TICK: Duration = Duration::from_secs(10);
 const SHOWN_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Rows a card shows when its manifest has no `limit`.
 const DEFAULT_LIMIT: usize = 6;
+/// A widget moving between its chip and its card fades in on this.
+const SWAP: crate::motion::MotionSpec = crate::motion::DIALOG_IN;
 
 /// Sends one row action to the door and says whether it took it. Tests use
 /// a fake.
@@ -241,6 +247,16 @@ pub struct Home {
     widgets: HashMap<String, WidgetState>,
     sign_in: SignIn,
     customize: bool,
+    /// Quiet widgets opened as cards from their chips, this session only.
+    peeks: HashSet<String>,
+    /// What the last [`Home::sync_quiet`] saw: shown widgets in the chip row,
+    /// and those in the grid.
+    chip_row: HashSet<String>,
+    in_grid: HashSet<String>,
+    /// Chips that just appeared for a card that went quiet, and cards that
+    /// just appeared for a chip, with when: each fades in on [`SWAP`].
+    chip_in: HashMap<String, Instant>,
+    card_in: HashMap<String, Instant>,
     drag: Option<CardDrag>,
     /// Each shown card's bounds from the last frame (Customize only).
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
@@ -370,6 +386,11 @@ impl Home {
             widgets: HashMap::new(),
             sign_in: SignIn::Checking,
             customize: false,
+            peeks: HashSet::new(),
+            chip_row: HashSet::new(),
+            in_grid: HashSet::new(),
+            chip_in: HashMap::new(),
+            card_in: HashMap::new(),
             drag: None,
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
@@ -731,6 +752,7 @@ impl Home {
         if fresh {
             self.post_due_notices(id, started, cx);
         }
+        self.sync_quiet(cx);
         cx.notify();
         true
     }
@@ -777,8 +799,138 @@ impl Home {
             }
         }
         if changed {
+            self.sync_quiet(cx);
             cx.notify();
         }
+    }
+
+    // ---- quiet widgets ----
+
+    /// Whether a widget has nothing to show: its data is in and has no rows
+    /// (a stat, no value), and nothing about it wants a look (an error, a
+    /// first load, the door's sign-in, a row action in flight or closing
+    /// up). Hidden or not.
+    fn is_quiet(&self, manifest: &Manifest) -> bool {
+        if is_door(&manifest.source) && self.sign_in != SignIn::SignedIn {
+            return false;
+        }
+        if matches!(manifest.source, SourceSpec::Script(_)) && !self.scripts_ready {
+            return false;
+        }
+        let Some(state) = self.widgets.get(&manifest.id) else {
+            return false;
+        };
+        let Some(payload) = &state.payload else {
+            return false;
+        };
+        state.error.is_none()
+            && state.unavailable.is_none()
+            && !state.loading
+            && state.action_error.is_none()
+            && state.overrides.is_empty()
+            && state.leaving.is_empty()
+            && payload.errors.is_empty()
+            && shows_nothing(&payload.body)
+    }
+
+    /// Whether quiet widgets leave the grid right now: the owner's switch,
+    /// and never in Customize, where every card can be moved and resized.
+    fn collapses(&self) -> bool {
+        self.layout.collapse_empty && !self.customize
+    }
+
+    /// Shown widgets drawn as chips beside Customize, in Home's order. A
+    /// peeked one is in the grid too.
+    fn chip_slots(&self) -> Vec<Slot> {
+        if !self.collapses() {
+            return Vec::new();
+        }
+        self.arranged()
+            .into_iter()
+            .filter(|slot| slot.shown && self.is_quiet(&slot.manifest))
+            .collect()
+    }
+
+    /// Shown widgets drawn as cards, in Home's order.
+    fn grid_slots(&self) -> Vec<Slot> {
+        let collapses = self.collapses();
+        self.arranged()
+            .into_iter()
+            .filter(|slot| {
+                slot.shown
+                    && !(collapses
+                        && !self.peeks.contains(&slot.manifest.id)
+                        && self.is_quiet(&slot.manifest))
+            })
+            .collect()
+    }
+
+    /// Open a quiet widget's card from its chip, or put it back.
+    pub(crate) fn toggle_peek(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.peeks.remove(id) {
+            self.peeks.insert(id.to_string());
+        }
+        self.sync_quiet(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_collapse_empty(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.layout.collapse_empty = on;
+        self.layout_changed(cx);
+        self.sync_quiet(cx);
+    }
+
+    /// Bring chips and cards in line with the data: a widget that has
+    /// something again loses its peek, and whatever just moved between the
+    /// chip row and the grid fades in where it lands (not under Reduce
+    /// Motion). The quiet state follows the rows, so it only flips when
+    /// their count crosses zero, not on every refresh.
+    fn sync_quiet(&mut self, cx: &App) {
+        let quiet: HashSet<String> = self
+            .arranged()
+            .into_iter()
+            .filter(|slot| slot.shown && self.is_quiet(&slot.manifest))
+            .map(|slot| slot.manifest.id)
+            .collect();
+        self.peeks.retain(|id| quiet.contains(id));
+        let chip_row: HashSet<String> = self
+            .chip_slots()
+            .into_iter()
+            .map(|slot| slot.manifest.id)
+            .collect();
+        let in_grid: HashSet<String> = self
+            .grid_slots()
+            .into_iter()
+            .map(|slot| slot.manifest.id)
+            .collect();
+        let now = Instant::now();
+        if !crate::motion::reduced_motion(cx) {
+            for id in chip_row.difference(&self.chip_row) {
+                if self.in_grid.contains(id) {
+                    self.chip_in.insert(id.clone(), now);
+                }
+            }
+            for id in in_grid.difference(&self.in_grid) {
+                if self.chip_row.contains(id) {
+                    self.card_in.insert(id.clone(), now);
+                }
+            }
+        }
+        let total = swap_duration();
+        self.chip_in
+            .retain(|id, at| chip_row.contains(id) && at.elapsed() < total);
+        self.card_in
+            .retain(|id, at| in_grid.contains(id) && at.elapsed() < total);
+        self.chip_row = chip_row;
+        self.in_grid = in_grid;
+    }
+
+    /// How far a chip or card that just appeared has faded in, 0 to 1;
+    /// `None` once it's done.
+    fn swap_t(started: Option<&Instant>) -> Option<f32> {
+        let elapsed = started?.elapsed();
+        let total = swap_duration();
+        (elapsed < total).then(|| SWAP.progress(elapsed.as_secs_f32() / total.as_secs_f32()))
     }
 
     // ---- the door sign-in ----
@@ -884,6 +1036,7 @@ impl Home {
                 *state = WidgetState::default();
             }
         }
+        self.sync_quiet(cx);
         cx.notify();
     }
 
@@ -1148,6 +1301,7 @@ impl Home {
         self.customize = !self.customize;
         self.drag = None;
         self.card_bounds.borrow_mut().clear();
+        self.sync_quiet(cx);
         cx.notify();
     }
 
@@ -1261,9 +1415,8 @@ impl Home {
         let scroll_y = self.scroll.offset().y;
         if self.drag.as_ref().is_none_or(|drag| drag.id != id) {
             let shown: Vec<String> = self
-                .arranged()
+                .grid_slots()
                 .into_iter()
-                .filter(|slot| slot.shown)
                 .map(|slot| slot.manifest.id)
                 .collect();
             let slots = {
@@ -1308,12 +1461,9 @@ impl Home {
         };
         if drag.over != drag.from {
             let order = self.arranged();
+            let grid = self.grid_slots();
             let all: Vec<&str> = order.iter().map(|slot| slot.manifest.id.as_str()).collect();
-            let shown: Vec<&str> = order
-                .iter()
-                .filter(|slot| slot.shown)
-                .map(|slot| slot.manifest.id.as_str())
-                .collect();
+            let shown: Vec<&str> = grid.iter().map(|slot| slot.manifest.id.as_str()).collect();
             let index = drop_target(&all, &shown, &drag.id, drag.over);
             self.layout
                 .move_to(&drag.id, index, &self.catalog.manifests);
@@ -1339,6 +1489,19 @@ fn already_gone(error: &FetchError) -> bool {
 
 fn is_door(source: &SourceSpec) -> bool {
     matches!(source, SourceSpec::KeronSources(_) | SourceSpec::Memory(_))
+}
+
+fn swap_duration() -> Duration {
+    SWAP.total().mul_f32(crate::motion::speed_scale())
+}
+
+/// Whether a widget's data has nothing to draw: no rows, or a stat with
+/// neither a value nor bars.
+fn shows_nothing(body: &Body) -> bool {
+    match body {
+        Body::Stat(stat) => stat.value.is_empty() && stat.series.is_empty(),
+        body => body.is_empty(),
+    }
 }
 
 fn limit(manifest: &Manifest) -> usize {
