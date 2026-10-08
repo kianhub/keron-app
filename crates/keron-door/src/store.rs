@@ -27,21 +27,65 @@ impl KeychainStore {
     }
 }
 
+/// errSecItemNotFound.
+#[cfg(target_os = "macos")]
+const ITEM_NOT_FOUND: i32 = -25300;
+
+#[cfg(target_os = "macos")]
 impl SecretStore for KeychainStore {
     fn get(&self, account: &str) -> Result<Option<String>, DoorError> {
-        let _ = (&self.service, account);
-        todo!("keron-door: KeychainStore::get")
+        use security_framework::passwords::get_generic_password;
+        match get_generic_password(&self.service, account) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| DoorError::Store(format!("{account} isn't text"))),
+            Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
+            Err(e) => Err(DoorError::Store(format!(
+                "couldn't read {account} (OSStatus {})",
+                e.code()
+            ))),
+        }
     }
 
     fn set(&self, account: &str, value: &str) -> Result<(), DoorError> {
-        let _ = (account, value);
-        todo!("keron-door: KeychainStore::set")
+        use security_framework::passwords::set_generic_password;
+        set_generic_password(&self.service, account, value.as_bytes()).map_err(|e| {
+            DoorError::Store(format!("couldn't save {account} (OSStatus {})", e.code()))
+        })
     }
 
     fn delete(&self, account: &str) -> Result<(), DoorError> {
-        let _ = account;
-        todo!("keron-door: KeychainStore::delete")
+        use security_framework::passwords::delete_generic_password;
+        match delete_generic_password(&self.service, account) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
+            Err(e) => Err(DoorError::Store(format!(
+                "couldn't remove {account} (OSStatus {})",
+                e.code()
+            ))),
+        }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl SecretStore for KeychainStore {
+    fn get(&self, _account: &str) -> Result<Option<String>, DoorError> {
+        let _ = &self.service;
+        Err(no_keychain())
+    }
+
+    fn set(&self, _account: &str, _value: &str) -> Result<(), DoorError> {
+        Err(no_keychain())
+    }
+
+    fn delete(&self, _account: &str) -> Result<(), DoorError> {
+        Err(no_keychain())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn no_keychain() -> DoorError {
+    DoorError::Store("no Keychain on this platform".into())
 }
 
 /// In memory, for tests.
