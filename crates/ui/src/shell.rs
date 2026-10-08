@@ -10573,7 +10573,8 @@ impl Shell {
                     crate::composer_dock::hero_top(self.viewport_height, height, lift) + height
                 });
             self.home.update(cx, |home, cx| {
-                home.set_frame(top + footer + 12.0, composer_width, home_opacity, cx)
+                let width = crate::home::Home::frame_width(main_content_width, composer_width);
+                home.set_frame(top + footer + 12.0, width, home_opacity, cx)
             });
         } else {
             self.home.update(cx, |home, _| home.hide());

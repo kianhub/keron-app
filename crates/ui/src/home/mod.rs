@@ -163,6 +163,11 @@ struct CardDrag {
     scroll_y: Pixels,
 }
 
+/// Home spreads past the composer, up to this wide.
+const MAX_WIDTH: f32 = 1320.0;
+/// Kept free on each side of Home in the conversation column.
+const SIDE_MARGIN: f32 = 32.0;
+
 pub struct Home {
     paths: HomePaths,
     fetcher: Fetcher,
@@ -318,6 +323,12 @@ impl Home {
 
     /// Where to draw: `top` in window coordinates, the composer column's
     /// `width`, and the route fade's `opacity`.
+    /// Home's width in a conversation column `column` wide: the column less its
+    /// margins, up to MAX_WIDTH, and never narrower than the composer above it.
+    pub fn frame_width(column: f32, composer: f32) -> f32 {
+        (column - 2.0 * SIDE_MARGIN).min(MAX_WIDTH).max(composer)
+    }
+
     pub fn set_frame(&mut self, top: f32, width: f32, opacity: f32, cx: &mut Context<Self>) {
         let next = Frame {
             top,

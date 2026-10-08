@@ -27,8 +27,10 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 const CARD_RADIUS: f32 = 12.0;
-/// Two columns once each card gets at least this much.
-const CARD_MIN_WIDTH: f32 = 260.0;
+/// One more column each time every card can get at least this much.
+const CARD_MIN_WIDTH: f32 = 280.0;
+/// Most columns Home lays out, however wide the window.
+const MAX_COLUMNS: u16 = 4;
 const GRID_GAP: f32 = 10.0;
 /// Room left under Home for the update notice at the window's bottom.
 const BOTTOM_CLEARANCE: f32 = 64.0;
@@ -52,11 +54,8 @@ impl Render for Home {
             return div().into_any_element();
         }
         let theme = Theme::of(cx).clone();
-        let columns = if width >= 2.0 * CARD_MIN_WIDTH + GRID_GAP {
-            2
-        } else {
-            1
-        };
+        let columns = (((width + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)).floor() as u16)
+            .clamp(1, MAX_COLUMNS);
         let toolbar = self.render_toolbar(&theme, cx);
         let tray = self.customize.then(|| self.render_tray(&theme, cx));
         let grid = self.render_grid(&theme, columns, cx);
