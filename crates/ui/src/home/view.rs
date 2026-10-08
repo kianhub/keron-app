@@ -262,6 +262,7 @@ impl Home {
             )
             .child(div().flex().flex_col().children(rows))
             .children(problems)
+            .children(self.render_add_builtins(theme, cx))
             .child(
                 div()
                     .flex()
@@ -284,6 +285,31 @@ impl Home {
                     ),
             );
         crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, tray).into_any_element()
+    }
+
+    /// "Add:" and a button per built-in with no file in the widgets folder.
+    fn render_add_builtins(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let missing = self.missing_builtins();
+        (!missing.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child("Add:")
+                .children(missing.into_iter().map(|(id, title)| {
+                    small_button(theme, format!("home-add-{id}"))
+                        .aria_label(format!("Add the {title} widget"))
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.add_builtin(id, cx)
+                            }),
+                        )
+                        .child(SharedString::from(title))
+                }))
+        })
     }
 
     fn render_tray_row(
@@ -841,6 +867,8 @@ impl Home {
         if let Some(heat) = heat {
             right = right.child(heat_mark(theme, heat, view, cx));
         }
+        // Usage rows draw their meters instead of the sub line.
+        let sub = item.sub.clone().filter(|_| item.meters.is_empty());
         let text = div()
             .flex_1()
             .min_w_0()
@@ -852,7 +880,7 @@ impl Home {
                     .text_color(theme.text)
                     .child(SharedString::from(item.title.clone())),
             )
-            .when_some(item.sub.clone(), |el, sub| {
+            .when_some(sub, |el, sub| {
                 el.child(
                     div()
                         .mt(px(1.0))
@@ -863,7 +891,8 @@ impl Home {
                         .text_ellipsis()
                         .child(SharedString::from(sub)),
                 )
-            });
+            })
+            .children(super::usage::meters(theme, &item.meters));
         // Actions post to the widget's own source, so only door rows offer them.
         let actions = item
             .id

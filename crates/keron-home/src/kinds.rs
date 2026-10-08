@@ -127,6 +127,22 @@ pub struct ListItem {
     pub kind: Option<String>,
     pub snoozed_until: Option<String>,
     pub deadline: Option<String>,
+    /// Usage meters under the title, drawn instead of `sub`. Only the app's
+    /// own `zeron:usage` source sets them; they aren't part of the JSON a
+    /// script or the door sends.
+    #[serde(skip)]
+    pub meters: Vec<Meter>,
+}
+
+/// One usage meter on a list row: a plan's rate-limit window.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Meter {
+    /// The window, as the provider names it ("Session", "Week").
+    pub label: String,
+    /// How much of it is used, 0.0 to 1.0.
+    pub used: f32,
+    /// When it resets, ms since the epoch, when the provider says.
+    pub resets_at_ms: Option<i64>,
 }
 
 /// A `timeline` row: Memory · today.
@@ -292,6 +308,7 @@ fn list_item(o: &Object) -> Option<ListItem> {
         kind: field(o, "kind"),
         snoozed_until: field(o, "snoozed_until"),
         deadline: field(o, "deadline"),
+        meters: Vec::new(),
     })
 }
 

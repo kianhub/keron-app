@@ -26,7 +26,7 @@ fn manifest(id: &str, title: &str) -> Manifest {
 fn catalog(manifests: Vec<Manifest>) -> Catalog {
     Catalog {
         manifests,
-        problems: Vec::new(),
+        ..Catalog::default()
     }
 }
 
@@ -569,5 +569,32 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
             "a loose end comes back"
         );
         assert!(ends.action_error.is_some());
+    });
+}
+
+#[gpui::test]
+fn customize_adds_a_builtin_the_folder_is_missing(cx: &mut TestAppContext) {
+    let (home, paths, _dir) = home(cx);
+    // A widgets folder seeded before the app had Usage.
+    std::fs::remove_file(paths.widgets_dir.join("usage.toml")).unwrap();
+    std::fs::remove_file(paths.widgets_dir.join(".builtins")).unwrap();
+    home.update(cx, |home, cx| home.reload(cx));
+    cx.run_until_parked();
+    home.read_with(cx, |home, _| {
+        assert_eq!(home.missing_builtins(), [("usage", "Usage".to_string())]);
+        assert!(!home.shows_usage());
+    });
+
+    home.update(cx, |home, cx| home.add_builtin("usage", cx));
+    cx.run_until_parked();
+    assert!(paths.widgets_dir.join("usage.toml").is_file());
+    home.read_with(cx, |home, _| {
+        assert!(home.missing_builtins().is_empty());
+        // Not in home.toml yet, so it shows at the end.
+        assert!(home.shows_usage());
+        assert_eq!(
+            home.arranged().last().map(|slot| slot.manifest.id.as_str()),
+            Some("usage")
+        );
     });
 }

@@ -55,7 +55,7 @@ isn't silently missing.
 |---|---|
 | `keron-sources:<name>` | The mini's read-only connectors, through your memory's door: `gmail-needs-reply`, `calendar-today`, `slack-waiting`. |
 | `memory:<name>` | Your memory, through the door: `loose-ends`, `today`. |
-| `zeron:<name>` | What the app already knows: `sessions` (agent chats that are working, waiting on you or stuck), `devices`, `pull-requests`. `services` and `todos` are reserved; the app has no data for them yet. |
+| `zeron:<name>` | What the app already knows: `sessions` (agent chats that are working, waiting on you or stuck), `devices`, `pull-requests`, `usage` (plan usage of the agent accounts signed in on this Mac, as Settings → Accounts shows it: one `list` row per account, the ones in use first, with a meter per limit window). `services` and `todos` are reserved; the app has no data for them yet. |
 | `script:<path>` | A program on this Mac that prints the data as JSON. A relative path is inside this folder; `~/` starts at your home folder. |
 
 Door sources need you signed in to your memory. When you aren't, the card
@@ -231,7 +231,24 @@ shown = false
 
 To remove a widget, delete its manifest, or hide it in Customize. This folder
 is only filled once, the first time the app runs; the built-in widgets you
-delete stay deleted.
+delete stay deleted. Built-ins the app gained later (like Usage) aren't added
+by themselves either: Customize shows an "Add" button for each one this
+folder hasn't had yet, unless a widget here already uses its source, and
+clicking it writes its manifest into this folder. The hidden `.builtins` file
+lists the built-ins this folder has had, so one you add and later delete
+isn't offered again. This README is the one file the app keeps current: a
+new version replaces it when it's still a copy an older one wrote, never
+once you've edited it. By hand, the Usage widget is this file, `usage.toml`:
+
+```toml
+# Plan usage of the agent accounts signed in on this Mac (Claude, ChatGPT...), the ones in use first.
+title  = "Usage"
+kind   = "list"
+source = "zeron:usage"
+every  = "1m"
+icon   = "bars"
+empty  = "No usage reported yet"
+```
 
 You can also ask for one. "Describe a widget" in Customize sends your
 request to Keron's main chat, where an agent writes the manifest and script

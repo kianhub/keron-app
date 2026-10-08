@@ -12,6 +12,7 @@
 
 mod bridge;
 mod notices;
+mod usage;
 mod view;
 
 #[cfg(test)]
@@ -42,6 +43,7 @@ use keron_home::{
 use crate::popover::Popup;
 
 pub(crate) use bridge::snapshot;
+pub(crate) use usage::{cached_accounts, load_once as load_usage};
 
 /// The draft "Describe a widget…" starts a chat with.
 pub(crate) const DESCRIBE_WIDGET_STARTER: &str = "Make me a Keron Home widget that shows: \n\nPut its manifest in ~/.keron/widgets/<id>.toml and, if it needs one, a script next to it that prints the widget's JSON. ~/.keron/widgets/README.md has the format. Home picks it up by itself, no rebuild needed.";
@@ -411,6 +413,13 @@ impl Home {
             .any(|source| matches!(source, SourceSpec::Zeron(name) if name == "pull-requests"))
     }
 
+    /// Whether a `zeron:usage` widget shows, so the shell hands Home the
+    /// accounts list (and loads one if nothing has yet).
+    pub fn shows_usage(&self) -> bool {
+        self.shown_sources()
+            .any(|source| matches!(source, SourceSpec::Zeron(name) if name == "usage"))
+    }
+
     fn shown_sources(&self) -> impl Iterator<Item = &SourceSpec> {
         let shown: Vec<&str> = if self.loaded {
             self.layout
@@ -436,6 +445,9 @@ impl Home {
         let load = cx.background_spawn(async move {
             if let Err(error) = catalog::seed(&paths) {
                 tracing::warn!(%error, "home: couldn't seed the widgets folder");
+            }
+            if let Err(error) = catalog::refresh_readme(&paths) {
+                tracing::warn!(%error, "home: couldn't refresh the widgets README");
             }
             let catalog = catalog::load(&paths);
             let layout = Layout::load(&paths.layout_file).map_err(|error| error.to_string());
@@ -1015,6 +1027,32 @@ impl Home {
         cx.emit(HomeEvent::DescribeWidget(
             DESCRIBE_WIDGET_STARTER.to_string(),
         ));
+    }
+
+    /// Built-ins with no file in the widgets folder, as `(id, title)`.
+    pub(crate) fn missing_builtins(&self) -> Vec<(&'static str, String)> {
+        if !self.loaded {
+            return Vec::new();
+        }
+        catalog::missing_builtins(&self.catalog)
+    }
+
+    /// Write a missing built-in's manifest into the widgets folder, then
+    /// load the folder again (the watcher would too, but tests have none).
+    pub(crate) fn add_builtin(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let paths = self.paths.clone();
+        let write = cx.background_spawn(async move {
+            let added = catalog::add_builtin(&paths, id);
+            (added, catalog::load(&paths))
+        });
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let (added, catalog) = write.await;
+            if let Err(error) = added {
+                tracing::warn!(%error, "home: couldn't add a built-in widget");
+            }
+            this.update(cx, |this, cx| this.apply_catalog(catalog, cx))
+                .ok();
+        }));
     }
 
     pub(crate) fn set_shown(&mut self, id: &str, shown: bool, cx: &mut Context<Self>) {

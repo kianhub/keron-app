@@ -232,7 +232,7 @@ pub fn parse_every(text: &str) -> Option<Duration> {
 
 /// The first widgets, as `(file name, TOML)`, in Home's default order:
 /// loose-ends, slack-waiting, today, gmail-needs-reply, memory-today,
-/// working-now, devices, pull-requests.
+/// working-now, devices, pull-requests, usage.
 pub fn builtins() -> &'static [(&'static str, &'static str)] {
     BUILTINS
 }
@@ -327,6 +327,17 @@ icon   = "pr"
 empty  = "No open pull requests"
 "#,
     ),
+    (
+        "usage.toml",
+        r#"# Plan usage of the agent accounts signed in on this Mac (Claude, ChatGPT...), the ones in use first.
+title  = "Usage"
+kind   = "list"
+source = "zeron:usage"
+every  = "1m"
+icon   = "bars"
+empty  = "No usage reported yet"
+"#,
+    ),
 ];
 
 #[cfg(test)]
@@ -366,6 +377,7 @@ mod tests {
                 ("working-now", "zeron:sessions".to_string(), s(5)),
                 ("devices", "zeron:devices".to_string(), s(30)),
                 ("pull-requests", "zeron:pull-requests".to_string(), s(60)),
+                ("usage", "zeron:usage".to_string(), s(60)),
             ]
         );
         let memory_today = &parsed[4];

@@ -23,9 +23,9 @@ use crate::theme::Theme;
 
 /// Forced probes hit the provider; the engine throttles them too, but the
 /// ring re-probes on every hover, so don't even ask more often than this.
-const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Background re-probe while a composer is alive: usage moves as turns run.
-const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// The binding limit: the most-used window of the account. Pure.
 pub fn used_fraction(account: &AgentAccount) -> Option<f32> {

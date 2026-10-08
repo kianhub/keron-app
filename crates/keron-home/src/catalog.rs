@@ -12,6 +12,34 @@ use crate::{HomePaths, Manifest, ManifestError, manifest};
 /// The owner-facing format reference, seeded as README.md.
 pub const README: &str = include_str!("../WIDGETS.md");
 
+/// [`fingerprint`]s of every README.md the app has written, oldest first;
+/// the last is [`README`]'s. A README.md matching one is an unedited copy,
+/// so [`refresh_readme`] may replace it. When WIDGETS.md changes, append its
+/// new fingerprint (a test says so).
+const SEEDED_READMES: [u64; 5] = [
+    0x44002d8dae033d70,
+    0x97faf17121760427,
+    0x08fd2bb9e7d63fa6,
+    0x93a22c72952120cf,
+    0xd7812d38f2dca372,
+];
+
+/// The hidden file listing the built-ins this folder has had (seeded or
+/// added), one id per line, so Customize offers each new one only once.
+const HAD_FILE: &str = ".builtins";
+
+/// The built-ins a folder seeded before [`HAD_FILE`] existed got.
+const FIRST_BUILTINS: [&str; 8] = [
+    "loose-ends",
+    "slack-waiting",
+    "today",
+    "gmail-needs-reply",
+    "memory-today",
+    "working-now",
+    "devices",
+    "pull-requests",
+];
+
 /// Manifests bigger than this are refused rather than read.
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
@@ -23,6 +51,9 @@ pub struct Catalog {
     /// so an empty layout shows them the way [`manifest::builtins`] lists.
     pub manifests: Vec<Manifest>,
     pub problems: Vec<ManifestError>,
+    /// The built-in ids this folder has had (see [`HAD_FILE`]); Customize
+    /// doesn't offer them again.
+    pub had_builtins: Vec<String>,
 }
 
 /// Read every `*.toml` in the widgets folder (not recursive; hidden files
@@ -38,10 +69,14 @@ pub fn load(paths: &HomePaths) -> Catalog {
                     file: "widgets".to_string(),
                     message: format!("can't read the widgets folder: {e}"),
                 }],
+                had_builtins: Vec::new(),
             };
         }
     };
-    let mut catalog = Catalog::default();
+    let mut catalog = Catalog {
+        had_builtins: had_builtins(paths),
+        ..Catalog::default()
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -127,10 +162,15 @@ pub fn seed(paths: &HomePaths) -> std::io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(e) => return Err(e),
     }
+    let had: String = manifest::builtins()
+        .iter()
+        .filter_map(|(file, _)| file.strip_suffix(".toml"))
+        .map(|id| format!("{id}\n"))
+        .collect();
     let files = manifest::builtins()
         .iter()
         .copied()
-        .chain([("README.md", README)]);
+        .chain([("README.md", README), (HAD_FILE, had.as_str())]);
     for (name, text) in files {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -139,6 +179,120 @@ pub fn seed(paths: &HomePaths) -> std::io::Result<bool> {
         file.write_all(text.as_bytes())?;
     }
     Ok(true)
+}
+
+/// Built-ins the app gained after the widgets folder was seeded (seeding
+/// happens once), as `(id, title)` in Home's order. Customize offers them;
+/// nothing adds them by itself. One the folder has had isn't offered (the
+/// owner deleted it), nor one with a file there, even a broken one, nor one
+/// whose source another widget already shows. Nothing is offered when the
+/// folder couldn't be read.
+pub fn missing_builtins(catalog: &Catalog) -> Vec<(&'static str, String)> {
+    if catalog.problems.iter().any(|p| p.file == "widgets") {
+        return Vec::new();
+    }
+    manifest::builtins()
+        .iter()
+        .filter_map(|(file, text)| {
+            let id = file.strip_suffix(".toml")?;
+            let present = catalog.had_builtins.iter().any(|had| had == id)
+                || catalog.manifests.iter().any(|m| m.id == id)
+                || catalog.problems.iter().any(|p| p.file == *file);
+            if present {
+                return None;
+            }
+            let builtin = manifest::parse(id, text).ok()?;
+            let shown_elsewhere = catalog.manifests.iter().any(|m| m.source == builtin.source);
+            (!shown_elsewhere).then_some((id, builtin.title))
+        })
+        .collect()
+}
+
+/// The built-ins the folder has had: [`HAD_FILE`]'s ids, or
+/// [`FIRST_BUILTINS`] for a folder seeded before it existed. When the file
+/// can't be read, every built-in, so nothing is offered.
+fn had_builtins(paths: &HomePaths) -> Vec<String> {
+    match std::fs::read_to_string(paths.widgets_dir.join(HAD_FILE)) {
+        Ok(text) => text
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            FIRST_BUILTINS.iter().map(|id| id.to_string()).collect()
+        }
+        Err(_) => manifest::builtins()
+            .iter()
+            .filter_map(|(file, _)| file.strip_suffix(".toml"))
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// Write the built-in `id`'s manifest into the widgets folder, creating the
+/// folder if it's missing. Never overwrites: `Ok(false)` when the file is
+/// already there. An id that isn't a built-in is an error.
+pub fn add_builtin(paths: &HomePaths, id: &str) -> io::Result<bool> {
+    let file = format!("{id}.toml");
+    let Some((_, text)) = manifest::builtins().iter().find(|(name, _)| *name == file) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{id} isn't a built-in widget"),
+        ));
+    };
+    std::fs::create_dir_all(&paths.widgets_dir)?;
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(paths.widgets_dir.join(&file));
+    let added = match created {
+        Ok(mut out) => {
+            out.write_all(text.as_bytes())?;
+            true
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(e),
+    };
+    let mut had = had_builtins(paths);
+    if !had.iter().any(|known| known == id) {
+        had.push(id.to_string());
+        let text: String = had.iter().map(|id| format!("{id}\n")).collect();
+        std::fs::write(paths.widgets_dir.join(HAD_FILE), text)?;
+    }
+    Ok(added)
+}
+
+/// Replace README.md with [`README`] when it's an unedited copy an older app
+/// wrote (its fingerprint is in [`SEEDED_READMES`]), so the folder's format
+/// reference names what this app can do. An edited or missing README is
+/// left alone. Returns whether it rewrote.
+pub fn refresh_readme(paths: &HomePaths) -> io::Result<bool> {
+    refresh_readme_from(paths, &SEEDED_READMES)
+}
+
+fn refresh_readme_from(paths: &HomePaths, seeded: &[u64]) -> io::Result<bool> {
+    let path = paths.widgets_dir.join("README.md");
+    let text = match std::fs::read(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let print = fingerprint(&text);
+    if text == README.as_bytes() || !seeded.contains(&print) {
+        return Ok(false);
+    }
+    let tmp = paths.widgets_dir.join(".README.md.tmp");
+    std::fs::write(&tmp, README)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(true)
+}
+
+/// FNV-1a over the bytes: stable across builds, unlike std's hasher.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// How long changes settle before [`Watcher::changed`] wakes.
@@ -205,7 +359,7 @@ mod tests {
         catalog.manifests.iter().map(|m| m.id.as_str()).collect()
     }
 
-    const BUILTIN_IDS: [&str; 8] = [
+    const BUILTIN_IDS: [&str; 9] = [
         "loose-ends",
         "slack-waiting",
         "today",
@@ -214,6 +368,7 @@ mod tests {
         "working-now",
         "devices",
         "pull-requests",
+        "usage",
     ];
 
     #[test]
@@ -262,6 +417,93 @@ mod tests {
         );
         assert_eq!(catalog.problems.len(), 1);
         assert_eq!(catalog.problems[0].file, "broken.toml");
+    }
+
+    #[test]
+    fn a_builtin_the_folder_never_had_is_offered_until_added() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(home.path());
+        assert!(seed(&paths).unwrap());
+        assert!(missing_builtins(&load(&paths)).is_empty());
+        let file = paths.widgets_dir.join("usage.toml");
+        let had = paths.widgets_dir.join(HAD_FILE);
+
+        // A folder seeded before Usage existed: no usage.toml, no record.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_file(&had).unwrap();
+        assert_eq!(
+            missing_builtins(&load(&paths)),
+            [("usage", "Usage".to_string())]
+        );
+
+        assert!(add_builtin(&paths, "usage").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            manifest::builtins().last().unwrap().1
+        );
+        assert!(missing_builtins(&load(&paths)).is_empty());
+        // The owner edits it; adding again never overwrites.
+        std::fs::write(
+            &file,
+            "title = \"Mine\"\nkind = \"list\"\nsource = \"zeron:usage\"\n",
+        )
+        .unwrap();
+        assert!(!add_builtin(&paths, "usage").unwrap());
+        assert!(std::fs::read_to_string(&file).unwrap().contains("Mine"));
+        assert!(add_builtin(&paths, "weather").is_err());
+
+        // Deleted after adding (or a deleted original): not offered again.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_file(paths.widgets_dir.join("devices.toml")).unwrap();
+        assert!(missing_builtins(&load(&paths)).is_empty());
+    }
+
+    #[test]
+    fn a_builtin_is_not_offered_when_another_widget_shows_its_source() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(home.path());
+        assert!(seed(&paths).unwrap());
+        std::fs::remove_file(paths.widgets_dir.join("usage.toml")).unwrap();
+        std::fs::remove_file(paths.widgets_dir.join(HAD_FILE)).unwrap();
+        // The chat wrote the owner's own usage widget.
+        std::fs::write(
+            paths.widgets_dir.join("my-usage.toml"),
+            "title = \"Plans\"\nkind = \"list\"\nsource = \"zeron:usage\"\n",
+        )
+        .unwrap();
+        assert!(missing_builtins(&load(&paths)).is_empty());
+    }
+
+    #[test]
+    fn readme_is_refreshed_only_when_the_owner_left_it_as_seeded() {
+        assert_eq!(
+            SEEDED_READMES.last(),
+            Some(&fingerprint(README.as_bytes())),
+            "WIDGETS.md changed: append its fingerprint to SEEDED_READMES"
+        );
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(home.path());
+        assert!(seed(&paths).unwrap());
+        let readme = paths.widgets_dir.join("README.md");
+        assert!(!refresh_readme(&paths).unwrap());
+
+        // An owner-edited README stays.
+        std::fs::write(&readme, "my notes").unwrap();
+        assert!(!refresh_readme(&paths).unwrap());
+        assert_eq!(std::fs::read_to_string(&readme).unwrap(), "my notes");
+
+        // A copy an older app wrote is replaced (its text isn't kept here,
+        // only its fingerprint, so stand one in).
+        std::fs::write(&readme, "an old README").unwrap();
+        let seeded = [fingerprint(b"an old README"), SEEDED_READMES[4]];
+        assert!(refresh_readme_from(&paths, &seeded).unwrap());
+        assert_eq!(std::fs::read_to_string(&readme).unwrap(), README);
+
+        std::fs::remove_file(&readme).unwrap();
+        assert!(
+            !refresh_readme(&paths).unwrap(),
+            "a deleted README stays deleted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

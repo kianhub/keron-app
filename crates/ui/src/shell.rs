@@ -2615,7 +2615,12 @@ impl Shell {
         let showing =
             matches!(self.route, Route::Chat) && self.state.read(cx).selected_chat.is_none();
         if (always || showing) && self.home.read(cx).wants_zeron() {
-            let snapshot = crate::home::snapshot(self.state.read(cx), Utc::now());
+            let usage = self.home.read(cx).shows_usage();
+            if usage {
+                crate::home::load_usage(&self.state, cx);
+            }
+            let accounts = usage.then(|| crate::home::cached_accounts(cx)).flatten();
+            let snapshot = crate::home::snapshot(self.state.read(cx), accounts, Utc::now());
             self.home
                 .update(cx, |home, cx| home.set_zeron(snapshot, cx));
         }

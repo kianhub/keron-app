@@ -5,16 +5,23 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use keron_home::zeron::{
-    DeviceSnapshot, PrState, PullRequestItem, SessionItem, SessionStatus, ZeronSnapshot,
+    self, DeviceSnapshot, PrState, PullRequestItem, SessionItem, SessionStatus, UsageAccount,
+    UsageWindow, ZeronSnapshot,
 };
-use zeron_proto::{AuthState, ChangeRequestState, ChatIndicator, HarnessId};
+use zeron_proto::{AgentAccountsSnapshot, AuthState, ChangeRequestState, ChatIndicator, HarnessId};
 
 use crate::state::{AppState, chat_location};
 
 /// The snapshot at `now`. Sessions are every non-idle chat the sidebar
 /// lists; services and to-dos have no source in the app yet, so they stay
-/// `None` (the widget says so instead of showing an empty list).
-pub(crate) fn snapshot(state: &AppState, now: DateTime<Utc>) -> ZeronSnapshot {
+/// `None` (the widget says so instead of showing an empty list). `accounts`
+/// is this Mac's cached agent accounts list (Settings → Accounts and the
+/// composer's usage ring fill it), `None` until one has loaded.
+pub(crate) fn snapshot(
+    state: &AppState,
+    accounts: Option<&AgentAccountsSnapshot>,
+    now: DateTime<Utc>,
+) -> ZeronSnapshot {
     let overview = state.overview_chats(now);
     let mut working: HashMap<&str, u32> = HashMap::new();
     for (status, chat) in &overview {
@@ -101,6 +108,47 @@ pub(crate) fn snapshot(state: &AppState, now: DateTime<Utc>) -> ZeronSnapshot {
         pull_requests,
         services: None,
         todos: None,
+        usage: accounts.map(usage_accounts),
+    }
+}
+
+/// The accounts that report plan usage, as plain data: the provider's name
+/// as the owner knows it, the plan, and the email cut down to its first part.
+pub(crate) fn usage_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<UsageAccount> {
+    snapshot
+        .accounts
+        .iter()
+        .filter(|account| crate::settings::accounts::reports_usage(account.harness))
+        .map(|account| UsageAccount {
+            harness: usage_name(account.harness).to_string(),
+            plan: account
+                .plan_label
+                .clone()
+                .filter(|plan| !plan.trim().is_empty()),
+            who: zeron::who(account.email.as_deref()),
+            active: account.active,
+            windows: account
+                .usage_windows
+                .iter()
+                .map(|window| UsageWindow {
+                    label: window.label.clone(),
+                    used: window.used_fraction,
+                    resets_at_ms: window.resets_at.map(|at| at.timestamp_millis()),
+                })
+                .collect(),
+            fetched_at_ms: account.usage_fetched_at,
+            error: account.usage_error.clone(),
+        })
+        .collect()
+}
+
+/// A plan's provider as the owner calls it: Claude Code runs on a Claude
+/// plan and Codex on a ChatGPT one.
+fn usage_name(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::ClaudeCode => "Claude",
+        HarnessId::Codex => "ChatGPT",
+        other => harness_name(other),
     }
 }
 
@@ -136,4 +184,93 @@ fn repo_from_url(url: &str) -> Option<String> {
     let owner = segments.next().filter(|part| !part.is_empty())?;
     let repo = segments.next().filter(|part| !part.is_empty())?;
     Some(format!("{owner}/{repo}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use keron_home::Body;
+    use zeron_proto::AgentAccountsSnapshot;
+
+    use super::*;
+
+    fn accounts() -> AgentAccountsSnapshot {
+        let account = |harness: &str, email: &str, plan: Option<&str>, active: bool| {
+            serde_json::json!({
+                "id": format!("{harness}-{email}"),
+                "harness": harness,
+                "email": email,
+                "planLabel": plan,
+                "active": active,
+                "switchable": true,
+                "usageFetchedAt": 1_791_460_000_000_i64,
+                "usageWindows": [
+                    {"label": "Session", "usedFraction": 0.42, "resetsAt": "2026-10-08T12:00:00Z"},
+                    {"label": "Week", "usedFraction": 0.97, "resetsAt": null},
+                ],
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "accounts": [
+                account("claude-code", "kian@example.com", Some("Max"), false),
+                account("codex", "kian@example.com", Some("Pro"), true),
+                account("antigravity", "kian@example.com", None, true),
+            ],
+            "warnings": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn usage_comes_from_the_accounts_list_without_emails() {
+        let usage = usage_accounts(&accounts());
+        let summary: Vec<(&str, Option<&str>, &str, bool)> = usage
+            .iter()
+            .map(|a| {
+                (
+                    a.harness.as_str(),
+                    a.plan.as_deref(),
+                    a.who.as_str(),
+                    a.active,
+                )
+            })
+            .collect();
+        // Antigravity reports no usage, so it isn't listed.
+        assert_eq!(
+            summary,
+            [
+                ("Claude", Some("Max"), "kian", false),
+                ("ChatGPT", Some("Pro"), "kian", true),
+            ]
+        );
+        let windows = &usage[0].windows;
+        assert_eq!(windows[0].label, "Session");
+        assert!((windows[0].used - 0.42).abs() < 1e-6);
+        assert_eq!(
+            windows[0].resets_at_ms,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-08T12:00:00Z")
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+        assert_eq!(windows[1].resets_at_ms, None);
+        assert_eq!(usage[0].fetched_at_ms, Some(1_791_460_000_000));
+
+        let snapshot = ZeronSnapshot {
+            usage: Some(usage),
+            ..ZeronSnapshot::default()
+        };
+        let Body::List(rows) = keron_home::zeron::payload("usage", &snapshot, 1_791_460_060_000)
+            .unwrap()
+            .body
+        else {
+            panic!("not a list")
+        };
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["ChatGPT · Pro", "Claude · Max"]);
+        assert!(
+            rows.iter()
+                .all(|row| !format!("{row:?}").contains("example.com"))
+        );
+    }
 }
