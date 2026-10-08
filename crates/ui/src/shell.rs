@@ -10543,6 +10543,9 @@ impl Shell {
             && home_opacity > 0.001
             && (!has_selection || dock_frame.active);
         if show_home {
+            // Under the pill sits the new-chat footer row (checkout and branch
+            // pickers): one column gap, then SESSION_FOOTER_HEIGHT. Home starts below it.
+            let footer = Theme::SPACE_SM + crate::composer::SESSION_FOOTER_HEIGHT;
             let top = self
                 .composer
                 .read(cx)
@@ -10553,7 +10556,7 @@ impl Shell {
                     (self.viewport_height + crate::composer::COMPOSER_MIN_HEIGHT) * 0.5 + 8.0,
                 );
             self.home.update(cx, |home, cx| {
-                home.set_frame(top + 16.0, composer_width, home_opacity, cx)
+                home.set_frame(top + footer + 12.0, composer_width, home_opacity, cx)
             });
         } else {
             self.home.update(cx, |home, _| home.hide());

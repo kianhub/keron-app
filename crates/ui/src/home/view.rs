@@ -714,6 +714,7 @@ impl Home {
                     .line_height(ui_rems(16.0))
                     .text_color(text)
                     .line_clamp(2)
+                    .text_ellipsis()
                     .child(SharedString::from(message.to_string())),
             )
             .when(can_retry, |el| {
@@ -855,6 +856,7 @@ impl Home {
                         .line_height(ui_rems(15.0))
                         .text_color(theme.text_muted)
                         .line_clamp(2)
+                        .text_ellipsis()
                         .child(SharedString::from(sub)),
                 )
             });
@@ -1226,6 +1228,7 @@ fn render_timeline(theme: &Theme, manifest: &Manifest, items: &[TimelineItem]) -
                     .line_height(ui_rems(17.0))
                     .text_color(theme.text)
                     .line_clamp(2)
+                    .text_ellipsis()
                     .child(SharedString::from(item.text.clone())),
             )
     });
