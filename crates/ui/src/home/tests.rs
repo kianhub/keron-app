@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, Task, TestAppContext};
+use gpui::{AppContext as _, Entity, Task, TestAppContext, px, size};
 use keron_home::catalog::Catalog;
 use keron_home::{Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec};
 
@@ -569,5 +569,77 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
             "a loose end comes back"
         );
         assert!(ends.action_error.is_some());
+    });
+}
+
+#[gpui::test]
+fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut TestAppContext) {
+    let (home, _paths, _dir) = home(cx);
+    let row = |id: &str| ListItem {
+        id: Some(id.to_string()),
+        title: id.to_string(),
+        actions: vec!["done".to_string()],
+        ..ListItem::default()
+    };
+    let drawn = |home: &Home| -> Vec<(String, bool)> {
+        let state = &home.widgets["ends"];
+        let Some(Payload {
+            body: Body::List(items),
+            ..
+        }) = &state.payload
+        else {
+            panic!("the payload went away");
+        };
+        let leaving = |id: &str| state.leaving.contains_key(id);
+        let (rows, _) = drawn_list_rows(items, &state.overrides, leaving, DEFAULT_LIMIT);
+        rows.into_iter()
+            .map(|(row, leaving)| (row.title.clone(), leaving))
+            .collect()
+    };
+    let rows = |expected: &[(&str, bool)]| -> Vec<(String, bool)> {
+        expected
+            .iter()
+            .map(|(id, leaving)| (id.to_string(), *leaving))
+            .collect()
+    };
+    home.update(cx, |home, cx| {
+        home.poster = Some(Rc::new(|_: loose_ends::Request, _: &App| {
+            Task::ready(Ok(()))
+        }));
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        home.apply_catalog(catalog(vec![ends]), cx);
+        let state = home.widgets.entry("ends".to_string()).or_default();
+        state.payload = Some(Payload {
+            updated: None,
+            errors: Vec::new(),
+            body: Body::List(vec![row("a"), row("b"), row("c")]),
+        });
+        // Each row as last drawn.
+        for id in ["a", "b", "c"] {
+            state.row_ui.borrow_mut().insert(
+                id.to_string(),
+                RowUi {
+                    focus: cx.focus_handle(),
+                    bounds: Some(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(240.0), px(23.0)),
+                    )),
+                },
+            );
+        }
+        home.act("ends", "a", Action::Done, cx);
+        assert_eq!(
+            drawn(home),
+            rows(&[("a", true), ("b", false), ("c", false)])
+        );
+    });
+    cx.executor().advance_clock(leave_duration());
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        assert_eq!(drawn(home), rows(&[("b", false), ("c", false)]));
+        cx.set_reduce_motion(true);
+        home.act("ends", "b", Action::Done, cx);
+        assert_eq!(drawn(home), rows(&[("c", false)]));
     });
 }

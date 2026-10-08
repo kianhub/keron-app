@@ -2,13 +2,16 @@
 //! one body per widget kind. Colors come from the theme, so light and dark
 //! both follow it.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{Local, NaiveDate, Utc};
 use gpui::{
-    AnimationExt as _, AnyElement, App, ClickEvent, Context, CursorStyle, Div, ElementId, EntityId,
-    FontWeight, Hsla, MouseButton, Role, SharedString, Stateful, Toggled, Window, div, prelude::*,
-    px, relative,
+    AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, Div, ElementId,
+    EntityId, FontWeight, Hsla, MouseButton, Role, SharedString, Stateful, Toggled, Window, div,
+    prelude::*, px, relative,
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
 use keron_home::loose_ends::{Action, snooze_choices};
@@ -16,8 +19,9 @@ use keron_home::{AgendaItem, DeviceItem, Heat, Kind, Stat, TimelineItem};
 use zeron_theme::AccentPreset;
 
 use super::{
-    Body, CardDragPayload, Home, ListItem, Manifest, Mode, Payload, RowChange, SignIn, Slot,
-    SourceSpec, WidgetState, dense_cells, is_door, limit, visible_list_rows,
+    Body, CardDragPayload, Home, Leaving, ListItem, Manifest, Mode, Payload, RowChange, RowUi,
+    SignIn, Slot, SourceSpec, WidgetState, dense_cells, drawn_list_rows, is_door, limit,
+    visible_list_rows,
 };
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec};
@@ -36,6 +40,19 @@ const GRID_GAP: f32 = 10.0;
 const BOTTOM_CLEARANCE: f32 = 64.0;
 /// Burning heat breathes this slowly.
 const HEAT_PULSE: MotionSpec = MotionSpec::new(1800, motion::EASE_IN_OUT);
+/// Space between a list card's rows.
+const LIST_GAP: f32 = 6.0;
+/// How far a row's hover wash reaches past the text column on each side.
+const ROW_INSET: f32 = 6.0;
+/// A row action button's square side, and its glyph.
+const ROW_ACTION_SIZE: f32 = 22.0;
+const ROW_ACTION_ICON_SIZE: f32 = 14.0;
+const ROW_ACTION_GAP: f32 = 2.0;
+/// Space between a row action's tooltip and the top of its row.
+const ROW_TOOLTIP_GAP: f32 = 2.0;
+/// How far above the pointer the tooltip ends when the row hasn't been
+/// measured: clear of the button wherever the pointer is in it.
+const ROW_TOOLTIP_FALLBACK_LIFT: f32 = 24.0;
 
 /// The pointer ghost while a card drags: nothing, the card itself moves.
 struct CardGhost;
@@ -47,11 +64,16 @@ impl Render for CardGhost {
 }
 
 impl Render for Home {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let frame = self.frame;
         let width = (frame.width - 2.0 * Theme::SPACE_LG).max(0.0);
         if !self.loaded || width <= 0.0 {
             return div().into_any_element();
+        }
+        self.keyboard_row = self.keyboard_focused_row(window, cx);
+        // Rows closing up after Done are drawn from the clock, frame by frame.
+        if self.widgets.values().any(|state| !state.leaving.is_empty()) {
+            window.request_animation_frame();
         }
         let theme = Theme::of(cx).clone();
         let columns = (((width + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)).floor() as u16)
@@ -759,19 +781,35 @@ impl Home {
         view: EntityId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (rows, more) = visible_list_rows(items, &state.overrides, limit(manifest));
+        let (rows, more) = drawn_list_rows(
+            items,
+            &state.overrides,
+            |id| state.leaving.contains_key(id),
+            limit(manifest),
+        );
         if rows.is_empty() {
             return empty(theme, manifest);
         }
         let rows: Vec<AnyElement> = rows
             .into_iter()
             .enumerate()
-            .map(|(ix, item)| self.render_list_row(theme, manifest, state, item, ix, view, cx))
+            .map(|(ix, (item, leaving))| {
+                let row = self.render_list_row(theme, manifest, state, item, ix, view, cx);
+                let leaving = item
+                    .id
+                    .as_deref()
+                    .filter(|_| leaving)
+                    .and_then(|id| state.leaving.get(id));
+                match leaving {
+                    Some(leaving) => collapsing(leaving, row),
+                    None => row,
+                }
+            })
             .collect();
         div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(LIST_GAP))
             .children(rows)
             .children(more_line(theme, more))
             .into_any_element()
@@ -789,7 +827,13 @@ impl Home {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let widget = manifest.id.as_str();
-        let key = format!("home-row-{widget}-{ix}");
+        // By id where the row has one, so its hover stays with it when a row
+        // above it leaves.
+        let key = match item.id.as_deref() {
+            Some(id) => format!("home-row-{widget}-{id}"),
+            None => format!("home-row-{widget}-{ix}"),
+        };
+        let fade_key = format!("{key}-hover");
         let change = item
             .id
             .as_ref()
@@ -865,49 +909,89 @@ impl Home {
                 )
             });
         // Actions post to the widget's own source, so only door rows offer them.
-        let actions = item
-            .id
-            .as_deref()
-            .filter(|_| {
-                !item.actions.is_empty()
-                    && self.poster.is_some()
-                    && manifest.source.door_path().is_some()
-            })
-            .map(|row| self.render_row_actions(theme, manifest, row, item, &key, cx));
-        if actions.is_some() {
-            // Snooze and Done take the right side's place while they show.
+        let row_id = item.id.as_deref().filter(|_| {
+            !item.actions.is_empty()
+                && self.poster.is_some()
+                && manifest.source.door_path().is_some()
+        });
+        let actions = row_id.and_then(|row| {
             let menu_open = self
                 .snooze_menu
                 .get()
-                .is_some_and(|(menu_widget, menu_row)| {
-                    menu_widget == widget && Some(menu_row.as_str()) == item.id.as_deref()
+                .is_some_and(|(menu_widget, menu_row)| menu_widget == widget && menu_row == row);
+            let focused = self
+                .keyboard_row
+                .as_ref()
+                .is_some_and(|(focus_widget, focus_row)| {
+                    focus_widget == widget && focus_row == row
                 });
-            right = right
-                .when(menu_open, |el| el.opacity(0.0))
-                .group_hover(SharedString::from(key.clone()), |s| s.opacity(0.0));
-        }
+            let (cluster, count) =
+                self.render_row_actions(theme, manifest, state, row, item, menu_open, cx);
+            (count > 0).then(|| {
+                // Hover shows them; so does an open snooze menu or keyboard focus.
+                let held = motion::state_t(
+                    &format!("{key}-actions"),
+                    menu_open || focused,
+                    motion::HOVER_FADE,
+                    motion::reduced_motion(cx),
+                );
+                (cluster, count, motion::hover_t(&fade_key).max(held))
+            })
+        });
+        let has_actions = actions.is_some();
+        let interactive = link.is_some() || has_actions;
+        // The right slot: the row's meta, and its actions fading in over it in
+        // the same place.
+        let slot = match actions {
+            Some((cluster, count, shown)) => div()
+                .relative()
+                .flex_none()
+                .flex()
+                .justify_end()
+                .h(ui_rems(17.0))
+                .min_w(px(actions_width(count)))
+                .child(right.opacity(1.0 - shown))
+                .child(cluster.opacity(shown)),
+            None => right,
+        };
+        // Where it's drawn whole: a collapse after Done starts from its height.
+        let measure = row_id.filter(|_| has_actions).map(|row| {
+            let (rows, row) = (state.row_ui.clone(), row.to_string());
+            gpui::canvas(
+                move |bounds, _, _| {
+                    if let Some(ui) = rows.borrow_mut().get_mut(&row) {
+                        ui.bounds = Some(bounds);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        });
         let mut row = div()
-            .id(SharedString::from(key.clone()))
-            .group(SharedString::from(key))
+            .id(SharedString::from(key))
             .relative()
             .flex()
             .items_start()
             .gap(px(8.0))
-            .mx(px(-6.0))
-            .px(px(6.0))
+            .mx(px(-ROW_INSET))
+            .px(px(ROW_INSET))
             .py(px(3.0))
             .rounded(px(6.0))
+            .when(interactive, |el| {
+                let wash = theme.glass_hover();
+                el.bg(motion::hover_blend(&fade_key, wash.opacity(0.0), wash))
+                    .on_hover(motion::hover_listener(fade_key.clone()))
+            })
             .when(snoozed, |el| el.opacity(0.6))
             .children(mark)
             .child(text)
-            .child(right)
-            .children(actions);
+            .child(slot)
+            .children(measure);
         if let Some(link) = link {
-            let hover = theme.wash(0.05);
             let accent = theme.accent;
             row = row
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover))
                 .tab_index(0)
                 .role(Role::Link)
                 .aria_label(item.title.clone())
@@ -919,65 +1003,63 @@ impl Home {
         row.into_any_element()
     }
 
-    /// Snooze and Done, over the row's right side while it's hovered or one
-    /// of them has keyboard focus. Done on a Gmail or Slack row means nobody
-    /// needs a reply.
+    /// Snooze (or "not a thing") and Done as quiet icon buttons, Done
+    /// rightmost, for the row's right slot. Done on a Gmail or Slack row means
+    /// nobody needs a reply. Returns the cluster and how many buttons it has.
+    #[allow(clippy::too_many_arguments)]
     fn render_row_actions(
         &self,
         theme: &Theme,
         manifest: &Manifest,
+        state: &WidgetState,
         row: &str,
         item: &ListItem,
-        group: &str,
+        menu_open: bool,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (Stateful<Div>, usize) {
         let widget = manifest.id.as_str();
         let offers = |name: &str| item.actions.iter().any(|action| action == name);
-        let menu_open = self
-            .snooze_menu
-            .get()
-            .is_some_and(|(menu_widget, menu_row)| menu_widget == widget && menu_row == row);
-        let overlay = crate::theme::flatten(theme.composer_surface_bg(), theme.bg);
-        let mut cluster = div()
-            .id(SharedString::from(format!("home-actions-{widget}-{row}")))
-            .focusable()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right(px(4.0))
-            .pl(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .bg(overlay)
-            .opacity(if menu_open { 1.0 } else { 0.0 })
-            .group_hover(SharedString::from(group.to_string()), |s| s.opacity(1.0))
-            .in_focus(|s| s.opacity(1.0));
         let pair = (widget.to_string(), row.to_string());
+        let focus = state
+            .row_ui
+            .borrow_mut()
+            .entry(row.to_string())
+            .or_insert_with(|| RowUi {
+                focus: cx.focus_handle(),
+                bounds: None,
+            })
+            .focus
+            .clone();
+        let tip = |text: &'static str| row_tooltip(text, state.row_ui.clone(), row.to_string());
+        let mut buttons: Vec<AnyElement> = Vec::new();
         if offers("snooze") {
-            let mut snooze = small_button(theme, format!("home-snooze-{widget}-{row}"))
-                .aria_label(format!("Snooze {}", item.title))
-                .aria_expanded(menu_open)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener({
-                        let pair = pair.clone();
-                        move |this, _, _, _| {
-                            this.snooze_menu
-                                .note_trigger_press_matching(|open| *open == pair);
-                        }
-                    }),
-                )
-                .on_click(cx.listener({
+            let mut snooze = icon_button(
+                theme,
+                format!("home-snooze-{widget}-{row}"),
+                icons::CLOCK_CIRCLE,
+                (!menu_open).then(|| tip("Snooze")),
+            )
+            .aria_label(format!("Snooze {}", item.title))
+            .aria_expanded(menu_open)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
                     let pair = pair.clone();
-                    move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.open_snooze_menu(&pair.0, &pair.1, cx);
+                    move |this, _, _, _| {
+                        this.snooze_menu
+                            .note_trigger_press_matching(|open| *open == pair);
                     }
-                }))
-                .child("Snooze");
+                }),
+            )
+            .on_click(cx.listener({
+                let pair = pair.clone();
+                move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_snooze_menu(&pair.0, &pair.1, cx);
+                }
+            }));
             if menu_open {
-                snooze = snooze.relative().child(self.render_snooze_menu(
+                snooze = snooze.child(self.render_snooze_menu(
                     theme,
                     widget,
                     row,
@@ -985,23 +1067,61 @@ impl Home {
                     cx,
                 ));
             }
-            cluster = cluster.child(snooze);
+            buttons.push(snooze.into_any_element());
         } else if offers("dismiss") {
-            cluster = cluster.child(
-                action_button(theme, &pair, "dismiss", "Not a thing", Action::Dismiss, cx)
-                    .aria_label(format!("{} is not a thing", item.title)),
+            buttons.push(
+                row_action(
+                    theme,
+                    &pair,
+                    "dismiss",
+                    icons::CLOSE,
+                    tip("Not a thing"),
+                    Action::Dismiss,
+                    cx,
+                )
+                .aria_label(format!("{} is not a thing", item.title))
+                .into_any_element(),
             );
         }
         if offers("done") {
-            let done = action_button(theme, &pair, "done", "Done", Action::Done, cx);
-            cluster = cluster.child(if matches!(manifest.source, SourceSpec::KeronSources(_)) {
-                done.aria_label(format!("Mark {} as needing no reply", item.title))
-                    .tooltip(widgets::text_tooltip("No reply needed"))
+            let done = if matches!(manifest.source, SourceSpec::KeronSources(_)) {
+                row_action(
+                    theme,
+                    &pair,
+                    "done",
+                    icons::CHECK,
+                    tip("No reply needed"),
+                    Action::Done,
+                    cx,
+                )
+                .aria_label(format!("Mark {} as needing no reply", item.title))
             } else {
-                done.aria_label(format!("Mark {} done", item.title))
-            });
+                row_action(
+                    theme,
+                    &pair,
+                    "done",
+                    icons::CHECK,
+                    tip("Done"),
+                    Action::Done,
+                    cx,
+                )
+                .aria_label(format!("Mark {} done", item.title))
+            };
+            buttons.push(done.into_any_element());
         }
-        cluster.into_any_element()
+        let count = buttons.len();
+        let cluster = div()
+            .id(SharedString::from(format!("home-actions-{widget}-{row}")))
+            .track_focus(&focus)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .gap(px(ROW_ACTION_GAP))
+            .children(buttons);
+        (cluster, count)
     }
 
     fn render_snooze_menu(
@@ -1501,7 +1621,7 @@ fn button(theme: &Theme, id: &'static str, tone: ActionTone) -> Stateful<Div> {
         .focus_visible(move |s| s.border_2().border_color(accent))
 }
 
-/// The row-sized buttons (Retry, Snooze, Done).
+/// The row-sized text button (Retry).
 fn small_button(theme: &Theme, id: String) -> Stateful<Div> {
     let accent = theme.accent;
     let hover = theme.glass_hover();
@@ -1523,26 +1643,139 @@ fn small_button(theme: &Theme, id: String) -> Stateful<Div> {
         .focus_visible(move |s| s.border_color(accent))
 }
 
-fn action_button(
+/// A row action: a quiet icon-only button, like the app's other small icon
+/// actions. Nothing behind it at rest; under the pointer a faint wash, and
+/// the glyph goes from muted to the text color. Without a tooltip it's
+/// pressed: its menu is open, and it holds that look.
+fn icon_button(
+    theme: &Theme,
+    id: String,
+    glyph: &'static str,
+    tooltip: Option<impl Fn(&mut Window, &mut App) -> AnyView + 'static>,
+) -> Stateful<Div> {
+    let pressed = tooltip.is_none();
+    let fade_key = format!("{id}-hover");
+    let accent = theme.accent;
+    let wash = theme.ink(0.08);
+    let (bg, ink) = if pressed {
+        (wash, theme.text)
+    } else {
+        (
+            motion::hover_blend(&fade_key, wash.opacity(0.0), wash),
+            motion::hover_blend(&fade_key, theme.text_muted, theme.text),
+        )
+    };
+    div()
+        .id(SharedString::from(id))
+        .relative()
+        .flex_none()
+        .size(px(ROW_ACTION_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .bg(bg)
+        .cursor_pointer()
+        .on_hover(motion::hover_listener(fade_key))
+        .tab_index(0)
+        .role(Role::Button)
+        .focus_visible(move |s| s.border_1().border_color(accent))
+        .when_some(tooltip, |el, tooltip| el.tooltip(tooltip))
+        .child(icon(glyph).size(px(ROW_ACTION_ICON_SIZE)).text_color(ink))
+}
+
+fn row_action(
     theme: &Theme,
     pair: &(String, String),
     name: &str,
-    label: &'static str,
+    glyph: &'static str,
+    tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     action: Action,
     cx: &mut Context<Home>,
 ) -> Stateful<Div> {
     let (widget, row) = pair.clone();
-    small_button(theme, format!("home-{name}-{widget}-{row}"))
-        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-            cx.stop_propagation();
-            // A double click's second press lands on the row that moved up
-            // into this one's place.
-            if event.click_count() > 1 {
-                return;
-            }
-            this.act(&widget, &row, action.clone(), cx);
-        }))
-        .child(label)
+    icon_button(
+        theme,
+        format!("home-{name}-{widget}-{row}"),
+        glyph,
+        Some(tooltip),
+    )
+    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+        cx.stop_propagation();
+        // A double click's second press lands on the row that moved up
+        // into this one's place.
+        if event.click_count() > 1 {
+            return;
+        }
+        this.act(&widget, &row, action.clone(), cx);
+    }))
+}
+
+/// The slot a row's actions need: buttons and the gaps between them.
+fn actions_width(count: usize) -> f32 {
+    let count = count as f32;
+    count * ROW_ACTION_SIZE + (count - 1.0).max(0.0) * ROW_ACTION_GAP
+}
+
+/// A row on its way out after Done or "not a thing": it fades as its height
+/// closes, taking the gap under it along, so the rows below move up without
+/// a jump.
+fn collapsing(leaving: &Leaving, row: AnyElement) -> AnyElement {
+    let t = leaving.progress();
+    div()
+        .flex_none()
+        // Room for the row's hover wash, which reaches past the text column.
+        .mx(px(-ROW_INSET))
+        .px(px(ROW_INSET))
+        .overflow_hidden()
+        .h(px(leaving.height * (1.0 - t)))
+        .mb(px(-LIST_GAP * t))
+        .opacity(1.0 - t)
+        .child(row)
+        .into_any_element()
+}
+
+/// A row action's tooltip: the app's usual chip, just above the row and
+/// ending at the pointer. gpui hangs a tooltip below and right of the
+/// pointer, which by a card's right edge spills onto the next card.
+struct RowTooltip {
+    chip: AnyView,
+    /// From the pointer up to the chip's bottom edge.
+    lift: f32,
+}
+
+impl Render for RowTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().relative().size_0().child(
+            div()
+                .absolute()
+                .right_0()
+                .bottom(px(self.lift))
+                .whitespace_nowrap()
+                .child(self.chip.clone()),
+        )
+    }
+}
+
+/// `.tooltip(...)` for a row action, placed from where `row` was last drawn.
+fn row_tooltip(
+    text: &'static str,
+    rows: Rc<RefCell<HashMap<String, RowUi>>>,
+    row: String,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let chip = widgets::text_tooltip(text);
+    move |window, cx| {
+        let pointer = window.mouse_position();
+        let lift = rows.borrow().get(&row).and_then(|ui| ui.bounds).map_or(
+            ROW_TOOLTIP_FALLBACK_LIFT,
+            |bounds| {
+                // gpui hangs the tooltip 1px off the pointer.
+                f32::from(pointer.y - bounds.top()) + 1.0 + ROW_TOOLTIP_GAP
+            },
+        );
+        let chip = chip(window, cx);
+        cx.new(|_| RowTooltip { chip, lift }).into()
+    }
 }
 
 fn skeleton(theme: &Theme, view: EntityId, cx: &mut App) -> AnyElement {
