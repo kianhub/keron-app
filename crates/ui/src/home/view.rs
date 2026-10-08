@@ -1,0 +1,1774 @@
+//! Drawing Home: the toolbar, the Customize tray, and the grid of cards with
+//! one body per widget kind. Colors come from the theme, so light and dark
+//! both follow it.
+
+use std::time::Duration;
+
+use chrono::{Local, NaiveDate, Utc};
+use gpui::{
+    AnimationExt as _, AnyElement, App, ClickEvent, Context, CursorStyle, Div, ElementId, EntityId,
+    FontWeight, Hsla, MouseButton, Role, SharedString, Stateful, Toggled, Window, div, prelude::*,
+    px, relative,
+};
+use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
+use keron_home::loose_ends::{Action, snooze_choices};
+use keron_home::{AgendaItem, DeviceItem, Heat, Kind, Stat, TimelineItem};
+use zeron_theme::AccentPreset;
+
+use super::{
+    Body, CardDragPayload, Home, ListItem, Manifest, Mode, Payload, RowChange, SignIn, Slot,
+    SourceSpec, WidgetState, dense_cells, is_door, limit, visible_list_rows,
+};
+use crate::icons::{self, icon};
+use crate::motion::{self, MotionSpec};
+use crate::popover;
+use crate::settings::widgets::{self, ActionTone};
+use crate::theme::Theme;
+use crate::typography::ui_rems;
+
+const CARD_RADIUS: f32 = 12.0;
+/// Two columns once each card gets at least this much.
+const CARD_MIN_WIDTH: f32 = 260.0;
+const GRID_GAP: f32 = 10.0;
+/// Room left under Home for the update notice at the window's bottom.
+const BOTTOM_CLEARANCE: f32 = 64.0;
+/// Burning heat breathes this slowly.
+const HEAT_PULSE: MotionSpec = MotionSpec::new(1800, motion::EASE_IN_OUT);
+
+/// The pointer ghost while a card drags: nothing, the card itself moves.
+struct CardGhost;
+
+impl Render for CardGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl Render for Home {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let frame = self.frame;
+        let width = (frame.width - 2.0 * Theme::SPACE_LG).max(0.0);
+        if !self.loaded || width <= 0.0 {
+            return div().into_any_element();
+        }
+        let theme = Theme::of(cx).clone();
+        let columns = if width >= 2.0 * CARD_MIN_WIDTH + GRID_GAP {
+            2
+        } else {
+            1
+        };
+        let toolbar = self.render_toolbar(&theme, cx);
+        let tray = self.customize.then(|| self.render_tray(&theme, cx));
+        let grid = self.render_grid(&theme, columns, cx);
+        let content = div()
+            .w(px(width))
+            .mx_auto()
+            .pb(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(GRID_GAP))
+            .child(toolbar)
+            .children(tray)
+            .child(grid);
+        div()
+            .relative()
+            .size_full()
+            .opacity(frame.opacity)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(frame.top))
+                    .left_0()
+                    .right_0()
+                    .bottom(px(BOTTOM_CLEARANCE))
+                    .child(
+                        crate::edge_fade::edge_faded(
+                            16.0,
+                            true,
+                            true,
+                            div()
+                                .id("home-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.scroll)
+                                .child(content),
+                        )
+                        .fade_overflow_y(&self.scroll),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Home {
+    // ---- toolbar ----
+
+    fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.customize;
+        let customize = button(theme, "home-customize", ActionTone::Quiet)
+            .aria_label("Customize Home")
+            .aria_expanded(open)
+            .when(open, |el| el.bg(theme.glass_hover()).text_color(theme.text))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_customize(cx)))
+            .child(icon(icons::WIDGET).size(px(13.0)).text_color(if open {
+                theme.text
+            } else {
+                theme.text_muted
+            }))
+            .child("Customize");
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .min_h(px(32.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .children(self.render_sign_in(theme, cx)),
+            )
+            .child(customize)
+            .into_any_element()
+    }
+
+    /// The one place to connect the door, shown while a shown widget needs
+    /// it and it isn't connected.
+    fn render_sign_in(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let needs_door = self
+            .arranged()
+            .iter()
+            .any(|slot| slot.shown && is_door(&slot.manifest.source));
+        if !needs_door {
+            return None;
+        }
+        let view = cx.entity_id();
+        let line = |text: SharedString, color: Hsla| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(ui_rems(12.5))
+                .text_color(color)
+                .child(text)
+        };
+        let row = div().flex().items_center().gap(px(8.0)).min_w_0();
+        let spinner = |cx: &mut Context<Self>| -> AnyElement {
+            crate::loaders::mini_mono_spinner("home-sign-in", 2.0, theme.text_muted, view, cx)
+                .into_any_element()
+        };
+        let element = match &self.sign_in {
+            SignIn::Checking | SignIn::NoDoor | SignIn::SignedIn => return None,
+            SignIn::SignedOut => row
+                .child(line(
+                    "Your memory isn't connected.".into(),
+                    theme.text_muted,
+                ))
+                .child(
+                    button(theme, "home-connect", ActionTone::Filled)
+                        .aria_label("Connect your memory")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.connect(cx)))
+                        .child("Connect your memory"),
+                ),
+            SignIn::Opening => row
+                .child(spinner(cx))
+                .child(line("Opening the browser…".into(), theme.text_muted)),
+            SignIn::Waiting => row
+                .child(spinner(cx))
+                .child(line("Waiting for the browser…".into(), theme.text_muted))
+                .child(
+                    button(theme, "home-connect-cancel", ActionTone::Quiet)
+                        .aria_label("Cancel the sign-in")
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_sign_in(cx)),
+                        )
+                        .child("Cancel"),
+                ),
+            SignIn::Failed(message) => row
+                .child(
+                    icon(icons::DANGER_TRIANGLE)
+                        .size(px(13.0))
+                        .text_color(theme.warning_muted),
+                )
+                .child(line(message.clone().into(), theme.warning_muted))
+                .child(
+                    button(theme, "home-connect-again", ActionTone::Filled)
+                        .aria_label("Try connecting your memory again")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.connect(cx)))
+                        .child("Try again"),
+                ),
+        };
+        Some(element.into_any_element())
+    }
+
+    // ---- Customize ----
+
+    fn render_tray(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let order = self.arranged();
+        let count = order.len();
+        let rows: Vec<AnyElement> = order
+            .iter()
+            .enumerate()
+            .map(|(ix, slot)| self.render_tray_row(theme, ix, count, slot, cx))
+            .collect();
+        let problems = self
+            .catalog
+            .problems
+            .iter()
+            .map(|problem| problem.to_string())
+            .chain(
+                self.layout_error
+                    .iter()
+                    .map(|error| format!("{error}. Changes here aren't saved until it's fixed.")),
+            )
+            .map(|text| {
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(6.0))
+                    .text_size(ui_rems(12.0))
+                    .line_height(ui_rems(16.0))
+                    .text_color(theme.warning_muted)
+                    .child(
+                        div().flex_none().mt(px(2.0)).child(
+                            icon(icons::DANGER_TRIANGLE)
+                                .size(px(12.0))
+                                .text_color(theme.warning_muted),
+                        ),
+                    )
+                    .child(div().min_w_0().child(text))
+            });
+        let tray = card_surface(theme)
+            .id("home-tray")
+            .px(px(14.0))
+            .py(px(12.0))
+            .gap(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_x(px(10.0))
+                    .child(
+                        div()
+                            .text_size(ui_rems(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Widgets"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child("Show, hide, resize and reorder. Cards can be dragged too."),
+                    ),
+            )
+            .child(div().flex().flex_col().children(rows))
+            .children(problems)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        button(theme, "home-describe", ActionTone::Outlined)
+                            .aria_label("Describe a widget for an agent to make")
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| this.describe_widget(cx)),
+                            )
+                            .child("Describe a widget…"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child("An agent writes it, and Home picks it up by itself."),
+                    ),
+            );
+        crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, tray).into_any_element()
+    }
+
+    fn render_tray_row(
+        &self,
+        theme: &Theme,
+        ix: usize,
+        count: usize,
+        slot: &Slot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = slot.manifest.id.clone();
+        let title = slot.manifest.title.clone();
+        let shown = slot.shown;
+        let accent = theme.accent;
+        let switch = widgets::toggle_switch(theme, shown, format!("home-shown-{id}"))
+            .id(SharedString::from(format!("home-shown-{id}")))
+            .tab_index(0)
+            .role(Role::Switch)
+            .aria_label(format!("Show {title}"))
+            .aria_toggled(toggled(shown))
+            .focus_visible(move |s| s.border_2().border_color(accent))
+            .cursor_pointer()
+            .on_click(cx.listener({
+                let id = id.clone();
+                move |this, _: &ClickEvent, _, cx| this.set_shown(&id, !shown, cx)
+            }));
+        let width_choice = |columns: u8| {
+            let selected = slot.width == columns;
+            let label = if columns == 1 {
+                format!("{title}: one column")
+            } else {
+                format!("{title}: two columns")
+            };
+            div()
+                .id(SharedString::from(format!("home-width-{id}-{columns}")))
+                .px(px(8.0))
+                .py(px(1.0))
+                .rounded(px(5.0))
+                .text_size(ui_rems(11.5))
+                .font_family(theme.font_mono.clone())
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .when(selected, |el| el.bg(theme.wash(0.1)))
+                .cursor_pointer()
+                .tab_index(0)
+                .role(Role::RadioButton)
+                .aria_label(label)
+                .aria_toggled(toggled(selected))
+                .focus_visible(move |s| s.border_1().border_color(accent))
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _: &ClickEvent, _, cx| this.set_width(&id, columns, cx)
+                }))
+                .child(SharedString::from(columns.to_string()))
+        };
+        let widths = div()
+            .flex()
+            .flex_none()
+            .p(px(2.0))
+            .gap(px(2.0))
+            .rounded(px(7.0))
+            .bg(theme.wash(0.05))
+            .child(width_choice(1))
+            .child(width_choice(2));
+        let hover = theme.glass_hover();
+        let arrow = |delta: isize, glyph: &'static str, label: String, enabled: bool| {
+            let base = div()
+                .id(SharedString::from(format!("home-move-{id}-{delta}")))
+                .flex_none()
+                .size(px(26.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph).size(px(14.0)).text_color(theme.text_muted));
+            if !enabled {
+                return base.opacity(0.3);
+            }
+            let id = id.clone();
+            base.cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .tab_index(0)
+                .role(Role::Button)
+                .aria_label(label)
+                .focus_visible(move |s| s.border_1().border_color(accent))
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.move_by(&id, delta, cx)),
+                )
+        };
+        let up = arrow(-1, icons::ALT_ARROW_UP, format!("Move {title} up"), ix > 0);
+        let down = arrow(
+            1,
+            icons::ALT_ARROW_DOWN,
+            format!("Move {title} down"),
+            ix + 1 < count,
+        );
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .min_h(px(38.0))
+            .when(ix > 0, |el| {
+                el.border_t_1().border_color(widgets::row_divider(theme))
+            })
+            .child(
+                icon(icon_for(&slot.manifest))
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_rems(13.0))
+                    .text_color(if shown { theme.text } else { theme.text_muted })
+                    .child(SharedString::from(title.clone())),
+            )
+            .child(widths)
+            .child(up)
+            .child(down)
+            .child(switch)
+            .into_any_element()
+    }
+
+    // ---- the grid ----
+
+    fn render_grid(&self, theme: &Theme, columns: u16, cx: &mut Context<Self>) -> AnyElement {
+        let slots: Vec<Slot> = self
+            .arranged()
+            .into_iter()
+            .filter(|slot| slot.shown)
+            .collect();
+        if slots.is_empty() {
+            let text = if self.catalog.manifests.is_empty() {
+                "No widgets yet. Describe one in Customize."
+            } else {
+                "Every widget is hidden. Turn some on in Customize."
+            };
+            return div()
+                .py(px(8.0))
+                .text_size(ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(text)
+                .into_any_element();
+        }
+        let count = slots.len();
+        // While a card drags, the others make room: the order shown is the
+        // order it would drop into.
+        let (order, previous) = match &self.drag {
+            Some(drag) => (
+                moved(count, drag.from, drag.over),
+                moved(count, drag.from, drag.prev_over),
+            ),
+            None => ((0..count).collect(), (0..count).collect()),
+        };
+        let widths: Vec<u8> = order
+            .iter()
+            .map(|&ix| {
+                if columns > 1 {
+                    slots[ix].width.clamp(1, 2)
+                } else {
+                    1
+                }
+            })
+            .collect();
+        let cells = dense_cells(&widths, columns);
+        let reduced = motion::reduced_motion(cx);
+        let mut cards = Vec::with_capacity(count);
+        for (position, &ix) in order.iter().enumerate() {
+            let slot = &slots[ix];
+            let (row, col) = cells[position];
+            let span = u16::from(widths[position]);
+            let card = self
+                .render_card(theme, slot, ix, cx)
+                .row_start(row as i16 + 1)
+                .col_start(col as i16 + 1)
+                .col_end((col + span) as i16 + 1);
+            // A card that moved slides from its old slot to its new one.
+            let slide = self.drag.as_ref().and_then(|drag| {
+                let before = previous.iter().position(|&other| other == ix)?;
+                if before == position {
+                    return None;
+                }
+                let from = drag.slots.get(before)?.origin;
+                let to = drag.slots.get(position)?.origin;
+                Some((
+                    f32::from(from.x - to.x),
+                    f32::from(from.y - to.y),
+                    drag.epoch,
+                ))
+            });
+            let card = match slide {
+                Some((dx, dy, epoch)) if !reduced => card
+                    .with_animation(
+                        ElementId::Name(format!("home-slide-{}-{epoch}", slot.manifest.id).into()),
+                        motion::TAB_SLIDE.animation(),
+                        move |el, t| {
+                            el.relative()
+                                .left(px(dx * (1.0 - t)))
+                                .top(px(dy * (1.0 - t)))
+                        },
+                    )
+                    .into_any_element(),
+                _ => card.into_any_element(),
+            };
+            cards.push(
+                crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, card)
+                    .into_any_element(),
+            );
+        }
+        div()
+            .id("home-grid")
+            .w_full()
+            .grid()
+            .grid_cols(columns)
+            .gap(px(GRID_GAP))
+            .when(self.customize, |grid| {
+                grid.on_drag_move::<CardDragPayload>(cx.listener(
+                    |this, event: &gpui::DragMoveEvent<CardDragPayload>, _, cx| {
+                        let (id, from) = {
+                            let payload = event.drag(cx);
+                            (payload.id.clone(), payload.from)
+                        };
+                        this.drag_over(&id, from, event.event.position, cx);
+                    },
+                ))
+                .on_drop::<CardDragPayload>(
+                    cx.listener(|this, _: &CardDragPayload, _, cx| this.drop_card(cx)),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.cancel_drag(cx)),
+                )
+            })
+            .children(cards)
+            .into_any_element()
+    }
+
+    fn render_card(
+        &self,
+        theme: &Theme,
+        slot: &Slot,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let manifest = &slot.manifest;
+        let id = manifest.id.clone();
+        let state = self.widgets.get(&id);
+        let dragging = self.drag.as_ref().is_some_and(|drag| drag.id == id);
+        let header = self.render_header(theme, manifest, state);
+        let body = self.render_body(theme, manifest, state, cx);
+        let footer = render_footer(theme, manifest, state);
+        let mut card = card_surface(theme)
+            .id(SharedString::from(format!("home-card-{id}")))
+            .min_w_0()
+            .px(px(12.0))
+            .pt(px(10.0))
+            .pb(px(12.0))
+            .gap(px(8.0))
+            .role(Role::Group)
+            .aria_label(manifest.title.clone())
+            .when(dragging, |el| el.border_color(theme.accent.opacity(0.7)))
+            .child(header)
+            .child(body)
+            .children(footer);
+        if self.customize {
+            let bounds = self.card_bounds.clone();
+            let key = id.clone();
+            card = card
+                .cursor(CursorStyle::OpenHand)
+                .child(
+                    gpui::canvas(
+                        move |measured, _, _| {
+                            bounds.borrow_mut().insert(key, measured);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .on_drag(
+                    CardDragPayload { id, from: index },
+                    |_payload, _point, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| CardGhost)
+                    },
+                );
+        }
+        card
+    }
+
+    fn render_header(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        state: Option<&WidgetState>,
+    ) -> Div {
+        let (count, hot) = card_count(state);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .min_w_0()
+            .child(
+                icon(icon_for(manifest))
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_rems(12.5))
+                    .line_height(ui_rems(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from(manifest.title.clone())),
+            )
+            .children(count.map(|count| {
+                let chip = div()
+                    .flex_none()
+                    .text_size(ui_rems(11.0))
+                    .font_weight(FontWeight::MEDIUM);
+                // Loose ends go amber once anything is hot or burning.
+                let chip = if hot {
+                    chip.px(px(5.0))
+                        .rounded(px(4.0))
+                        .bg(theme.warning.opacity(0.16))
+                        .text_color(theme.warning)
+                } else {
+                    chip.text_color(theme.text_faint)
+                };
+                chip.child(SharedString::from(count.to_string()))
+            }))
+            .child(div().flex_1())
+            .when(self.customize, |el| {
+                el.child(
+                    icon(icons::DRAG_HANDLE)
+                        .size(px(14.0))
+                        .text_color(theme.text_faint),
+                )
+            })
+    }
+
+    fn render_body(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        state: Option<&WidgetState>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity_id();
+        if is_door(&manifest.source) {
+            match &self.sign_in {
+                SignIn::SignedIn => {}
+                SignIn::Checking => return skeleton(theme, view, cx),
+                SignIn::NoDoor => return muted(theme, "No memory door is set up."),
+                _ => return muted(theme, "Connect your memory to see this."),
+            }
+        }
+        if matches!(manifest.source, SourceSpec::Script(_)) && !self.scripts_ready {
+            return skeleton(theme, view, cx);
+        }
+        let Some(state) = state else {
+            return skeleton(theme, view, cx);
+        };
+        if let Some(reason) = &state.unavailable {
+            return muted(theme, reason.clone());
+        }
+        let error = state
+            .error
+            .as_ref()
+            .map(|message| self.render_error(theme, manifest, message, cx));
+        let content = match &state.payload {
+            Some(payload) => Some(self.render_payload(theme, manifest, state, payload, view, cx)),
+            None if error.is_none() => return skeleton(theme, view, cx),
+            None => None,
+        };
+        let action_error = state.action_error.as_ref().map(|(message, _)| {
+            div()
+                .text_size(ui_rems(12.0))
+                .line_height(ui_rems(16.0))
+                .text_color(theme.danger_muted)
+                .child(SharedString::from(message.clone()))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(error)
+            .children(content)
+            .children(action_error)
+            .into_any_element()
+    }
+
+    /// A compact warning with Retry; rows already shown stay under it.
+    fn render_error(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let amber = theme.warning;
+        let text = theme.warning_muted.opacity(0.9);
+        let can_retry = matches!(self.mode(manifest), Mode::Fetch);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(amber.opacity(0.2))
+            .bg(amber.opacity(0.06))
+            .child(icon(icons::DANGER_TRIANGLE).size(px(13.0)).text_color(text))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(ui_rems(12.0))
+                    .line_height(ui_rems(16.0))
+                    .text_color(text)
+                    .line_clamp(2)
+                    .child(SharedString::from(message.to_string())),
+            )
+            .when(can_retry, |el| {
+                let id = manifest.id.clone();
+                el.child(
+                    small_button(theme, format!("home-retry-{id}"))
+                        .aria_label(format!("Retry {}", manifest.title))
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(&id, cx)),
+                        )
+                        .child("Retry"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_payload(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        state: &WidgetState,
+        payload: &Payload,
+        view: EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match &payload.body {
+            Body::List(items) => self.render_list(theme, manifest, state, items, view, cx),
+            Body::Timeline(items) => render_timeline(theme, manifest, items),
+            Body::Agenda(items) => self.render_agenda(theme, manifest, items, cx),
+            Body::Devices(items) => render_devices(theme, manifest, items),
+            Body::Stat(stat) => render_stat(theme, manifest, stat),
+        }
+    }
+
+    // ---- list ----
+
+    fn render_list(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        state: &WidgetState,
+        items: &[ListItem],
+        view: EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (rows, more) = visible_list_rows(items, &state.overrides, limit(manifest));
+        if rows.is_empty() {
+            return empty(theme, manifest);
+        }
+        let rows: Vec<AnyElement> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(ix, item)| self.render_list_row(theme, manifest, state, item, ix, view, cx))
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(rows)
+            .children(more_line(theme, more))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_list_row(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        state: &WidgetState,
+        item: &ListItem,
+        ix: usize,
+        view: EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let widget = manifest.id.as_str();
+        let key = format!("home-row-{widget}-{ix}");
+        let change = item
+            .id
+            .as_ref()
+            .and_then(|id| state.overrides.get(id))
+            .map(|change| change.change);
+        let snoozed = change == Some(RowChange::Snoozed) || item.snoozed_until.is_some();
+        let link = item
+            .link
+            .clone()
+            .filter(|link| parse_chat_link(link).is_some() || is_openable(link));
+        let mark = status_mark(theme, item.status.as_deref(), &key, view, cx);
+        let age = item.age.clone().or_else(|| {
+            item.at
+                .as_deref()
+                .and_then(parse_time)
+                .map(|at| short_age(at, Utc::now()))
+        });
+        let heat = item
+            .heat
+            .map(Heat::from_level)
+            .filter(|heat| *heat != Heat::Off);
+        let mut right = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(ui_rems(17.0))
+            .text_size(ui_rems(11.0))
+            .text_color(theme.text_faint)
+            .when_some(item.account.clone(), |el, account| {
+                el.child(SharedString::from(account))
+            });
+        if snoozed {
+            right = right.child(widgets::badge(theme, "snoozed"));
+        } else if let Some(badge) = item.badge.clone() {
+            right = right.child(widgets::badge(theme, badge));
+        } else if let Some(age) = age {
+            right = right.child(
+                div()
+                    .font_family(theme.font_mono.clone())
+                    .child(SharedString::from(age)),
+            );
+        }
+        if let Some(heat) = heat {
+            right = right.child(heat_mark(theme, heat, view, cx));
+        }
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .truncate()
+                    .text_size(ui_rems(13.0))
+                    .line_height(ui_rems(17.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(item.title.clone())),
+            )
+            .when_some(item.sub.clone(), |el, sub| {
+                el.child(
+                    div()
+                        .mt(px(1.0))
+                        .text_size(ui_rems(11.5))
+                        .line_height(ui_rems(15.0))
+                        .text_color(theme.text_muted)
+                        .line_clamp(2)
+                        .child(SharedString::from(sub)),
+                )
+            });
+        let actions = item
+            .id
+            .as_deref()
+            .filter(|_| !item.actions.is_empty() && self.fetcher.door().is_some())
+            .map(|row| self.render_row_actions(theme, widget, row, item, &key, cx));
+        let mut row = div()
+            .id(SharedString::from(key.clone()))
+            .group(SharedString::from(key))
+            .relative()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .mx(px(-6.0))
+            .px(px(6.0))
+            .py(px(3.0))
+            .rounded(px(6.0))
+            .when(snoozed, |el| el.opacity(0.6))
+            .children(mark)
+            .child(text)
+            .child(right)
+            .children(actions);
+        if let Some(link) = link {
+            let hover = theme.wash(0.05);
+            let accent = theme.accent;
+            row = row
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .tab_index(0)
+                .role(Role::Link)
+                .aria_label(item.title.clone())
+                .focus_visible(move |s| s.border_1().border_color(accent))
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.open_link(&link, cx)),
+                );
+        }
+        row.into_any_element()
+    }
+
+    /// Snooze and Done, over the row's right side while it's hovered or one
+    /// of them has keyboard focus.
+    fn render_row_actions(
+        &self,
+        theme: &Theme,
+        widget: &str,
+        row: &str,
+        item: &ListItem,
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let offers = |name: &str| item.actions.iter().any(|action| action == name);
+        let menu_open = self
+            .snooze_menu
+            .get()
+            .is_some_and(|(menu_widget, menu_row)| menu_widget == widget && menu_row == row);
+        let overlay = crate::theme::flatten(theme.composer_surface_bg(), theme.bg);
+        let mut cluster = div()
+            .id(SharedString::from(format!("home-actions-{widget}-{row}")))
+            .focusable()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(4.0))
+            .pl(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .bg(overlay)
+            .opacity(if menu_open { 1.0 } else { 0.0 })
+            .group_hover(SharedString::from(group.to_string()), |s| s.opacity(1.0))
+            .in_focus(|s| s.opacity(1.0));
+        let pair = (widget.to_string(), row.to_string());
+        if offers("snooze") {
+            let mut snooze = small_button(theme, format!("home-snooze-{widget}-{row}"))
+                .aria_label(format!("Snooze {}", item.title))
+                .aria_expanded(menu_open)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let pair = pair.clone();
+                        move |this, _, _, _| {
+                            this.snooze_menu
+                                .note_trigger_press_matching(|open| *open == pair);
+                        }
+                    }),
+                )
+                .on_click(cx.listener({
+                    let pair = pair.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_snooze_menu(&pair.0, &pair.1, cx);
+                    }
+                }))
+                .child("Snooze");
+            if menu_open {
+                snooze = snooze.relative().child(self.render_snooze_menu(
+                    theme,
+                    widget,
+                    row,
+                    offers("dismiss"),
+                    cx,
+                ));
+            }
+            cluster = cluster.child(snooze);
+        } else if offers("dismiss") {
+            cluster = cluster.child(
+                action_button(theme, &pair, "dismiss", "Not a thing", Action::Dismiss, cx)
+                    .aria_label(format!("{} is not a thing", item.title)),
+            );
+        }
+        if offers("done") {
+            cluster = cluster.child(
+                action_button(theme, &pair, "done", "Done", Action::Done, cx)
+                    .aria_label(format!("Mark {} done", item.title)),
+            );
+        }
+        cluster.into_any_element()
+    }
+
+    fn render_snooze_menu(
+        &self,
+        theme: &Theme,
+        widget: &str,
+        row: &str,
+        dismiss: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let popup = theme.for_popup();
+        let mut menu = popover::popover_card(&popup)
+            .w(px(184.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_snooze_menu(cx)));
+        let item = |key: String, label: SharedString, action: Action| {
+            let (widget, row) = (widget.to_string(), row.to_string());
+            popover::menu_row(&popup, false, key.clone())
+                .id(SharedString::from(key))
+                .tab_index(0)
+                .role(Role::MenuItem)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.close_snooze_menu(cx);
+                    this.act(&widget, &row, action.clone(), cx);
+                }))
+                .child(label)
+        };
+        for (ix, (label, until)) in snooze_choices(Local::now()).into_iter().enumerate() {
+            menu = menu.child(item(
+                format!("home-snooze-{widget}-{row}-{ix}"),
+                label.into(),
+                Action::Snooze { until },
+            ));
+        }
+        if dismiss {
+            menu = menu
+                .child(div().my(px(4.0)).h(px(1.0)).bg(popup.border.opacity(0.6)))
+                .child(item(
+                    format!("home-dismiss-{widget}-{row}"),
+                    "Not a thing".into(),
+                    Action::Dismiss,
+                ));
+        }
+        popover::anchored_menu_below_end(
+            format!("home-snooze-menu-{widget}-{row}"),
+            menu.into_any_element(),
+            self.snooze_menu.closing_since(),
+        )
+    }
+
+    // ---- agenda ----
+
+    fn render_agenda(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        items: &[AgendaItem],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if items.is_empty() {
+            return empty(theme, manifest);
+        }
+        let today = Local::now().date_naive();
+        let (rows, more) = cap(items, limit(manifest));
+        let mut children: Vec<AnyElement> = Vec::new();
+        let mut last_label: Option<String> = None;
+        for (ix, item) in rows.iter().enumerate() {
+            let (date, time) = agenda_when(item);
+            let label = date.filter(|date| *date > today).map(|date| {
+                if Some(date) == today.succ_opt() {
+                    "Tomorrow".to_string()
+                } else {
+                    date.format("%A").to_string()
+                }
+            });
+            if label != last_label {
+                if let Some(label) = &label {
+                    children.push(
+                        div()
+                            .pt(px(4.0))
+                            .text_size(ui_rems(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(label.clone()))
+                            .into_any_element(),
+                    );
+                }
+                last_label = label;
+            }
+            children.push(self.render_agenda_row(theme, manifest, item, ix, time, cx));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(children)
+            .children(more_line(theme, more))
+            .into_any_element()
+    }
+
+    fn render_agenda_row(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        item: &AgendaItem,
+        ix: usize,
+        time: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("home-event-{}-{ix}", manifest.id);
+        let video = item.video_link.clone().filter(|link| is_openable(link));
+        let right: Option<AnyElement> = if let Some(video) = video {
+            let hover = theme.glass_hover();
+            let accent = theme.accent;
+            Some(
+                div()
+                    .id(SharedString::from(format!("{key}-video")))
+                    .flex_none()
+                    .p(px(2.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .tab_index(0)
+                    .role(Role::Button)
+                    .aria_label(format!("Join the call for {}", item.title))
+                    .focus_visible(move |s| s.border_1().border_color(accent))
+                    .tooltip(widgets::text_tooltip("Join the call"))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_link(&video, cx);
+                    }))
+                    .child(
+                        icon(icons::VIDEO)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            item.attendees.filter(|count| *count > 1).map(|count| {
+                div()
+                    .flex_none()
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!("{count} people")))
+                    .into_any_element()
+            })
+        };
+        let link = item.link.clone().filter(|link| is_openable(link));
+        let mut row = div()
+            .id(SharedString::from(key))
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .mx(px(-6.0))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(6.0))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(44.0))
+                    .text_size(ui_rems(11.0))
+                    .line_height(ui_rems(17.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(time)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x(px(6.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_rems(13.0))
+                            .line_height(ui_rems(17.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(item.title.clone())),
+                    )
+                    .when_some(item.warn.clone(), |el, warn| {
+                        el.child(warn_chip(theme, warn))
+                    }),
+            )
+            .children(right);
+        if let Some(link) = link {
+            let hover = theme.wash(0.05);
+            let accent = theme.accent;
+            row = row
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .tab_index(0)
+                .role(Role::Link)
+                .aria_label(item.title.clone())
+                .focus_visible(move |s| s.border_1().border_color(accent))
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.open_link(&link, cx)),
+                );
+        }
+        row.into_any_element()
+    }
+}
+
+// ---- kinds without interaction ----
+
+fn render_timeline(theme: &Theme, manifest: &Manifest, items: &[TimelineItem]) -> AnyElement {
+    if items.is_empty() {
+        return empty(theme, manifest);
+    }
+    let (rows, more) = cap(items, limit(manifest));
+    let rows = rows.iter().map(|item| {
+        let time = item
+            .time
+            .clone()
+            .or_else(|| {
+                item.at
+                    .as_deref()
+                    .and_then(parse_time)
+                    .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
+            })
+            .unwrap_or_default();
+        let kind = item.kind.clone().unwrap_or_default();
+        div()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(40.0))
+                    .text_size(ui_rems(11.0))
+                    .line_height(ui_rems(17.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(time)),
+            )
+            .child(kind_chip(theme, &kind))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(ui_rems(13.0))
+                    .line_height(ui_rems(17.0))
+                    .text_color(theme.text)
+                    .line_clamp(2)
+                    .child(SharedString::from(item.text.clone())),
+            )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(rows)
+        .children(more_line(theme, more))
+        .into_any_element()
+}
+
+fn render_devices(theme: &Theme, manifest: &Manifest, items: &[DeviceItem]) -> AnyElement {
+    if items.is_empty() {
+        return empty(theme, manifest);
+    }
+    let (rows, more) = cap(items, limit(manifest));
+    let rows = rows.iter().map(|item| {
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(role) = item.role.clone().filter(|role| !role.is_empty()) {
+            meta.push(role);
+        } else if let Some(platform) = item.platform.as_deref().filter(|p| !p.is_empty()) {
+            meta.push(crate::settings::devices::platform_label(platform).to_string());
+        }
+        if item.is_self {
+            meta.push("this Mac".to_string());
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(7.0))
+                    .rounded_full()
+                    .bg(if item.online {
+                        theme.success
+                    } else {
+                        theme.text_faint.opacity(0.5)
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(5.0))
+                    .text_size(ui_rems(13.0))
+                    .line_height(ui_rems(17.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text)
+                            .child(SharedString::from(item.name.clone())),
+                    )
+                    .when(!meta.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(format!("· {}", meta.join(" · ")))),
+                        )
+                    }),
+            )
+            .when_some(item.detail.clone(), |el, detail| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(ui_rems(11.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(detail)),
+                )
+            })
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(rows)
+        .children(more_line(theme, more))
+        .into_any_element()
+}
+
+fn render_stat(theme: &Theme, manifest: &Manifest, stat: &Stat) -> AnyElement {
+    if stat.value.is_empty() && stat.series.is_empty() {
+        return empty(theme, manifest);
+    }
+    let max = stat.series.iter().copied().fold(0.0_f64, f64::max);
+    let last = stat.series.len().saturating_sub(1);
+    let bars = stat.series.iter().enumerate().map(|(ix, value)| {
+        let share = if max > 0.0 {
+            (value / max).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        div()
+            .flex_1()
+            .h(relative(share.max(0.04)))
+            .rounded_t(px(2.0))
+            .bg(if ix == last {
+                theme.accent
+            } else {
+                theme.accent.opacity(0.4)
+            })
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap_x(px(8.0))
+                .child(
+                    div()
+                        .text_size(ui_rems(22.0))
+                        .line_height(ui_rems(26.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(SharedString::from(stat.value.clone())),
+                )
+                .when_some(stat.label.clone(), |el, label| {
+                    el.child(
+                        div()
+                            .text_size(ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(label)),
+                    )
+                })
+                .when_some(stat.delta.clone(), |el, delta| {
+                    el.child(
+                        div()
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(delta)),
+                    )
+                }),
+        )
+        .when(!stat.series.is_empty(), |el| {
+            el.child(
+                div()
+                    .h(px(46.0))
+                    .flex()
+                    .items_end()
+                    .gap(px(4.0))
+                    .children(bars),
+            )
+        })
+        .into_any_element()
+}
+
+/// Problems the source reported, and how old door data is once it's stale.
+fn render_footer(
+    theme: &Theme,
+    manifest: &Manifest,
+    state: Option<&WidgetState>,
+) -> Option<AnyElement> {
+    let payload = state?.payload.as_ref()?;
+    let problems = payload.errors.len();
+    let now = Utc::now();
+    let stale = payload
+        .updated
+        .as_deref()
+        .filter(|_| is_door(&manifest.source))
+        .and_then(parse_time)
+        .filter(|at| {
+            now.signed_duration_since(at.with_timezone(&Utc))
+                .to_std()
+                .is_ok_and(|age| age > stale_after(manifest))
+        })
+        .map(|at| format!("updated {} ago", short_age(at, now)));
+    if problems == 0 && stale.is_none() {
+        return None;
+    }
+    let problems_note = if problems > 0 {
+        div()
+            .id(SharedString::from(format!("home-problems-{}", manifest.id)))
+            .text_color(theme.warning_muted)
+            .tooltip(widgets::text_tooltip(payload.errors.join("\n")))
+            .child(SharedString::from(if problems == 1 {
+                "1 problem".to_string()
+            } else {
+                format!("{problems} problems")
+            }))
+            .into_any_element()
+    } else {
+        div().into_any_element()
+    };
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .pt(px(8.0))
+            .border_t_1()
+            .border_color(widgets::row_divider(theme))
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_faint)
+            .child(problems_note)
+            .children(stale.map(SharedString::from))
+            .into_any_element(),
+    )
+}
+
+// ---- small pieces ----
+
+/// The card look: the composer pill's fill and edge, so Home reads as part
+/// of the same surface.
+fn card_surface(theme: &Theme) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(theme.composer_surface_border())
+        .bg(theme.composer_surface_bg())
+}
+
+/// A focusable settings-style action.
+fn button(theme: &Theme, id: &'static str, tone: ActionTone) -> Stateful<Div> {
+    let accent = theme.accent;
+    widgets::action_button(theme, tone)
+        .id(id)
+        .flex_none()
+        .tab_index(0)
+        .role(Role::Button)
+        .focus_visible(move |s| s.border_2().border_color(accent))
+}
+
+/// The row-sized buttons (Retry, Snooze, Done).
+fn small_button(theme: &Theme, id: String) -> Stateful<Div> {
+    let accent = theme.accent;
+    let hover = theme.glass_hover();
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .px(px(7.0))
+        .py(px(1.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .text_size(ui_rems(11.5))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .tab_index(0)
+        .role(Role::Button)
+        .focus_visible(move |s| s.border_color(accent))
+}
+
+fn action_button(
+    theme: &Theme,
+    pair: &(String, String),
+    name: &str,
+    label: &'static str,
+    action: Action,
+    cx: &mut Context<Home>,
+) -> Stateful<Div> {
+    let (widget, row) = pair.clone();
+    small_button(theme, format!("home-{name}-{widget}-{row}"))
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            // A double click's second press lands on the row that moved up
+            // into this one's place.
+            if event.click_count() > 1 {
+                return;
+            }
+            this.act(&widget, &row, action.clone(), cx);
+        }))
+        .child(label)
+}
+
+fn skeleton(theme: &Theme, view: EntityId, cx: &mut App) -> AnyElement {
+    popover::skeleton_rows("home-skeleton", theme, 3, view, cx)
+}
+
+fn muted(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
+    div()
+        .text_size(ui_rems(12.5))
+        .line_height(ui_rems(17.0))
+        .text_color(theme.text_muted)
+        .child(text.into())
+        .into_any_element()
+}
+
+fn empty(theme: &Theme, manifest: &Manifest) -> AnyElement {
+    muted(
+        theme,
+        manifest
+            .empty
+            .clone()
+            .unwrap_or_else(|| "Nothing here".to_string()),
+    )
+}
+
+fn more_line(theme: &Theme, more: usize) -> Option<Div> {
+    (more > 0).then(|| {
+        div()
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_faint)
+            .child(SharedString::from(format!("+{more} more")))
+    })
+}
+
+fn warn_chip(theme: &Theme, text: String) -> Div {
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .rounded(px(4.0))
+        .bg(theme.warning.opacity(0.14))
+        .text_size(ui_rems(10.5))
+        .line_height(ui_rems(15.0))
+        .text_color(theme.warning)
+        .child(SharedString::from(text))
+}
+
+/// A session's state at the row's start: working spins, waiting is an amber
+/// dot, an error a red one.
+fn status_mark(
+    theme: &Theme,
+    status: Option<&str>,
+    key: &str,
+    view: EntityId,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let dot = |color: Hsla| {
+        div()
+            .size(px(7.0))
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    };
+    let mark = match status? {
+        "working" => {
+            crate::loaders::mini_glyph_spinner(format!("{key}-working"), 2.0, theme.glyph, view, cx)
+                .into_any_element()
+        }
+        "waiting" => dot(theme.warning),
+        "error" => dot(theme.danger),
+        _ => return None,
+    };
+    Some(
+        div()
+            .flex_none()
+            .w(px(10.0))
+            .h(ui_rems(17.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(mark)
+            .into_any_element(),
+    )
+}
+
+/// Four rising bars in one hue and the heat's word. Burning breathes,
+/// except under Reduce Motion.
+fn heat_mark(theme: &Theme, heat: Heat, view: EntityId, cx: &mut App) -> Div {
+    let color = heat_color(theme, heat);
+    let unlit = theme.text.opacity(0.14);
+    let lit = heat.bars();
+    let opacity = if heat.pulses() {
+        1.0 - 0.5 * motion::pulse_wave(motion::pulse_delta_slow(&HEAT_PULSE, view, cx))
+    } else {
+        1.0
+    };
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(2.0))
+                .opacity(opacity)
+                .children(
+                    [6.0, 8.0, 10.0, 12.0]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, height)| {
+                            div()
+                                .w(px(4.0))
+                                .h(px(height))
+                                .rounded(px(1.0))
+                                .bg(if (ix as u8) < lit { color } else { unlit })
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .min_w(px(44.0))
+                .text_size(ui_rems(10.5))
+                .text_color(color)
+                .child(heat.word()),
+        )
+}
+
+fn heat_color(theme: &Theme, heat: Heat) -> Hsla {
+    match heat {
+        Heat::Off => theme.text_faint,
+        Heat::Quiet => crate::theme::mix(theme.text_muted, preset(theme, AccentPreset::Blue), 0.35),
+        Heat::Warm => theme.warning,
+        Heat::Hot => preset(theme, AccentPreset::Orange),
+        Heat::Burning => theme.danger,
+    }
+}
+
+/// A timeline row's kind: did, said, heard, agent and nudge each get their
+/// own quiet hue.
+fn kind_chip(theme: &Theme, kind: &str) -> Div {
+    let chip = div().flex_none().w(px(52.0));
+    if kind.is_empty() {
+        return chip;
+    }
+    let hue = match kind {
+        "did" => preset(theme, AccentPreset::Blue),
+        "said" => preset(theme, AccentPreset::Orange),
+        "heard" => preset(theme, AccentPreset::Amber),
+        "agent" => preset(theme, AccentPreset::Green),
+        "nudge" => preset(theme, AccentPreset::Zeron),
+        _ => theme.text_muted,
+    };
+    chip.mt(px(1.0))
+        .rounded(px(4.0))
+        .bg(hue.opacity(0.14))
+        .flex()
+        .justify_center()
+        .text_size(ui_rems(10.5))
+        .line_height(ui_rems(15.0))
+        .text_color(hue)
+        .child(SharedString::from(kind.to_string()))
+}
+
+/// An accent preset's color for the current appearance.
+fn preset(theme: &Theme, preset: AccentPreset) -> Hsla {
+    let appearance = if theme.appearance.is_dark() {
+        zeron_theme::Appearance::Dark
+    } else {
+        zeron_theme::Appearance::Light
+    };
+    let color = preset.color(appearance);
+    gpui::rgba(u32::from_be_bytes([color.r, color.g, color.b, color.a])).into()
+}
+
+fn icon_for(manifest: &Manifest) -> &'static str {
+    match manifest.icon.as_deref() {
+        Some("flag") => icons::FLAG,
+        Some("chat") => icons::CHAT_ROUND_LINE,
+        Some("check") => icons::CHECK,
+        Some("calendar") => icons::CALENDAR,
+        Some("tree") => icons::FILE_TREE,
+        Some("pulse") => icons::PULSE,
+        Some("devices") => icons::MONITOR,
+        Some("pr") => icons::PULL_REQUEST,
+        Some("mail") => icons::MAIL,
+        Some("mic") => icons::MICROPHONE,
+        Some("bars") => icons::BARS,
+        Some("widget") => icons::WIDGET,
+        Some("bell") => icons::BELL,
+        Some("star") => icons::STAR,
+        Some("list") => icons::LIST,
+        Some("globe") => icons::GLOBE,
+        _ => match manifest.kind {
+            Kind::List => icons::LIST,
+            Kind::Timeline => icons::FILE_TREE,
+            Kind::Stat => icons::BARS,
+            Kind::Agenda => icons::CALENDAR,
+            Kind::Devices => icons::MONITOR,
+        },
+    }
+}
+
+/// The card's count, and whether anything in it is hot or burning.
+fn card_count(state: Option<&WidgetState>) -> (Option<usize>, bool) {
+    let Some(state) = state else {
+        return (None, false);
+    };
+    let Some(payload) = &state.payload else {
+        return (None, false);
+    };
+    match &payload.body {
+        Body::List(items) => {
+            let (rows, _) = visible_list_rows(items, &state.overrides, usize::MAX);
+            let hot = rows.iter().any(|row| {
+                row.heat
+                    .is_some_and(|heat| Heat::from_level(heat) >= Heat::Hot)
+            });
+            (Some(rows.len()), hot)
+        }
+        Body::Stat(_) => (None, false),
+        body => (Some(body.len()), false),
+    }
+}
+
+/// Door data counts as stale after two missed refreshes (two minutes at
+/// least).
+fn stale_after(manifest: &Manifest) -> Duration {
+    manifest
+        .every
+        .saturating_mul(2)
+        .max(Duration::from_secs(120))
+}
+
+/// When an event is: its local date, and "10:00" or "All day".
+fn agenda_when(item: &AgendaItem) -> (Option<NaiveDate>, String) {
+    if !item.all_day
+        && let Some(at) = parse_time(&item.start)
+    {
+        let local = at.with_timezone(&Local);
+        return (Some(local.date_naive()), local.format("%H:%M").to_string());
+    }
+    let date = parse_date(&item.start)
+        .or_else(|| parse_time(&item.start).map(|at| at.with_timezone(&Local).date_naive()));
+    (date, "All day".to_string())
+}
+
+fn cap<T>(items: &[T], limit: usize) -> (&[T], usize) {
+    let shown = items.len().min(limit);
+    (&items[..shown], items.len() - shown)
+}
+
+/// `0..len` with the item at `from` moved to `to`.
+fn moved(len: usize, from: usize, to: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    if from < len {
+        let item = order.remove(from);
+        order.insert(to.min(len - 1), item);
+    }
+    order
+}
+
+fn toggled(on: bool) -> Toggled {
+    if on { Toggled::True } else { Toggled::False }
+}

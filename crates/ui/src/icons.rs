@@ -165,6 +165,13 @@ icon_assets![
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
     (WIDGET, "widget"),
+    // Hand-drawn Keron Home glyphs in the Solar Linear style (widget
+    // manifests' `flag`, `pulse`, `mail`, `bars`; a video call in Today).
+    (FLAG, "flag"),
+    (PULSE, "pulse"),
+    (MAIL, "mail"),
+    (BARS, "bars"),
+    (VIDEO, "video"),
     (MAGIC_STICK_3, "magic-stick-3"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),

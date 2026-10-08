@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use keron_door::{DoorClient, DoorError};
 
-use crate::script::{ScriptError, ScriptOptions};
-use crate::{Manifest, Payload, PayloadError};
+use crate::kinds::parse_payload;
+use crate::script::{self, ScriptError, ScriptOptions};
+use crate::{Manifest, Payload, PayloadError, SourceSpec};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FetchError {
@@ -28,8 +29,10 @@ pub enum FetchError {
 impl From<DoorError> for FetchError {
     /// `SignedOut` and `Expired` become [`FetchError::SignedOut`].
     fn from(error: DoorError) -> Self {
-        let _ = error;
-        todo!("keron-home: FetchError from DoorError")
+        match error {
+            DoorError::SignedOut | DoorError::Expired => FetchError::SignedOut,
+            other => FetchError::Door(other),
+        }
     }
 }
 
@@ -56,7 +59,25 @@ impl Fetcher {
 
     /// Fetch and parse the manifest's source as its kind. Must run inside tokio.
     pub async fn fetch(&self, manifest: &Manifest) -> Result<Payload, FetchError> {
-        let _ = (manifest, &self.widgets_dir, &self.script);
-        todo!("keron-home: Fetcher::fetch")
+        let value = match &manifest.source {
+            SourceSpec::KeronSources(_) | SourceSpec::Memory(_) => {
+                let Some(door) = &self.door else {
+                    return Err(FetchError::Unsupported(
+                        "this app has no memory door set up".to_string(),
+                    ));
+                };
+                let path = manifest.source.door_path().unwrap_or_default();
+                door.get_json(&path).await?
+            }
+            SourceSpec::Script(script) => script::run(&self.widgets_dir, script, &self.script)
+                .await
+                .map_err(FetchError::Script)?,
+            SourceSpec::Zeron(name) => {
+                return Err(FetchError::Unsupported(format!(
+                    "zeron:{name} is answered by the app, not fetched"
+                )));
+            }
+        };
+        parse_payload(manifest.kind, &value).map_err(FetchError::Payload)
     }
 }

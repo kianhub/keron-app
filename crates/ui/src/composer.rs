@@ -6150,6 +6150,18 @@ impl Composer {
         self.surface_bounds.clone()
     }
 
+    /// Put `text` in the new-chat draft (Keron Home's "Describe a widget").
+    /// On the new-chat screen it goes straight into the input; from a chat it
+    /// waits under the new-chat key, which the route change then loads.
+    pub(crate) fn set_new_chat_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.current_key.is_empty() {
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+        } else {
+            self.drafts.insert(String::new(), text);
+        }
+        cx.notify();
+    }
+
     /// The picker entity, for the shell's canvas target selectors.
     pub fn pickers(&self) -> &Entity<Pickers> {
         &self.pickers

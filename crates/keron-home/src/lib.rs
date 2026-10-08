@@ -33,7 +33,9 @@ pub mod zeron;
 
 pub use fetch::{FetchError, Fetcher};
 pub use heat::Heat;
-pub use kinds::{AgendaItem, Body, DeviceItem, Kind, ListItem, Payload, PayloadError, Stat, TimelineItem};
+pub use kinds::{
+    AgendaItem, Body, DeviceItem, Kind, ListItem, Payload, PayloadError, Stat, TimelineItem,
+};
 pub use layout::{Layout, LayoutEntry, Placed};
 pub use manifest::{Manifest, ManifestError};
 pub use source::SourceSpec;

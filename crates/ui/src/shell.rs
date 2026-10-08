@@ -2158,12 +2158,18 @@ pub struct Shell {
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
     _transcript_invalidation: Subscription,
+    /// Keron Home, the widget grid under the new-chat composer.
+    home: Entity<crate::home::Home>,
+    _home_events: Subscription,
+    /// Feeds Home the app's data every 5s while it shows (ages, presence).
+    _home_tick: Task<()>,
 }
 
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.on_state_changed(&state, cx);
+            this.feed_home(true, cx);
             cx.notify();
         });
         // A reopened window reuses AppState, so the engine may already be
@@ -2175,6 +2181,22 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let home = cx.new(crate::home::Home::new);
+        let home_events = cx.subscribe(
+            &home,
+            |this: &mut Shell, _, event: &crate::home::HomeEvent, cx| this.on_home_event(event, cx),
+        );
+        let home_tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if this
+                    .update(cx, |shell, cx| shell.feed_home(false, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -2547,6 +2569,50 @@ impl Shell {
             _composer_events: composer_events,
             _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
+            home,
+            _home_events: home_events,
+            _home_tick: home_tick,
+        }
+    }
+
+    fn on_home_event(&mut self, event: &crate::home::HomeEvent, cx: &mut Context<Self>) {
+        match event {
+            crate::home::HomeEvent::DescribeWidget(draft) => {
+                self.open_new_session(None, cx);
+                let draft = draft.clone();
+                self.composer
+                    .update(cx, |composer, cx| composer.set_new_chat_draft(draft, cx));
+            }
+            // A widget's link opens only a chat the app knows.
+            crate::home::HomeEvent::OpenChat(chat_id) => {
+                if self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .any(|chat| &chat.id == chat_id)
+                {
+                    self.open_chat(chat_id.clone(), cx);
+                }
+            }
+            crate::home::HomeEvent::LayoutChanged => self.feed_home(true, cx),
+        }
+    }
+
+    /// Keep pull requests watched while Home's widget shows them, and hand
+    /// Home the app's data: on every state change, and on the 5s tick while
+    /// the new-chat screen shows.
+    fn feed_home(&mut self, always: bool, cx: &mut Context<Self>) {
+        let watch =
+            self.settings.sidebar_show_pull_request || self.home.read(cx).shows_pull_requests();
+        self.state
+            .update(cx, |state, cx| state.set_change_requests_visible(watch, cx));
+        let showing =
+            matches!(self.route, Route::Chat) && self.state.read(cx).selected_chat.is_none();
+        if (always || showing) && self.home.read(cx).wants_zeron() {
+            let snapshot = crate::home::snapshot(self.state.read(cx), Utc::now());
+            self.home
+                .update(cx, |home, cx| home.set_zeron(snapshot, cx));
         }
     }
 
@@ -10470,6 +10536,28 @@ impl Shell {
         } else {
             None
         };
+        // Keron Home sits under the new-chat composer on the selectors' fade,
+        // occluded once a chat is selected so its fade-out takes no clicks.
+        let home_opacity = dock_frame.selectors() * self.composer_dock.borrow().opacity();
+        let show_home = (has_spaces || no_project)
+            && home_opacity > 0.001
+            && (!has_selection || dock_frame.active);
+        if show_home {
+            let top = self
+                .composer
+                .read(cx)
+                .surface_bounds()
+                .get()
+                .map(|bounds| f32::from(bounds.bottom()))
+                .unwrap_or(
+                    (self.viewport_height + crate::composer::COMPOSER_MIN_HEIGHT) * 0.5 + 8.0,
+                );
+            self.home.update(cx, |home, cx| {
+                home.set_frame(top + 16.0, composer_width, home_opacity, cx)
+            });
+        } else {
+            self.home.update(cx, |home, _| home.hide());
+        }
         let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
@@ -10560,6 +10648,23 @@ impl Shell {
                                         }),
                                 ),
                             ),
+                            terminal_geometry.clone(),
+                        )),
+                )
+            })
+            .when(show_home, |column| {
+                column.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(crate::terminal::dock::above_terminal(
+                            div()
+                                .size_full()
+                                .overflow_hidden()
+                                .child(self.home.clone())
+                                .when(has_selection, |el| {
+                                    el.child(div().absolute().inset_0().occlude())
+                                }),
                             terminal_geometry.clone(),
                         )),
                 )
@@ -13012,6 +13117,7 @@ impl Render for Shell {
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
                 if let Route::Settings(section) = self.route {
+                    self.home.update(cx, |home, _| home.hide());
                     let settings_page = self.render_settings_page(section, window, cx);
                     // A call started from Settings opens its stage here too.
                     let voice_stage = self.render_voice_stage(window, cx);

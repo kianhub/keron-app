@@ -36,6 +36,7 @@ pub mod frost;
 mod glass;
 mod haptics;
 pub mod history;
+mod home;
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
@@ -245,6 +246,9 @@ pub fn run_app(config: UiConfig) {
             state: state.clone(),
             boot: config.boot(),
         });
+        // Only this boot gives Home the owner's widgets and door; fixtures
+        // and tests that build the shell themselves get an empty one.
+        cx.set_global(home::OwnerHome);
         open_main_window(state, config.boot(), cx);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         start_appshot_service(config.boot().data_dir, cx);
