@@ -456,15 +456,11 @@ impl Home {
         self.recompute_zeron(cx);
     }
 
-    /// Whether any widget shows: the shell then lifts the new-chat composer
-    /// so the first cards are in view.
+    /// Whether any widget is drawn as a card: the shell then lifts the
+    /// new-chat composer so the first cards are in view. Chips alone fit in
+    /// the toolbar and leave the composer where it was.
     pub fn has_shown_widget(&self) -> bool {
-        self.loaded
-            && self
-                .layout
-                .arrange(&self.catalog.manifests)
-                .iter()
-                .any(|placed| placed.shown)
+        !self.grid_slots().is_empty()
     }
 
     /// Whether any shown widget reads `zeron:` data (the shell skips the

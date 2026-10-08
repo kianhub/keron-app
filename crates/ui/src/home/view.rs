@@ -179,10 +179,15 @@ impl Home {
             .map(|slot| self.render_chip(theme, &slot.manifest, cx))
             .collect();
         Some(
+            // Shrinks and wraps onto more rows before it would push
+            // Customize out of the toolbar.
             div()
-                .flex_none()
+                .flex_shrink_1()
+                .min_w_0()
                 .flex()
+                .flex_wrap()
                 .items_center()
+                .justify_end()
                 .gap(px(CHIP_GAP))
                 .children(chips)
                 .into_any_element(),
@@ -681,7 +686,8 @@ impl Home {
                 .col_start(col as i16 + 1)
                 .col_end((col + span) as i16 + 1);
             // Just out of its chip: it fades in and rises into place.
-            if let Some(t) = Home::swap_t(self.card_in.get(&slot.manifest.id)) {
+            let fade_in = Home::swap_t(self.card_in.get(&slot.manifest.id));
+            if let Some(t) = fade_in {
                 card = card.opacity(t).top(px(CARD_RISE * (1.0 - t)));
             }
             // A card that moved slides from its old slot to its new one.
@@ -712,10 +718,9 @@ impl Home {
                     .into_any_element(),
                 _ => card.into_any_element(),
             };
-            cards.push(
-                crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, card)
-                    .into_any_element(),
-            );
+            // The backdrop blur ignores opacity, so it fades in with the card.
+            let blur = crate::frost::MENU_BLUR * fade_in.unwrap_or(1.0);
+            cards.push(crate::frost::frosted(CARD_RADIUS, blur, card).into_any_element());
         }
         let grid = div()
             .id("home-grid")

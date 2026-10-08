@@ -848,3 +848,27 @@ fn customize_and_the_switch_off_show_every_card(cx: &mut TestAppContext) {
         assert!(!home.layout.collapse_empty);
     });
 }
+
+#[gpui::test]
+fn only_cards_lift_the_composer(cx: &mut TestAppContext) {
+    let (home, _dir) = quiet_home(cx);
+    home.update(cx, |home, cx| {
+        assert!(home.has_shown_widget());
+        home.sign_in = SignIn::SignedIn;
+        for id in ["full", "waiting", "broken", "number"] {
+            let state = home.widgets.entry(id.to_string()).or_default();
+            state.payload = Some(rows(&[]));
+            state.error = None;
+        }
+        home.sync_quiet(cx);
+        assert!(home.grid_slots().is_empty());
+        // Chips alone sit in the toolbar: the composer stays put.
+        assert!(!home.has_shown_widget());
+
+        home.toggle_peek("empty", cx);
+        assert!(home.has_shown_widget());
+        home.toggle_peek("empty", cx);
+        home.toggle_customize(cx);
+        assert!(home.has_shown_widget());
+    });
+}
