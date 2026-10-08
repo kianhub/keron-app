@@ -4,15 +4,16 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, App, Entity, Task, div, prelude::*, px};
+use gpui::{AnyElement, App, Entity, SharedString, Task, div, prelude::*, px};
 use keron_home::Meter;
-use zeron_proto::{AgentAccountsSnapshot, AgentUsageWindow};
+use zeron_proto::AgentAccountsSnapshot;
 use zeron_rpc::methods;
 
 use crate::account_usage::{FORCE_MIN_INTERVAL, POLL_INTERVAL};
-use crate::settings::accounts::{AccountsSnapshotCache, render_usage_meter};
+use crate::settings::accounts::{AccountsSnapshotCache, UsageLevel, usage_color, usage_level};
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::typography::ui_rems;
 
 /// This Mac's cached accounts list, when one has loaded.
 pub(crate) fn cached_accounts(cx: &App) -> Option<&AgentAccountsSnapshot> {
@@ -98,37 +99,135 @@ pub(crate) fn load_once(state: &Entity<AppState>, cx: &mut App) {
     });
 }
 
-/// A usage row's meters, one line per window, drawn like Settings →
-/// Accounts (same colors and thresholds); `None` for a row without any.
+/// A usage row's meters: per window, its label, a bar that fills the card's
+/// width, the percentage, and when it resets underneath. Same colors and
+/// thresholds as Settings → Accounts. `None` for a row without any.
 pub(super) fn meters(theme: &Theme, meters: &[Meter]) -> Option<AnyElement> {
     if meters.is_empty() {
         return None;
     }
+    let now = chrono::Utc::now();
     Some(
         div()
-            .mt(px(3.0))
+            .mt(px(4.0))
             .flex()
             .flex_col()
-            .gap(px(2.0))
-            .children(meters.iter().map(|meter| {
-                render_usage_meter(
-                    &AgentUsageWindow {
-                        label: meter.label.clone(),
-                        used_fraction: meter.used,
-                        resets_at: meter
-                            .resets_at_ms
-                            .and_then(chrono::DateTime::from_timestamp_millis),
-                    },
-                    theme,
-                )
-            }))
+            .gap(px(6.0))
+            .children(meters.iter().map(|meter| meter_row(theme, meter, now)))
             .into_any_element(),
     )
+}
+
+/// Room for "Session" / "Week" / "Month" at the meter's text size.
+const METER_LABEL_WIDTH: f32 = 56.0;
+const METER_PERCENT_WIDTH: f32 = 36.0;
+
+fn meter_row(theme: &Theme, meter: &Meter, now: chrono::DateTime<chrono::Utc>) -> AnyElement {
+    let fraction = meter.used.clamp(0.0, 1.0);
+    let level = usage_level(fraction);
+    let fill = usage_color(level, theme).opacity(match level {
+        UsageLevel::Normal => 0.8,
+        _ => 0.9,
+    });
+    let resets = meter
+        .resets_at_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|at| resets_in(at, now));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .text_size(ui_rems(11.5))
+        .child(
+            div()
+                .h(px(16.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .w(px(METER_LABEL_WIDTH))
+                        .flex_none()
+                        .truncate()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(meter.label.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(4.0))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.wash(0.08))
+                        .when(fraction > 0.0, |el| {
+                            // A 1.5% floor keeps tiny non-zero usage visible.
+                            el.child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(fraction.max(0.015)))
+                                    .rounded_full()
+                                    .bg(fill),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .w(px(METER_PERCENT_WIDTH))
+                        .flex_none()
+                        .text_right()
+                        .font_family(theme.font_mono.clone())
+                        .text_color(theme.text)
+                        .child(SharedString::from(format!(
+                            "{}%",
+                            (fraction * 100.0).round()
+                        ))),
+                ),
+        )
+        .when_some(resets, |el, resets| {
+            el.child(
+                div()
+                    .pl(px(METER_LABEL_WIDTH + 8.0))
+                    .text_size(ui_rems(10.5))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(resets)),
+            )
+        })
+        .into_any_element()
+}
+
+/// "resets in 42m", "resets in 2h 14m" within a day, else "resets Fri 09:00"
+/// in local time.
+fn resets_in(at: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let left = at - now;
+    let minutes = left.num_minutes();
+    if minutes <= 0 {
+        "resets now".to_string()
+    } else if minutes < 60 {
+        format!("resets in {minutes}m")
+    } else if minutes < 24 * 60 {
+        format!("resets in {}h {}m", minutes / 60, minutes % 60)
+    } else {
+        format!(
+            "resets {}",
+            at.with_timezone(&chrono::Local).format("%a %H:%M")
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_times_read_short() {
+        let now = chrono::DateTime::from_timestamp_millis(NOW).unwrap();
+        let later = |minutes: i64| now + chrono::Duration::minutes(minutes);
+        assert_eq!(resets_in(later(42), now), "resets in 42m");
+        assert_eq!(resets_in(later(134), now), "resets in 2h 14m");
+        assert_eq!(resets_in(later(-5), now), "resets now");
+        assert!(resets_in(later(3 * 24 * 60), now).starts_with("resets "));
+    }
 
     const NOW: i64 = 1_791_460_000_000;
 

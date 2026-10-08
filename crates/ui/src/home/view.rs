@@ -553,6 +553,8 @@ impl Home {
             .w_full()
             .grid()
             .grid_cols(columns)
+            // Each card is as tall as its content, not its row's tallest card.
+            .items_start()
             .gap(px(GRID_GAP))
             .when(self.customize, |grid| {
                 grid.on_drag_move::<CardDragPayload>(cx.listener(
