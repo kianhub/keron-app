@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, EventEmitter, Pixels, Point, ScrollHandle, Task, point,
+    App, AppContext as _, Bounds, Context, EventEmitter, FocusHandle, Pixels, Point, ScrollHandle,
+    Task, WeakFocusHandle, Window, point,
 };
 use gpui_tokio::Tokio;
 use keron_door::{DoorClient, DoorError};
@@ -131,6 +132,42 @@ struct WidgetState {
     action_error: Option<(String, Instant)>,
     shown_posted: Option<Instant>,
     shown_task: Option<Task<()>>,
+    /// Rows done or "not a thing" a moment ago, still collapsing out of the
+    /// card, by row id.
+    leaving: HashMap<String, Leaving>,
+    /// What each row with actions keeps between frames, by row id.
+    row_ui: Rc<RefCell<HashMap<String, RowUi>>>,
+}
+
+/// A hidden row on its way out: it fades and its height closes over
+/// [`crate::motion::COLLAPSE`], then it's dropped.
+struct Leaving {
+    started: Instant,
+    /// The row's height when it was last drawn whole.
+    height: f32,
+    _done: Task<()>,
+}
+
+impl Leaving {
+    /// Eased progress of the collapse, 0 to 1.
+    fn progress(&self) -> f32 {
+        let total = leave_duration().as_secs_f32();
+        crate::motion::COLLAPSE.progress(self.started.elapsed().as_secs_f32() / total)
+    }
+}
+
+fn leave_duration() -> Duration {
+    crate::motion::COLLAPSE
+        .total()
+        .mul_f32(crate::motion::speed_scale())
+}
+
+/// A row with actions, between frames: the focus around its buttons (keyboard
+/// focus shows them, like hover does) and where it was last drawn, in window
+/// coordinates (a collapse starts from its height; tooltips sit above it).
+struct RowUi {
+    focus: FocusHandle,
+    bounds: Option<Bounds<Pixels>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,6 +246,13 @@ pub struct Home {
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
+    /// The row whose action buttons have keyboard focus: (widget id, row
+    /// id), read at the start of each render.
+    keyboard_row: Option<(String, String)>,
+    /// What had focus when Home last drew, and whether the keyboard put it
+    /// there. A click leaves focus on a button; a later key doesn't make
+    /// that keyboard focus.
+    focus_seen: Option<(WeakFocusHandle, bool)>,
     zeron: Option<ZeronSnapshot>,
     /// Loose-ends banners; only the owner's Home posts them.
     notices: Option<notices::Notices>,
@@ -329,6 +373,8 @@ impl Home {
             drag: None,
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
+            keyboard_row: None,
+            focus_seen: None,
             zeron: None,
             notices: None,
             poster,
@@ -659,6 +705,16 @@ impl Home {
         match result {
             Ok(payload) => {
                 state.overrides.retain(|_, change| !change.settled);
+                let ids: Vec<&str> = match &payload.body {
+                    Body::List(items) => {
+                        items.iter().filter_map(|item| item.id.as_deref()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                state
+                    .row_ui
+                    .borrow_mut()
+                    .retain(|id, _| ids.contains(&id.as_str()));
                 state.payload = Some(payload);
                 state.error = None;
                 if state
@@ -847,6 +903,16 @@ impl Home {
             Action::Snooze { .. } => RowChange::Snoozed,
             Action::Shown | Action::Notified { .. } => return,
         };
+        // A row on its way out can still be clicked while it collapses; it's
+        // hidden already, so that does nothing.
+        let hidden = self
+            .widgets
+            .get(widget)
+            .and_then(|state| state.overrides.get(row))
+            .is_some_and(|change| change.change == RowChange::Hidden);
+        if hidden {
+            return;
+        }
         let Some(manifest) = self.catalog.manifests.iter().find(|m| m.id == widget) else {
             return;
         };
@@ -880,6 +946,7 @@ impl Home {
                     .ok();
             }
         });
+        let reduced = crate::motion::reduced_motion(cx);
         let state = self.widgets.entry(widget.to_string()).or_default();
         state.overrides.insert(
             row.to_string(),
@@ -890,7 +957,43 @@ impl Home {
         );
         state.action_error = None;
         state.actions.insert(row.to_string(), task);
+        // A hidden row closes up rather than vanishing, unless Reduce Motion
+        // is on or it was never drawn.
+        let height = state
+            .row_ui
+            .borrow()
+            .get(row)
+            .and_then(|ui| ui.bounds)
+            .map(|bounds| f32::from(bounds.size.height))
+            .filter(|_| change == RowChange::Hidden && !reduced);
+        if let Some(height) = height {
+            let done = cx.spawn({
+                let (widget, row) = (widget.to_string(), row.to_string());
+                async move |this, cx| {
+                    cx.background_executor().timer(leave_duration()).await;
+                    this.update(cx, |this, cx| this.finish_leaving(&widget, &row, cx))
+                        .ok();
+                }
+            });
+            state.leaving.insert(
+                row.to_string(),
+                Leaving {
+                    started: Instant::now(),
+                    height,
+                    _done: done,
+                },
+            );
+        }
         cx.notify();
+    }
+
+    /// A hidden row finished collapsing: drop it, and the next one joins.
+    fn finish_leaving(&mut self, widget: &str, row: &str, cx: &mut Context<Self>) {
+        if let Some(state) = self.widgets.get_mut(widget)
+            && state.leaving.remove(row).is_some()
+        {
+            cx.notify();
+        }
     }
 
     fn finish_action(
@@ -921,6 +1024,7 @@ impl Home {
             Err(FetchError::SignedOut) => self.signed_out(cx),
             Err(error) => {
                 state.overrides.remove(row);
+                state.leaving.remove(row);
                 state.action_error = Some((error.to_string(), Instant::now()));
             }
         }
@@ -1000,6 +1104,30 @@ impl Home {
             crate::popover::reap_popup(cx, |home: &mut Self| &mut home.snooze_menu);
         }
         cx.notify();
+    }
+
+    /// The row whose action buttons have focus from the keyboard: (widget id,
+    /// row id). Focus a click left on a button doesn't count, even after a
+    /// key is pressed somewhere else.
+    fn keyboard_focused_row(&mut self, window: &Window, cx: &App) -> Option<(String, String)> {
+        let focused = window.focused(cx);
+        let by_keyboard = match (&focused, &self.focus_seen) {
+            (Some(handle), Some((seen, by_keyboard))) if seen == handle => *by_keyboard,
+            (Some(_), _) => window.last_input_was_keyboard(),
+            (None, _) => false,
+        };
+        self.focus_seen = focused.map(|handle| (handle.downgrade(), by_keyboard));
+        if !by_keyboard || !window.last_input_was_keyboard() {
+            return None;
+        }
+        self.widgets.iter().find_map(|(widget, state)| {
+            state
+                .row_ui
+                .borrow()
+                .iter()
+                .find(|(_, ui)| ui.focus.contains_focused(window, cx))
+                .map(|(row, _)| (widget.clone(), row.clone()))
+        })
     }
 
     // ---- links ----
@@ -1224,18 +1352,93 @@ fn visible_list_rows<'a>(
     overrides: &HashMap<String, RowOverride>,
     limit: usize,
 ) -> (Vec<&'a ListItem>, usize) {
-    let rows: Vec<&ListItem> = items
+    let drawn = drawn_list_rows(items, overrides, |_| false, limit);
+    (
+        drawn.rows.into_iter().map(|(row, _)| row).collect(),
+        drawn.more,
+    )
+}
+
+/// How a list row is drawn while rows close up after Done.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drawn<'a> {
+    Whole,
+    /// Hidden a moment ago and closing up.
+    Leaving,
+    /// Past the limit until the leaving row `with` gave up its place: it
+    /// opens as that row closes, so the card keeps its height.
+    Joining {
+        with: &'a str,
+    },
+}
+
+/// What a list card draws.
+#[derive(Debug, PartialEq)]
+struct DrawnList<'a> {
+    rows: Vec<(&'a ListItem, Drawn<'a>)>,
+    /// Rows past the limit.
+    more: usize,
+    /// The "+N more" line closing up, with the count it showed: the rows
+    /// past the limit all joined while rows above them leave.
+    more_closing: Option<usize>,
+}
+
+/// The rows a list card draws: as [`visible_list_rows`], except that a
+/// hidden row still collapsing keeps its place until it's gone. It doesn't
+/// hold a place under the limit, so the next row joins as it closes.
+fn drawn_list_rows<'a>(
+    items: &'a [ListItem],
+    overrides: &HashMap<String, RowOverride>,
+    leaving: impl Fn(&str) -> bool,
+    limit: usize,
+) -> DrawnList<'a> {
+    let kept: Vec<(&ListItem, Option<&str>)> = items
         .iter()
-        .filter(|item| {
-            !item
-                .id
-                .as_ref()
+        .filter_map(|item| {
+            let id = item.id.as_deref();
+            let hidden = id
                 .and_then(|id| overrides.get(id))
-                .is_some_and(|change| change.change == RowChange::Hidden)
+                .is_some_and(|change| change.change == RowChange::Hidden);
+            if !hidden {
+                return Some((item, None));
+            }
+            id.filter(|id| leaving(id)).map(|id| (item, Some(id)))
         })
         .collect();
-    let more = rows.len().saturating_sub(limit);
-    (rows.into_iter().take(limit).collect(), more)
+    let whole_total = kept.iter().filter(|(_, leaving)| leaving.is_none()).count();
+    let mut rows = Vec::new();
+    let mut whole = 0;
+    let mut leavers: Vec<&str> = Vec::new();
+    let mut joined = 0;
+    for (position, &(item, leaving)) in kept.iter().enumerate() {
+        if whole == limit {
+            break;
+        }
+        // Drawn before the leaving rows started to go: under the limit.
+        let was_drawn = position < limit;
+        match leaving {
+            Some(id) if was_drawn => {
+                leavers.push(id);
+                rows.push((item, Drawn::Leaving));
+            }
+            Some(_) => {}
+            None => {
+                whole += 1;
+                // Each row that joins takes the place of one leaving above it.
+                let with = (!was_drawn).then(|| leavers.get(joined)).flatten();
+                joined += usize::from(with.is_some());
+                let drawn = with.map_or(Drawn::Whole, |&with| Drawn::Joining { with });
+                rows.push((item, drawn));
+            }
+        }
+    }
+    let more = whole_total.saturating_sub(limit);
+    let shown_before = kept.len().saturating_sub(limit);
+    DrawnList {
+        rows,
+        more,
+        more_closing: (more == 0 && shown_before > 0).then_some(shown_before),
+    }
 }
 
 /// Where a card dropped at `over` among the shown cards goes in the full
