@@ -49,6 +49,19 @@ impl Glide {
     }
 }
 
+/// Where Home lifts the new-chat composer's top to, as a share of the
+/// viewport's height, so Home's first cards show under it.
+const HOME_LIFT_TOP: f32 = 0.30;
+
+/// The new-chat composer's top in window coordinates: 8px below centre, or
+/// `lift` (0 to 1) of the way to [`HOME_LIFT_TOP`]. Lifting never moves it
+/// down, so a short window or a tall draft stays centred.
+pub(crate) fn hero_top(viewport: f32, height: f32, lift: f32) -> f32 {
+    let centred = (viewport - height) * 0.5 + 8.0;
+    let lifted = (viewport * HOME_LIFT_TOP).min(centred);
+    crate::motion::lerp(centred, lifted, lift.clamp(0.0, 1.0))
+}
+
 pub(crate) fn stage(value: f32, start: f32, end: f32) -> f32 {
     let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -268,6 +281,10 @@ pub(crate) struct DockState {
     panel_departure: bool,
     column_width: Option<f32>,
     departing_column_width: Option<f32>,
+    /// Home's lift of the new-chat composer, 0 (centred) to 1, and its target.
+    lift: Glide,
+    lift_target: f32,
+    last_lift: Option<Instant>,
 }
 
 impl Default for DockState {
@@ -289,6 +306,9 @@ impl Default for DockState {
             panel_departure: false,
             column_width: None,
             departing_column_width: None,
+            lift: Glide::new(0.0),
+            lift_target: 0.0,
+            last_lift: None,
         }
     }
 }
@@ -338,7 +358,7 @@ impl DockState {
         let y = if self.frame.docked {
             viewport - height - reserved
         } else {
-            (viewport - height) * 0.5 + 8.0
+            hero_top(viewport, height, self.lift.value)
         };
         let bottom = self.position_at(0.0, y, reduced, now).1.value + height;
         (viewport - bottom).max(0.0)
@@ -369,6 +389,40 @@ impl DockState {
 
     pub fn opacity(&self) -> f32 {
         self.pane.opacity()
+    }
+
+    /// Once a frame after [`Self::tick`]: whether Home wants the new-chat
+    /// composer lifted. Never while docked. A change glides on the route's
+    /// own clock, starting where it is painted; a return from a chat lands
+    /// straight at the lifted spot (the route's travel carries it there);
+    /// reduced motion snaps. Returns whether the lift is still moving.
+    pub fn set_home_lift(&mut self, wanted: bool, reduced: bool, now: Instant) -> bool {
+        let target = if wanted && !self.frame.docked {
+            1.0
+        } else {
+            0.0
+        };
+        let first = self.last_lift.is_none() || self.position.is_none();
+        let dt = if target != self.lift_target {
+            0.0
+        } else {
+            self.last_lift.map_or(0.0, |last| {
+                now.saturating_duration_since(last).as_secs_f32()
+            })
+        };
+        self.last_lift = Some(now);
+        self.lift_target = target;
+        if reduced || first || self.frame.docked || self.route_changed {
+            self.lift = Glide::new(target);
+        } else {
+            self.lift.advance(target, dt, duration(false));
+        }
+        self.lift.active()
+    }
+
+    /// Home's lift right now, 0 (centred) to 1.
+    pub fn lift(&self) -> f32 {
+        self.lift.value
     }
 
     pub fn layout_width(&mut self, target: f32, reduced: bool, now: Instant) -> f32 {
@@ -569,7 +623,10 @@ impl Element for DockedComposer {
                 .reserved_height
                 .min((clearance * scale).floor() / scale);
             if !state.frame.docked {
-                let hero_limit = ((self.viewport_height - height) * 0.5 - 8.0).max(0.0);
+                let hero_limit = (self.viewport_height
+                    - hero_top(self.viewport_height, height, state.lift.value)
+                    - height)
+                    .max(0.0);
                 geometry.limit = geometry.limit.min(hero_limit);
                 geometry.content_height =
                     geometry.content_height.min(hero_limit).max(geometry.height);
@@ -603,7 +660,11 @@ impl Element for DockedComposer {
         let y = if docked {
             f32::from(bounds.top())
         } else {
-            (self.viewport_height - f32::from(bounds.size.height)) * 0.5 + 8.0
+            hero_top(
+                self.viewport_height,
+                f32::from(bounds.size.height),
+                state.lift.value,
+            )
         };
         let position = state.position_at(x, y, self.reduced, self.now);
         state.last_geometry = Some(self.now);
@@ -619,7 +680,7 @@ impl Element for DockedComposer {
             || position.1.velocity.abs() > 1.0;
         state.moving = !self.reduced
             && (unsettled || state.frame.active || state.width.is_some_and(|width| width.active()));
-        if state.moving {
+        if state.moving || state.lift.active() {
             window.request_animation_frame();
         }
         drop(state);
@@ -1101,6 +1162,56 @@ mod tests {
                 assert_eq!(state.borrow().frame, DockFrame::settled(docked));
             }
         }
+    }
+
+    #[test]
+    fn home_lift_glides_from_where_it_is_and_never_lifts_a_docked_composer() {
+        let mut state = DockState::default();
+        let mut now = Instant::now();
+        state.tick(false, false, now);
+        state.position = Some((Glide::new(0.0), Glide::new(388.0)));
+        assert!(!state.set_home_lift(false, false, now));
+        // Home's widgets load after an idle spell: the lift starts there.
+        now += std::time::Duration::from_secs(30);
+        state.tick(false, false, now);
+        assert!(state.set_home_lift(true, false, now));
+        assert_eq!(state.lift(), 0.0);
+        let mut last = 0.0;
+        for _ in 0..60 {
+            now += std::time::Duration::from_millis(16);
+            state.tick(false, false, now);
+            state.set_home_lift(true, false, now);
+            assert!(state.lift() >= last && state.lift() <= 1.0);
+            last = state.lift();
+        }
+        assert_eq!(state.lift(), 1.0);
+
+        // A chat docks the composer: no lift while it's docked, and the way
+        // back lands at the lifted spot with the route's own travel.
+        state.tick(true, false, now);
+        state.set_home_lift(false, false, now);
+        assert_eq!(state.lift(), 0.0);
+        now += std::time::Duration::from_secs(5);
+        state.tick(true, false, now);
+        state.set_home_lift(true, false, now);
+        assert_eq!(state.lift(), 0.0);
+        state.tick(false, false, now);
+        state.set_home_lift(true, false, now);
+        assert_eq!(state.lift(), 1.0);
+
+        // Reduced motion snaps.
+        assert!(!state.set_home_lift(false, true, now));
+        assert_eq!(state.lift(), 0.0);
+    }
+
+    #[test]
+    fn the_lift_puts_the_top_at_thirty_percent_but_never_lower_than_centred() {
+        assert_eq!(hero_top(880.0, 120.0, 0.0), 388.0);
+        assert_eq!(hero_top(880.0, 120.0, 1.0), 264.0);
+        assert_eq!(hero_top(880.0, 120.0, 0.5), 326.0);
+        // A short window, or a draft grown tall, stays centred.
+        assert_eq!(hero_top(240.0, 120.0, 1.0), 68.0);
+        assert_eq!(hero_top(700.0, 304.0, 1.0), 206.0);
     }
 
     #[test]

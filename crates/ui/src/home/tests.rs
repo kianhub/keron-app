@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, TestAppContext};
+use gpui::{AppContext as _, Entity, Task, TestAppContext};
 use keron_home::catalog::Catalog;
 use keron_home::{Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec};
 
@@ -259,4 +259,173 @@ fn wide_cards_pack_densely() {
         vec![(0, 0), (1, 0), (0, 1), (2, 0)]
     );
     assert_eq!(dense_cells(&[2, 1], 1), vec![(0, 0), (1, 0)]);
+}
+
+/// What the fake banner and record hooks saw.
+#[derive(Default)]
+struct Sent {
+    banners: Vec<(String, String)>,
+    records: Vec<(u8, Vec<String>)>,
+    /// Answers for the next records, in order; `Ok` once they run out.
+    answers: Vec<Result<(), FetchError>>,
+}
+
+/// Home with a loose-ends widget and fake banners, as the owner's would be.
+fn notifying_home(cx: &mut TestAppContext) -> (Entity<Home>, Rc<RefCell<Sent>>, tempfile::TempDir) {
+    let (home, _paths, dir) = home(cx);
+    let sent = Rc::new(RefCell::new(Sent::default()));
+    let banner: notices::Banner = {
+        let sent = sent.clone();
+        Rc::new(move |title, body| {
+            sent.borrow_mut()
+                .banners
+                .push((title.to_string(), body.to_string()))
+        })
+    };
+    let record: notices::Record = {
+        let sent = sent.clone();
+        Rc::new(move |level, ids, _| {
+            let mut sent = sent.borrow_mut();
+            sent.records.push((level, ids));
+            let answer = if sent.answers.is_empty() {
+                Ok(())
+            } else {
+                sent.answers.remove(0)
+            };
+            Task::ready(answer)
+        })
+    };
+    home.update(cx, |home, cx| {
+        home.notices = Some(notices::Notices::new(banner, record));
+        let mut loose_ends = manifest("loose-ends", "Loose ends");
+        loose_ends.source = SourceSpec::Memory("loose-ends".to_string());
+        home.apply_catalog(catalog(vec![loose_ends]), cx);
+    });
+    (home, sent, dir)
+}
+
+/// Loose ends as served: (id, title, notify).
+fn due(rows: &[(&str, &str, Option<u8>)]) -> Payload {
+    Payload {
+        updated: None,
+        errors: Vec::new(),
+        body: Body::List(
+            rows.iter()
+                .map(|(id, title, notify)| ListItem {
+                    id: Some(id.to_string()),
+                    title: title.to_string(),
+                    sub: Some("promise · someone waiting".to_string()),
+                    notify: *notify,
+                    ..ListItem::default()
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// A fetch that began at `started` brings `payload`, and what it sends settles.
+fn fetched(home: &Entity<Home>, started: Instant, payload: Payload, cx: &mut TestAppContext) {
+    home.update(cx, |home, cx| {
+        home.apply_fetch("loose-ends", started, Ok(payload), cx);
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn due_loose_ends_post_once_per_level_and_burning_repeats_only_once_recorded(
+    cx: &mut TestAppContext,
+) {
+    let (home, sent, _dir) = notifying_home(cx);
+    let rows = due(&[
+        ("hot", "Send Kofi the deck", Some(3)),
+        ("calm", "Reply to Sam", None),
+        ("fire", "Sign the lease", Some(4)),
+    ]);
+    let before = Instant::now();
+    fetched(&home, before, rows.clone(), cx);
+    assert_eq!(
+        sent.borrow().banners,
+        [
+            (
+                "Hot: Send Kofi the deck".to_string(),
+                "promise · someone waiting".to_string()
+            ),
+            (
+                "Burning: Sign the lease".to_string(),
+                "promise · someone waiting".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        sent.borrow().records,
+        [(3, vec!["hot".to_string()]), (4, vec!["fire".to_string()])]
+    );
+
+    // A refresh that began before the server recorded them still says due:
+    // nothing new.
+    fetched(&home, before, rows.clone(), cx);
+    assert_eq!(sent.borrow().banners.len(), 2);
+    assert_eq!(sent.borrow().records.len(), 2);
+
+    // Due again after the record: burning repeats, hot never does.
+    let later = Instant::now() + Duration::from_millis(1);
+    fetched(&home, later, rows, cx);
+    assert_eq!(sent.borrow().banners.len(), 3);
+    assert_eq!(sent.borrow().banners[2].0, "Burning: Sign the lease");
+    assert_eq!(sent.borrow().records[2], (4, vec!["fire".to_string()]));
+}
+
+#[gpui::test]
+fn a_banner_whose_record_failed_isnt_posted_again_and_the_record_is_retried(
+    cx: &mut TestAppContext,
+) {
+    let (home, sent, _dir) = notifying_home(cx);
+    sent.borrow_mut().answers = vec![Err(FetchError::Unsupported("offline".to_string()))];
+    fetched(
+        &home,
+        Instant::now(),
+        due(&[("hot", "Send the deck", Some(3))]),
+        cx,
+    );
+    assert_eq!(sent.borrow().banners.len(), 1);
+
+    // The next refresh sends the record again, even once quiet hours have
+    // started and the row no longer says it's due, and posts nothing.
+    let later = Instant::now() + Duration::from_millis(1);
+    fetched(&home, later, due(&[("hot", "Send the deck", None)]), cx);
+    assert_eq!(sent.borrow().banners.len(), 1);
+    assert_eq!(
+        sent.borrow().records,
+        [(3, vec!["hot".to_string()]), (3, vec!["hot".to_string()])]
+    );
+
+    // Recorded now: nothing more.
+    fetched(&home, later, due(&[("hot", "Send the deck", Some(3))]), cx);
+    assert_eq!(sent.borrow().banners.len(), 1);
+    assert_eq!(sent.borrow().records.len(), 2);
+}
+
+#[gpui::test]
+fn notifications_off_post_nothing_until_turned_on(cx: &mut TestAppContext) {
+    let settings_dir = tempfile::tempdir().unwrap();
+    let mut off = crate::settings::UiSettings::default();
+    off.notifications_enabled = false;
+    cx.update(|cx| crate::settings::init(off, settings_dir.path(), cx));
+    let (home, sent, _dir) = notifying_home(cx);
+    let rows = due(&[("hot", "Send the deck", Some(3))]);
+    fetched(&home, Instant::now(), rows.clone(), cx);
+    assert!(sent.borrow().banners.is_empty());
+    assert!(
+        sent.borrow().records.is_empty(),
+        "nothing went out to record"
+    );
+
+    cx.update(|cx| {
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+            settings.notifications_enabled = true
+        })
+    });
+    fetched(&home, Instant::now(), rows, cx);
+    assert_eq!(sent.borrow().banners.len(), 1);
+    assert_eq!(sent.borrow().records, [(3, vec!["hot".to_string()])]);
 }

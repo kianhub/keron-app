@@ -2575,6 +2575,11 @@ impl Shell {
         }
     }
 
+    /// A clicked loose-ends banner: the new-chat screen, where Home shows.
+    pub(crate) fn open_home(&mut self, cx: &mut Context<Self>) {
+        self.open_new_session(None, cx);
+    }
+
     fn on_home_event(&mut self, event: &crate::home::HomeEvent, cx: &mut Context<Self>) {
         match event {
             crate::home::HomeEvent::DescribeWidget(draft) => {
@@ -10382,6 +10387,16 @@ impl Shell {
         if dock_frame.active {
             self.motion_active.set(true);
         }
+        // Keron Home lifts the new-chat composer so its first cards show.
+        let home_lift =
+            !has_selection && (has_spaces || no_project) && self.home.read(cx).has_shown_widget();
+        if self
+            .composer_dock
+            .borrow_mut()
+            .set_home_lift(home_lift, self.reduced_motion, frame_time)
+        {
+            self.motion_active.set(true);
+        }
         self.composer
             .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
         let composer_width = self.composer_dock.borrow_mut().layout_width(
@@ -10552,9 +10567,11 @@ impl Shell {
                 .surface_bounds()
                 .get()
                 .map(|bounds| f32::from(bounds.bottom()))
-                .unwrap_or(
-                    (self.viewport_height + crate::composer::COMPOSER_MIN_HEIGHT) * 0.5 + 8.0,
-                );
+                .unwrap_or_else(|| {
+                    let height = crate::composer::COMPOSER_MIN_HEIGHT;
+                    let lift = self.composer_dock.borrow().lift();
+                    crate::composer_dock::hero_top(self.viewport_height, height, lift) + height
+                });
             self.home.update(cx, |home, cx| {
                 home.set_frame(top + footer + 12.0, composer_width, home_opacity, cx)
             });

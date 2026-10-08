@@ -11,6 +11,8 @@ struct Fixture {
     now: Instant,
     docked: bool,
     reduced: bool,
+    /// Home wants the new-chat composer lifted.
+    lift: bool,
     viewport: f32,
     composer_height: f32,
     terminal_height: f32,
@@ -46,6 +48,9 @@ impl Render for Fixture {
             self.states[ix]
                 .borrow_mut()
                 .tick(self.docked, self.reduced, self.now);
+            self.states[ix]
+                .borrow_mut()
+                .set_home_lift(self.lift, self.reduced, self.now);
             let available = (self.viewport
                 - self.composer_height
                 - Theme::TITLEBAR_HEIGHT
@@ -117,6 +122,7 @@ fn terminal_clearance_preserves_composer_motion_and_same_frame_layout(
         now: Instant::now(),
         docked: false,
         reduced: false,
+        lift: false,
         viewport: 900.0,
         composer_height: 180.0,
         terminal_height: 495.0,
@@ -159,9 +165,10 @@ fn terminal_clearance_preserves_composer_motion_and_same_frame_layout(
     assert!((geometry.get().height - 352.0).abs() < 0.1);
     assert_eq!(geometry.get().reserved_height, 495.0);
 
-    // Start, reverse, resize, and grow attachments while the route is moving.
-    // Every frame compares with the original unconstrained composer path.
-    for step in 0..180 {
+    // Start, reverse, resize, and grow attachments while the route is moving,
+    // and lift for Home and back, moving and settled. Every frame compares
+    // with the original unconstrained composer path.
+    for step in 0..300 {
         handle
             .update(cx, |fixture, _, cx| {
                 fixture.now += std::time::Duration::from_millis(16);
@@ -181,6 +188,7 @@ fn terminal_clearance_preserves_composer_motion_and_same_frame_layout(
                         fixture.composer_height = 100.0;
                     }
                     80 => fixture.docked = false,
+                    84 => fixture.lift = true,
                     88 => fixture.composer_height = 380.0,
                     96 => {
                         fixture.docked = true;
@@ -191,10 +199,19 @@ fn terminal_clearance_preserves_composer_motion_and_same_frame_layout(
                         fixture.docked = false;
                         fixture.right_width = 0.0;
                     }
+                    130 => fixture.lift = false,
                     140 => {
                         fixture.docked = true;
                         fixture.right_width = 400.0;
                     }
+                    160 => fixture.lift = true,
+                    180 => {
+                        fixture.docked = false;
+                        fixture.right_width = 0.0;
+                    }
+                    215 => fixture.lift = false,
+                    235 => fixture.lift = true,
+                    260 => fixture.docked = true,
                     _ => {}
                 }
                 cx.notify();

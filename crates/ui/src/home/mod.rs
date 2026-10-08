@@ -7,9 +7,11 @@
 //! runs one refresh loop per shown widget, signs in to the door, draws each
 //! kind ([`view`]) and owns Customize. The shell hands it the app's own data
 //! as a snapshot ([`snapshot`]) and where to sit ([`Home::set_frame`]), and
-//! listens for [`HomeEvent`]s.
+//! listens for [`HomeEvent`]s. Loose ends the server says are due become Mac
+//! banners ([`notices`]).
 
 mod bridge;
+mod notices;
 mod view;
 
 #[cfg(test)]
@@ -183,6 +185,8 @@ pub struct Home {
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
     zeron: Option<ZeronSnapshot>,
+    /// Loose-ends banners; only the owner's Home posts them.
+    notices: Option<notices::Notices>,
     frame: Frame,
     scroll: ScrollHandle,
     save_pending: bool,
@@ -223,12 +227,14 @@ impl Home {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"));
+        let door = DoorClient::keron();
         let mut home = Self::build(
             HomePaths::under_home(&home_dir),
-            Some(DoorClient::keron()),
+            Some(door.clone()),
             None,
             cx,
         );
+        home.notices = Some(notices::Notices::owner(door));
         home.watch_folder = true;
         home.start_login_path(cx);
         home
@@ -295,6 +301,7 @@ impl Home {
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
             zeron: None,
+            notices: None,
             frame: Frame::default(),
             scroll: ScrollHandle::new(),
             save_pending: false,
@@ -344,6 +351,17 @@ impl Home {
     pub fn set_zeron(&mut self, snapshot: ZeronSnapshot, cx: &mut Context<Self>) {
         self.zeron = Some(snapshot);
         self.recompute_zeron(cx);
+    }
+
+    /// Whether any widget shows: the shell then lifts the new-chat composer
+    /// so the first cards are in view.
+    pub fn has_shown_widget(&self) -> bool {
+        self.loaded
+            && self
+                .layout
+                .arrange(&self.catalog.manifests)
+                .iter()
+                .any(|placed| placed.shown)
     }
 
     /// Whether any shown widget reads `zeron:` data (the shell skips the
@@ -591,6 +609,7 @@ impl Home {
         }
         let state = self.widgets.entry(id.to_string()).or_default();
         state.loading = false;
+        let fresh = result.is_ok();
         match result {
             Ok(payload) => {
                 state.overrides.retain(|_, change| !change.settled);
@@ -607,6 +626,9 @@ impl Home {
             Err(error) => state.error = Some(error.to_string()),
         }
         self.maybe_post_shown(id, cx);
+        if fresh {
+            self.post_due_notices(id, started, cx);
+        }
         cx.notify();
         true
     }
@@ -775,7 +797,7 @@ impl Home {
         let change = match action {
             Action::Done | Action::Dismiss => RowChange::Hidden,
             Action::Snooze { .. } => RowChange::Snoozed,
-            Action::Shown => return,
+            Action::Shown | Action::Notified { .. } => return,
         };
         let ids = vec![row.to_string()];
         let send = Tokio::spawn(

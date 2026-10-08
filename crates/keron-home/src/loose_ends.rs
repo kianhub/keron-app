@@ -1,7 +1,8 @@
 //! Owner actions on loose ends, through the door:
-//! `POST /memory/loose-ends/{snooze|done|dismiss|shown}` with
-//! `{"ids": [...], "until": "..."}`. The server changes heat and writes the
-//! notes (`[mini/loose-ends] Snoozed: ... until 14:00`, `Done: ...`).
+//! `POST /memory/loose-ends/{snooze|done|dismiss|shown|notified}` with
+//! `{"ids": [...], "until": "..."}` (or `"level"` for notified). The server
+//! changes heat and writes the notes (`[mini/loose-ends] Snoozed: ... until
+//! 14:00`, `Done: ...`); notified writes none.
 
 use chrono::{DateTime, Local, Timelike};
 use keron_door::DoorClient;
@@ -23,16 +24,22 @@ pub enum Action {
     /// The items were on screen; the server counts it at most once per item
     /// every few hours.
     Shown,
+    /// A notification for heat `level` (3 hot, 4 burning) went out for the
+    /// items; the server records it so it isn't due again.
+    Notified {
+        level: u8,
+    },
 }
 
 impl Action {
-    /// The path segment: "snooze", "done", "dismiss", "shown".
+    /// The path segment: "snooze", "done", "dismiss", "shown", "notified".
     pub fn name(&self) -> &'static str {
         match self {
             Action::Snooze { .. } => "snooze",
             Action::Done => "done",
             Action::Dismiss => "dismiss",
             Action::Shown => "shown",
+            Action::Notified { .. } => "notified",
         }
     }
 }
@@ -58,11 +65,13 @@ pub async fn act(
     }
 }
 
-/// `{"ids": [...]}`, plus `"until"` for a snooze.
+/// `{"ids": [...]}`, plus `"until"` for a snooze and `"level"` for notified.
 fn body(action: &Action, ids: &[String]) -> Value {
     let mut body = json!({ "ids": ids });
-    if let Action::Snooze { until } = action {
-        body["until"] = Value::String(until.clone());
+    match action {
+        Action::Snooze { until } => body["until"] = Value::String(until.clone()),
+        Action::Notified { level } => body["level"] = json!(level),
+        Action::Done | Action::Dismiss | Action::Shown => {}
     }
     body
 }
@@ -108,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn only_snooze_sends_until() {
+    fn snooze_sends_until_and_notified_sends_its_level() {
         let ids = ["a1b2c3".to_string()];
         let snooze = Action::Snooze {
             until: "+1h".into(),
@@ -118,5 +127,12 @@ mod tests {
             json!({"ids": ["a1b2c3"], "until": "+1h"})
         );
         assert_eq!(body(&Action::Done, &ids), json!({"ids": ["a1b2c3"]}));
+        let notified = Action::Notified { level: 4 };
+        assert_eq!(notified.name(), "notified");
+        let two = ["a1".to_string(), "b2".to_string()];
+        assert_eq!(
+            body(&notified, &two),
+            json!({"ids": ["a1", "b2"], "level": 4})
+        );
     }
 }

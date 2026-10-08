@@ -100,6 +100,7 @@ Rows in `items`. `title` is needed.
 | `account` | Which account the row belongs to, like `personal` or `work`. |
 | `status` | For agent rows: `working`, `waiting`, `error`, `done` or `idle`. |
 | `id` | A stable id. Loose ends need it for snooze and done. |
+| `notify` | Loose ends only: the heat level (3 hot, 4 burning) a Mac notification is due for, set by the memory server. Other widgets' `notify` is ignored. |
 
 ### timeline
 

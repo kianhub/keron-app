@@ -112,6 +112,9 @@ pub struct ListItem {
     pub at: Option<String>,
     /// Loose-ends heat, 0 to 4.
     pub heat: Option<u8>,
+    /// Loose ends: the heat level (3 hot, 4 burning) a notification is due
+    /// for right now, as the server decides; `None` when none is due.
+    pub notify: Option<u8>,
     /// Opened on click: http(s) only, or an internal link from [`chat_link`].
     pub link: Option<String>,
     /// Which account a row belongs to ("personal", "work", a workspace name).
@@ -273,6 +276,12 @@ fn list_item(o: &Object) -> Option<ListItem> {
             .get("heat")
             .and_then(number)
             .map(|h| h.round().clamp(0.0, 4.0) as u8),
+        notify: o
+            .get("notify")
+            .and_then(number)
+            .map(|n| n.round())
+            .filter(|n| (3.0..=4.0).contains(n))
+            .map(|n| n as u8),
         link: field(o, "link"),
         account: field(o, "account"),
         status: field(o, "status"),
@@ -464,8 +473,8 @@ mod tests {
                 {"title": "Can you look at the draft?", "sub": "#design · Sam", "badge": "dm",
                  "at": "2026-10-08T09:00:00Z", "age": "30m", "link": "https://example.slack.com/archives/C1/p1",
                  "account": "acme", "heat": null, "id": "C1-1"},
-                {"title": "Old thread", "heat": 2.7, "id": 42},
-                {"title": "Way too hot", "heat": 9},
+                {"title": "Old thread", "heat": 2.7, "id": 42, "notify": 3},
+                {"title": "Way too hot", "heat": 9, "notify": 2},
                 {"title": "Below zero", "heat": -1},
                 {"sub": "no title"},
                 {"title": "   "},
@@ -484,7 +493,9 @@ mod tests {
         assert_eq!(items[0].heat, None);
         assert_eq!(items[1].id.as_deref(), Some("42"));
         assert_eq!(items[1].heat, Some(3));
+        assert_eq!(items[1].notify, Some(3));
         assert_eq!(items[2].heat, Some(4));
+        assert_eq!(items[2].notify, None, "only hot and burning notify");
         assert_eq!(items[3].heat, Some(0));
         assert_eq!(
             payload.errors,
