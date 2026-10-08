@@ -265,7 +265,7 @@ fn wide_cards_pack_densely() {
 #[derive(Default)]
 struct Sent {
     banners: Vec<(String, String)>,
-    records: Vec<(u8, Vec<String>)>,
+    records: Vec<(u8, String)>,
     /// Answers for the next records, in order; `Ok` once they run out.
     answers: Vec<Result<(), FetchError>>,
 }
@@ -284,9 +284,9 @@ fn notifying_home(cx: &mut TestAppContext) -> (Entity<Home>, Rc<RefCell<Sent>>, 
     };
     let record: notices::Record = {
         let sent = sent.clone();
-        Rc::new(move |level, ids, _| {
+        Rc::new(move |level, id, _| {
             let mut sent = sent.borrow_mut();
-            sent.records.push((level, ids));
+            sent.records.push((level, id));
             let answer = if sent.answers.is_empty() {
                 Ok(())
             } else {
@@ -332,9 +332,7 @@ fn fetched(home: &Entity<Home>, started: Instant, payload: Payload, cx: &mut Tes
 }
 
 #[gpui::test]
-fn due_loose_ends_post_once_per_level_and_burning_repeats_only_once_recorded(
-    cx: &mut TestAppContext,
-) {
+fn due_loose_ends_post_once_per_level_and_show_again_only_once_recorded(cx: &mut TestAppContext) {
     let (home, sent, _dir) = notifying_home(cx);
     let rows = due(&[
         ("hot", "Send Kofi the deck", Some(3)),
@@ -358,7 +356,7 @@ fn due_loose_ends_post_once_per_level_and_burning_repeats_only_once_recorded(
     );
     assert_eq!(
         sent.borrow().records,
-        [(3, vec!["hot".to_string()]), (4, vec!["fire".to_string()])]
+        [(3, "hot".to_string()), (4, "fire".to_string())]
     );
 
     // A refresh that began before the server recorded them still says due:
@@ -367,12 +365,49 @@ fn due_loose_ends_post_once_per_level_and_burning_repeats_only_once_recorded(
     assert_eq!(sent.borrow().banners.len(), 2);
     assert_eq!(sent.borrow().records.len(), 2);
 
-    // Due again after the record: burning repeats, hot never does.
+    // Due again in a refresh that began after the record: a burning repeat,
+    // or a hot item the server reopened under the same id. Both show.
     let later = Instant::now() + Duration::from_millis(1);
     fetched(&home, later, rows, cx);
+    assert_eq!(sent.borrow().banners.len(), 4);
+    assert_eq!(sent.borrow().banners[2].0, "Hot: Send Kofi the deck");
+    assert_eq!(sent.borrow().banners[3].0, "Burning: Sign the lease");
+    assert_eq!(
+        sent.borrow().records[2..],
+        [(3, "hot".to_string()), (4, "fire".to_string())]
+    );
+}
+
+#[gpui::test]
+fn a_refused_banner_shows_again_only_when_a_later_refresh_says_its_due(cx: &mut TestAppContext) {
+    let (home, sent, _dir) = notifying_home(cx);
+    // "hot" closed between the fetch and the record; "fire" didn't.
+    sent.borrow_mut().answers = vec![
+        Err(FetchError::Door(keron_door::DoorError::Http {
+            status: 409,
+            error: None,
+            message: "not open".to_string(),
+        })),
+        Ok(()),
+    ];
+    let before = Instant::now();
+    let rows = due(&[
+        ("hot", "Send the deck", Some(3)),
+        ("fire", "Sign the lease", Some(4)),
+    ]);
+    fetched(&home, before, rows.clone(), cx);
+    assert_eq!(sent.borrow().banners.len(), 2);
+
+    // A refresh from before the refusal: nothing new, and "fire" stays
+    // recorded despite its neighbour's refusal.
+    fetched(&home, before, rows, cx);
+    assert_eq!(sent.borrow().records.len(), 2);
+
+    // Reopened and due again: a fresh banner, recorded again.
+    let later = Instant::now() + Duration::from_millis(1);
+    fetched(&home, later, due(&[("hot", "Send the deck", Some(3))]), cx);
     assert_eq!(sent.borrow().banners.len(), 3);
-    assert_eq!(sent.borrow().banners[2].0, "Burning: Sign the lease");
-    assert_eq!(sent.borrow().records[2], (4, vec!["fire".to_string()]));
+    assert_eq!(sent.borrow().records[2], (3, "hot".to_string()));
 }
 
 #[gpui::test]
@@ -391,16 +426,17 @@ fn a_banner_whose_record_failed_isnt_posted_again_and_the_record_is_retried(
 
     // The next refresh sends the record again, even once quiet hours have
     // started and the row no longer says it's due, and posts nothing.
-    let later = Instant::now() + Duration::from_millis(1);
+    let before = Instant::now();
+    let later = before + Duration::from_millis(1);
     fetched(&home, later, due(&[("hot", "Send the deck", None)]), cx);
     assert_eq!(sent.borrow().banners.len(), 1);
     assert_eq!(
         sent.borrow().records,
-        [(3, vec!["hot".to_string()]), (3, vec!["hot".to_string()])]
+        [(3, "hot".to_string()), (3, "hot".to_string())]
     );
 
-    // Recorded now: nothing more.
-    fetched(&home, later, due(&[("hot", "Send the deck", Some(3))]), cx);
+    // Recorded now; a refresh from before that still says due: nothing more.
+    fetched(&home, before, due(&[("hot", "Send the deck", Some(3))]), cx);
     assert_eq!(sent.borrow().banners.len(), 1);
     assert_eq!(sent.borrow().records.len(), 2);
 }
@@ -427,5 +463,5 @@ fn notifications_off_post_nothing_until_turned_on(cx: &mut TestAppContext) {
     });
     fetched(&home, Instant::now(), rows, cx);
     assert_eq!(sent.borrow().banners.len(), 1);
-    assert_eq!(sent.borrow().records, [(3, vec!["hot".to_string()])]);
+    assert_eq!(sent.borrow().records, [(3, "hot".to_string())]);
 }

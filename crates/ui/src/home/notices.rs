@@ -4,10 +4,12 @@
 //! posts that as a banner, then tells the server with
 //! `POST /memory/loose-ends/notified`. All Home adds is memory: one app run
 //! never posts the same (row, level) twice, even while the server hasn't
-//! caught up, and a burning row repeats only once the server says it's due
-//! again after recording the last banner.
+//! caught up, and a row shows again only once the server says it's due after
+//! recording (or refusing) the last banner: a burning repeat, or an item it
+//! reopened. Each banner is recorded in its own call, because the server's
+//! call is all or nothing and one closed id would sink the rest.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -21,8 +23,8 @@ use super::Home;
 
 /// Shows one banner: (title, body).
 pub(crate) type Banner = Rc<dyn Fn(&str, &str)>;
-/// Tells the server the banners for these ids at this level went out.
-pub(crate) type Record = Rc<dyn Fn(u8, Vec<String>, &App) -> Task<Result<(), FetchError>>>;
+/// Tells the server the banner for this id at this level went out.
+pub(crate) type Record = Rc<dyn Fn(u8, String, &App) -> Task<Result<(), FetchError>>>;
 
 /// The memory source whose rows notify.
 const LOOSE_ENDS: &str = "loose-ends";
@@ -39,9 +41,9 @@ enum Ack {
     Failed,
     /// The server's answer came back at this instant.
     Recorded(Instant),
-    /// The server refused it for good (the item closed); sent again only if
-    /// the row comes back due.
-    Refused,
+    /// The server refused it at this instant (the item closed); shown again
+    /// only if a later fetch says the row is due (it reopened).
+    Refused(Instant),
 }
 
 pub(crate) struct Notices {
@@ -71,10 +73,10 @@ impl Notices {
             Rc::new(|title, body| {
                 crate::notify::post(title, body, Some(crate::notify::HOME_TARGET))
             }),
-            Rc::new(move |level, ids, cx| {
+            Rc::new(move |level, id, cx| {
                 let door = door.clone();
                 let send = Tokio::spawn(cx, async move {
-                    loose_ends::act(&door, &Action::Notified { level }, &ids)
+                    loose_ends::act(&door, &Action::Notified { level }, &[id])
                         .await
                         .map(|_| ())
                 });
@@ -117,7 +119,7 @@ impl Home {
             return;
         };
         let allowed = rows.iter().any(|row| row.notify.is_some()) && banners_allowed(cx);
-        let mut sends: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+        let mut sends: Vec<(u8, String)> = Vec::new();
         for row in rows {
             let Some(id) = row.id.as_deref() else {
                 continue;
@@ -130,11 +132,12 @@ impl Home {
                 let key = (id.to_string(), level);
                 let banner = match notices.posted.get(&key) {
                     None => true,
-                    // Due again after the server recorded the last one.
-                    Some(Ack::Recorded(at)) => level == BURNING && started > *at,
-                    Some(Ack::Failed | Ack::Refused) => {
+                    // Due again in a fetch that began after the server's
+                    // answer: a burning repeat, or an item it reopened.
+                    Some(Ack::Recorded(at) | Ack::Refused(at)) => started > *at,
+                    Some(Ack::Failed) => {
                         notices.posted.insert(key, Ack::Sending);
-                        sends.entry(level).or_default().push(id.to_string());
+                        sends.push((level, id.to_string()));
                         continue;
                     }
                     Some(Ack::Sending) => false,
@@ -143,7 +146,7 @@ impl Home {
                     let (title, body) = banner_text(row, level);
                     (notices.banner)(&title, &body);
                     notices.posted.insert(key, Ack::Sending);
-                    sends.entry(level).or_default().push(id.to_string());
+                    sends.push((level, id.to_string()));
                 }
             }
         }
@@ -151,49 +154,42 @@ impl Home {
         for ((id, level), ack) in notices.posted.iter_mut() {
             if *ack == Ack::Failed && rows.iter().any(|row| row.id.as_deref() == Some(id)) {
                 *ack = Ack::Sending;
-                sends.entry(*level).or_default().push(id.clone());
+                sends.push((*level, id.clone()));
             }
         }
-        for (level, ids) in sends {
-            let send = (notices.record)(level, ids.clone(), cx);
+        for (level, id) in sends {
+            let send = (notices.record)(level, id.clone(), cx);
             let key = notices.next_send;
             notices.next_send += 1;
             let task = cx.spawn(async move |this, cx| {
                 let result = send.await;
-                this.update(cx, |this, _| this.finish_notices(key, level, &ids, result))
+                this.update(cx, |this, _| this.finish_notices(key, level, id, result))
                     .ok();
             });
             notices.sends.insert(key, task);
         }
     }
 
-    fn finish_notices(
-        &mut self,
-        send: u64,
-        level: u8,
-        ids: &[String],
-        result: Result<(), FetchError>,
-    ) {
+    fn finish_notices(&mut self, send: u64, level: u8, id: String, result: Result<(), FetchError>) {
         let Some(notices) = self.notices.as_mut() else {
             return;
         };
         notices.sends.remove(&send);
+        let now = Instant::now();
         let ack = match &result {
-            Ok(()) => Ack::Recorded(Instant::now()),
+            Ok(()) => Ack::Recorded(now),
             Err(FetchError::Door(DoorError::Http {
                 status: 400 | 409, ..
-            })) => Ack::Refused,
+            })) => Ack::Refused(now),
             Err(_) => Ack::Failed,
         };
         if let Err(error) = &result {
             tracing::debug!(%error, "home: couldn't record a loose-end notification");
         }
-        for id in ids {
-            if let Some(slot) = notices.posted.get_mut(&(id.clone(), level))
-                && *slot == Ack::Sending
-            {
-                *slot = ack;
-            }
+        if let Some(slot) = notices.posted.get_mut(&(id, level))
+            && *slot == Ack::Sending
+        {
+            *slot = ack;
         }
     }
 }
