@@ -823,9 +823,14 @@ impl Home {
             .when_some(item.account.clone(), |el, account| {
                 el.child(SharedString::from(account))
             });
+        // The door sends a loose end's heat word as its badge too; the heat mark says it.
+        let badge = item
+            .badge
+            .clone()
+            .filter(|badge| heat.is_none_or(|heat| !badge.eq_ignore_ascii_case(heat.word())));
         if snoozed {
             right = right.child(widgets::badge(theme, "snoozed"));
-        } else if let Some(badge) = item.badge.clone() {
+        } else if let Some(badge) = badge {
             right = right.child(widgets::badge(theme, badge));
         } else if let Some(age) = age {
             right = right.child(
@@ -865,6 +870,18 @@ impl Home {
             .as_deref()
             .filter(|_| !item.actions.is_empty() && self.fetcher.door().is_some())
             .map(|row| self.render_row_actions(theme, widget, row, item, &key, cx));
+        if actions.is_some() {
+            // Snooze and Done take the right side's place while they show.
+            let menu_open = self
+                .snooze_menu
+                .get()
+                .is_some_and(|(menu_widget, menu_row)| {
+                    menu_widget == widget && Some(menu_row.as_str()) == item.id.as_deref()
+                });
+            right = right
+                .when(menu_open, |el| el.opacity(0.0))
+                .group_hover(SharedString::from(key.clone()), |s| s.opacity(0.0));
+        }
         let mut row = div()
             .id(SharedString::from(key.clone()))
             .group(SharedString::from(key))
@@ -1397,17 +1414,24 @@ fn render_footer(
     let payload = state?.payload.as_ref()?;
     let problems = payload.errors.len();
     let now = Utc::now();
+    // Loose ends' `updated` is the mini's last pass (hourly), not this fetch: say
+    // so, always. Other door sources mention it only when it's gone stale.
+    let pass = matches!(&manifest.source, SourceSpec::Memory(name) if name == "loose-ends");
     let stale = payload
         .updated
         .as_deref()
         .filter(|_| is_door(&manifest.source))
         .and_then(parse_time)
         .filter(|at| {
-            now.signed_duration_since(at.with_timezone(&Utc))
+            pass || now
+                .signed_duration_since(at.with_timezone(&Utc))
                 .to_std()
                 .is_ok_and(|age| age > stale_after(manifest))
         })
-        .map(|at| format!("updated {} ago", short_age(at, now)));
+        .map(|at| {
+            let word = if pass { "checked" } else { "updated" };
+            format!("{word} {} ago", short_age(at, now))
+        });
     if problems == 0 && stale.is_none() {
         return None;
     }
