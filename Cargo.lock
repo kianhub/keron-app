@@ -4997,6 +4997,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "keron-door"
+version = "0.2.105"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "keron-config",
+ "reqwest",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "keron-home"
+version = "0.2.105"
+dependencies = [
+ "chrono",
+ "futures",
+ "keron-config",
+ "keron-door",
+ "notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13324,6 +13363,8 @@ dependencies = [
  "gpui_tokio",
  "image",
  "keron-config",
+ "keron-door",
+ "keron-home",
  "libc",
  "mermaid-rs-renderer",
  "mimalloc",

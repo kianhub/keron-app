@@ -1,0 +1,30 @@
+[package]
+name = "keron-home"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Home's widget runtime, without any UI: manifests in ~/.keron/widgets,
+# the layout in ~/.keron/home.toml, the widget kinds' JSON shapes, and
+# fetching each source (the public door through keron-door, local scripts,
+# and the app's own data as a plain snapshot). The view lives in
+# crates/ui/src/home (it needs the ui crate's theme and state).
+
+[dependencies]
+keron-config = { path = "../keron-config" }
+keron-door = { path = "../keron-door" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+notify.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

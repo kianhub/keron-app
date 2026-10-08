@@ -27,6 +27,11 @@ pub const IPC_PORT: u16 = 27754;
 /// `http://127.0.0.1:27741/callback` as a redirect URI (edge/RELAY.md).
 pub const SIGN_IN_CALLBACK_PORT: u16 = 27741;
 
+/// Loopback port of the app's own sign-in to the public door (Home). Its
+/// dynamically registered client lists `http://127.0.0.1:27742/callback`;
+/// if the port is taken the app registers again on a free one.
+pub const DOOR_SIGN_IN_CALLBACK_PORT: u16 = 27742;
+
 /// True when keron.toml holds the owner's values rather than placeholders.
 pub const fn is_configured() -> bool {
     PLACEHOLDERS.is_empty()
@@ -47,6 +52,21 @@ pub fn unconfigured_message() -> Option<String> {
 /// logs/, widgets/, home.toml) belongs to Keron's other parts.
 pub fn data_dir_in(home: &Path) -> PathBuf {
     home.join(".keron").join("app")
+}
+
+/// Keron's root on this machine: `~/.keron`.
+pub fn keron_root_in(home: &Path) -> PathBuf {
+    home.join(".keron")
+}
+
+/// Home's widget manifests and scripts: `~/.keron/widgets`.
+pub fn widgets_dir_in(home: &Path) -> PathBuf {
+    keron_root_in(home).join("widgets")
+}
+
+/// Home's layout (which widgets show, their order and width): `~/.keron/home.toml`.
+pub fn home_layout_in(home: &Path) -> PathBuf {
+    keron_root_in(home).join("home.toml")
 }
 
 /// Root of the self-updating managed install (`<root>/<version>` behind a
@@ -80,10 +100,13 @@ mod tests {
 
     #[test]
     fn nothing_points_at_zeron() {
-        for value in [RELAY_URL, WORKOS_CLIENT_ID, RELEASES_PAGE, MACOS_BUNDLE_ID] {
+        for value in [RELAY_URL, DOOR_URL, WORKOS_CLIENT_ID, RELEASES_PAGE, MACOS_BUNDLE_ID] {
             assert!(!value.contains("zeron"), "{value}");
         }
         assert!(RELEASES_URL.is_none_or(|url| url.starts_with(RELAY_URL)));
+        assert_eq!(DOOR_URL, format!("https://{DOOR_HOST}"));
+        assert_eq!(DOOR_RESOURCE, format!("{DOOR_URL}/mcp"));
+        assert_ne!(DOOR_HOST, RELAY_HOST, "the door and the relay are different services");
     }
 
     #[test]
@@ -92,6 +115,7 @@ mod tests {
         assert!(![27654, 27641].contains(&IPC_PORT));
         assert!(![27654, 27641].contains(&SIGN_IN_CALLBACK_PORT));
         assert_ne!(IPC_PORT, SIGN_IN_CALLBACK_PORT);
+        assert!(![27654, 27641, IPC_PORT, SIGN_IN_CALLBACK_PORT].contains(&DOOR_SIGN_IN_CALLBACK_PORT));
     }
 
     #[test]
@@ -102,5 +126,7 @@ mod tests {
             managed_install_root(home),
             Path::new("/Users/someone/.keron/app/install")
         );
+        assert_eq!(widgets_dir_in(home), Path::new("/Users/someone/.keron/widgets"));
+        assert_eq!(home_layout_in(home), Path::new("/Users/someone/.keron/home.toml"));
     }
 }

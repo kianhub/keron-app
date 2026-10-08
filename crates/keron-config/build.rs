@@ -14,6 +14,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 struct File {
     relay: Relay,
+    door: Door,
     apple: Apple,
     updates: Updates,
 }
@@ -23,6 +24,12 @@ struct File {
 struct Relay {
     host: String,
     workos_client_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Door {
+    host: String,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +56,15 @@ fn fail(path: &std::path::Path, message: &str) -> ! {
     panic!("\n\nkeron.toml ({}): {message}\n\n", path.display());
 }
 
+/// A lowercase hostname with at least one dot, no scheme and no path.
+fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+        && host.contains('.')
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let path = manifest.join("../../keron.toml");
@@ -61,15 +77,17 @@ fn main() {
         toml::from_str(&text).unwrap_or_else(|err| fail(&path, &format!("can't parse it: {err}")));
 
     let host = file.relay.host.trim().to_string();
-    if host.is_empty()
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-        || !host.contains('.')
-    {
+    if !valid_host(&host) {
         fail(
             &path,
             "relay.host must be a lowercase hostname like relay.example.com (no https://, no path)",
+        );
+    }
+    let door_host = file.door.host.trim().to_string();
+    if !valid_host(&door_host) {
+        fail(
+            &path,
+            "door.host must be a lowercase hostname like memory.example.com (no https://, no path)",
         );
     }
     let client_id = file.relay.workos_client_id.trim().to_string();
@@ -116,6 +134,7 @@ fn main() {
     for (key, value) in [
         ("relay.host", &host),
         ("relay.workos_client_id", &client_id),
+        ("door.host", &door_host),
         ("apple.team_id", &team),
         ("apple.bundle_prefix", &prefix),
         ("updates.releases_page", &releases_page),
@@ -168,6 +187,17 @@ fn main() {
         "WorkOS AuthKit client id of the relay's app (`relay.workos_client_id`).",
         "WORKOS_CLIENT_ID",
         &client_id,
+    );
+    constant("Public door hostname (`door.host`).", "DOOR_HOST", &door_host);
+    constant(
+        "Public door base URL, `https://` + [`DOOR_HOST`]: `/sources/<name>` and `/memory/<name>` live under it.",
+        "DOOR_URL",
+        &format!("https://{door_host}"),
+    );
+    constant(
+        "The door's OAuth resource (its MCP endpoint, the audience its tokens are made for).",
+        "DOOR_RESOURCE",
+        &format!("https://{door_host}/mcp"),
     );
     constant(
         "Apple Developer team id (`apple.team_id`).",

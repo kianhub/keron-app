@@ -24,6 +24,8 @@ members = [
     "crates/mcp",
     "crates/text",
     "crates/keron-config",
+    "crates/keron-door",
+    "crates/keron-home",
     "apps/zeron",
 ]
 

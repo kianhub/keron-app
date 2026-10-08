@@ -25,6 +25,12 @@ host = "relay.kianpasani.com"
 # Public by design: it appears in every sign-in URL.
 workos_client_id = "client_change-me"
 
+[door]
+# Hostname of the Mac mini's public door (Cloudflare Tunnel + WorkOS AuthKit),
+# without https://. Not the relay. Home's widgets read the memory and
+# keron-sources through it; the app signs in to it on its own.
+host = "memory.kianpasani.com"
+
 [apple]
 # Your Apple Developer team id (10 characters, from developer.apple.com).
 team_id = "9ZTE89T3KC"

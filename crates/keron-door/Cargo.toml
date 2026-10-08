@@ -1,0 +1,33 @@
+[package]
+name = "keron-door"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Keron app's own OAuth client for the Mac mini's public door
+# (Cloudflare Tunnel + WorkOS AuthKit, keron_config::DOOR_URL): discovery,
+# dynamic client registration, a PKCE loopback sign-in in the browser, and
+# bearer-authenticated JSON requests with refresh. Not the relay's sign-in.
+# Home (crates/keron-home) reads /sources/<name> and /memory/<name> with it.
+
+[dependencies]
+keron-config = { path = "../keron-config" }
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64 = "0.22"
+url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
