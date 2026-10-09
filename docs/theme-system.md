@@ -41,13 +41,15 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 30 variants across 19 families:
+The built-in registry contains 37 variants across 20 families:
 
 - Zeron Light and Dark
 - VS Code Light+ and Dark+
 - Catppuccin Latte and Mocha
 - Tokyo Night Light and Tokyo Night
 - Dracula
+- Dracula's Vial Chromatic, Pure Triad, Neon Synth, Deep Abyss, Ice & Fire,
+  Galactic Plasma, and Cyber Lavender
 - GitHub Light and Dark
 - Ayu Light, Dark, and Mirage
 - Gruvbox Light and Dark

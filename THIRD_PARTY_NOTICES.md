@@ -43,6 +43,7 @@ by Zeron. Their names identify the corresponding palette adaptations.
 | Catppuccin for VS Code | `befc9e6fc41980f4241408f7049755d47c06ff45` | [MIT](https://github.com/catppuccin/vscode/blob/befc9e6fc41980f4241408f7049755d47c06ff45/LICENSE) |
 | Tokyo Night VS Code Theme | `7c0f11eaef322f293621ca7befe462214b7ea468` | [MIT](https://github.com/tokyo-night/tokyo-night-vscode-theme/blob/7c0f11eaef322f293621ca7befe462214b7ea468/LICENSE.txt) |
 | Dracula for Visual Studio Code | `1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c` | [MIT](https://github.com/dracula/visual-studio-code/blob/1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c/LICENSE) |
+| Dracula's Vial | `3e6afeb6db76aeee3741dd0ee33974b3ec54b027` | [MIT](https://github.com/sevnth/draculas-vial/blob/3e6afeb6db76aeee3741dd0ee33974b3ec54b027/LICENSE) |
 | GitHub VS Code Theme | `cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf` | [MIT](https://github.com/primer/github-vscode-theme/blob/cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf/LICENSE) |
 | Ayu for VS Code | `444ef92911cb75c3933c8003e3a7c79b6b6c914f` | [MIT](https://github.com/ayu-theme/vscode-ayu/blob/444ef92911cb75c3933c8003e3a7c79b6b6c914f/LICENSE) |
 | Gruvbox Theme | `ca3b8ad203e84a884ca33fb84b5795cf43032709` | [MIT](https://github.com/jdinhify/vscode-theme-gruvbox/blob/ca3b8ad203e84a884ca33fb84b5795cf43032709/LICENSE) |
@@ -68,6 +69,7 @@ Copyright notices retained from those pinned upstream licenses:
 - Copyright (c) 2021 Catppuccin
 - Copyright (c) 2018-present Enkia
 - Copyright (c) 2016 Dracula Theme
+- Copyright (c) 2026 Sevnth
 - Copyright (c) 2020 Primer
 - Copyright (c) 2016 Ike Kurghinyan
 - Copyright © 2017 JD

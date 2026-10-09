@@ -29,6 +29,19 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
                 vec![tokyo_light(), tokyo_dark()],
             ),
             family("dracula", "Dracula", vec![dracula()]),
+            family(
+                "dracula-vial",
+                "Dracula's Vial",
+                vec![
+                    dracula_vial_chromatic(),
+                    dracula_vial_pure_triad(),
+                    dracula_vial_neon_synth(),
+                    dracula_vial_deep_abyss(),
+                    dracula_vial_ice_fire(),
+                    dracula_vial_galactic_plasma(),
+                    dracula_vial_cyber_lavender(),
+                ],
+            ),
             family("github", "GitHub", vec![github_light(), github_dark()]),
             family("ayu", "Ayu", vec![ayu_light(), ayu_dark(), ayu_mirage()]),
             family("gruvbox", "Gruvbox", vec![gruvbox_light(), gruvbox_dark()]),
@@ -555,6 +568,265 @@ fn dracula() -> ThemeVariant {
             "vscode",
             "https://github.com/dracula/visual-studio-code",
             "1b9ecf4d7e0c8cc2e2e890a7a41ad1db5fff1e6c",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_chromatic() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-chromatic",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Chromatic",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#21222c",
+        shell: "#191a21",
+        raised: "#44475a",
+        card: "#282a36",
+        text: "#f8f8f2",
+        muted: "#b0b6c8",
+        faint: "#68759e",
+        accent: "#bd93f9",
+        danger: "#ff5555",
+        warning: "#ffb86c",
+        success: "#50fa7b",
+        terminal_background: "#191a21",
+        ansi: [
+            "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+            "#68759e", "#ff6e6e", "#69ff94", "#ffffa5", "#caa9fa", "#ff92d0", "#a4ffff", "#ffffff",
+        ],
+        syntax: [
+            "#68759e", "#bd93f9", "#ffb86c", "#f1fa8c", "#50fa7b", "#8be9fd", "#ff79c6", "#f8f8f2",
+            "#f8f8f2", "#8be9fd", "#ff9e64", "#ff5555",
+        ],
+        source: source(
+            "dracula-vial-chromatic",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_pure_triad() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-pure-triad",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Pure Triad",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#21222c",
+        shell: "#191a21",
+        raised: "#44475a",
+        card: "#282a36",
+        text: "#f8f8f2",
+        muted: "#b0b6c8",
+        faint: "#68759e",
+        accent: "#bd93f9",
+        danger: "#ff5555",
+        warning: "#ffb86c",
+        success: "#50fa7b",
+        terminal_background: "#191a21",
+        ansi: [
+            "#21222c", "#ff5555", "#50fa7b", "#ffb86c", "#bd93f9", "#bd93f9", "#8be9fd", "#f8f8f2",
+            "#68759e", "#ff6e6e", "#69ff94", "#ffd29e", "#caa9fa", "#ff92d0", "#a4ffff", "#ffffff",
+        ],
+        syntax: [
+            "#68759e", "#bd93f9", "#ffb86c", "#ffb86c", "#8be9fd", "#8be9fd", "#ffb86c", "#f8f8f2",
+            "#f8f8f2", "#8be9fd", "#ffb86c", "#ff5555",
+        ],
+        source: source(
+            "dracula-vial-pure-triad",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_neon_synth() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-neon-synth",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Neon Synth",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#161824",
+        shell: "#12131c",
+        raised: "#393e5c",
+        card: "#232638",
+        text: "#ffffff",
+        muted: "#b1b4c3",
+        faint: "#636987",
+        accent: "#ff2a85",
+        danger: "#ff2a85",
+        warning: "#ff6b35",
+        success: "#05ffa1",
+        terminal_background: "#12131c",
+        ansi: [
+            "#161824", "#ff2a85", "#05ffa1", "#ffe600", "#9d4edd", "#ff2a85", "#00e5ff", "#ffffff",
+            "#636987", "#ff2a85", "#05ffa1", "#fff066", "#c77dff", "#ff70a6", "#a4ffff", "#ffffff",
+        ],
+        syntax: [
+            "#636987", "#ff2a85", "#ff6b35", "#ffe600", "#05ffa1", "#00e5ff", "#c77dff", "#ffffff",
+            "#ffffff", "#00e5ff", "#ff6b35", "#ff2a85",
+        ],
+        source: source(
+            "dracula-vial-neon-synth",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_deep_abyss() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-deep-abyss",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Deep Abyss",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#0e1017",
+        shell: "#080a0f",
+        raised: "#1e2638",
+        card: "#161b28",
+        text: "#f0f4f8",
+        muted: "#9ea8b6",
+        faint: "#4d5b75",
+        accent: "#9b5de5",
+        danger: "#ff3366",
+        warning: "#ff577f",
+        success: "#00f5d4",
+        terminal_background: "#080a0f",
+        ansi: [
+            "#0e1017", "#ff3366", "#00f5d4", "#fee440", "#9b5de5", "#9b5de5", "#00f0ff", "#ffffff",
+            "#4d5b75", "#ff3366", "#00f5d4", "#fee440", "#9b5de5", "#f15bb5", "#00f0ff", "#ffffff",
+        ],
+        syntax: [
+            "#4d5b75", "#9b5de5", "#ff577f", "#fee440", "#00f5d4", "#00f0ff", "#f15bb5", "#f0f4f8",
+            "#f0f4f8", "#00f0ff", "#ff758f", "#ff3366",
+        ],
+        source: source(
+            "dracula-vial-deep-abyss",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_ice_fire() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-ice-fire",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Ice & Fire",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#0f141d",
+        shell: "#080c12",
+        raised: "#1b2c40",
+        card: "#15202e",
+        text: "#f0f8ff",
+        muted: "#9eb2c4",
+        faint: "#4d6b8a",
+        accent: "#9254de",
+        danger: "#ff4d4f",
+        warning: "#ff7a45",
+        success: "#36cfc9",
+        terminal_background: "#080c12",
+        ansi: [
+            "#0f141d", "#ff4d4f", "#36cfc9", "#ffc53d", "#9254de", "#9254de", "#00d2ff", "#ffffff",
+            "#4d6b8a", "#ff4d4f", "#36cfc9", "#ffc53d", "#9254de", "#f759ab", "#00d2ff", "#ffffff",
+        ],
+        syntax: [
+            "#4d6b8a", "#9254de", "#ff7a45", "#ffc53d", "#36cfc9", "#00d2ff", "#f759ab", "#f0f8ff",
+            "#f0f8ff", "#00d2ff", "#ffa940", "#ff4d4f",
+        ],
+        source: source(
+            "dracula-vial-ice-fire",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_galactic_plasma() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-galactic-plasma",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Galactic Plasma",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#111222",
+        shell: "#0a0b16",
+        raised: "#232647",
+        card: "#1a1c34",
+        text: "#f5f3ff",
+        muted: "#aaabc6",
+        faint: "#5e638c",
+        accent: "#c084fc",
+        danger: "#f87171",
+        warning: "#f472b6",
+        success: "#34d399",
+        terminal_background: "#0a0b16",
+        ansi: [
+            "#111222", "#f87171", "#34d399", "#fbbf24", "#c084fc", "#c084fc", "#22d3ee", "#ffffff",
+            "#5e638c", "#f87171", "#34d399", "#fbbf24", "#c084fc", "#e879f9", "#22d3ee", "#ffffff",
+        ],
+        syntax: [
+            "#5e638c", "#c084fc", "#f472b6", "#fbbf24", "#34d399", "#22d3ee", "#e879f9", "#f5f3ff",
+            "#f5f3ff", "#22d3ee", "#fb923c", "#f87171",
+        ],
+        source: source(
+            "dracula-vial-galactic-plasma",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
+            "MIT",
+        ),
+    })
+}
+
+fn dracula_vial_cyber_lavender() -> ThemeVariant {
+    variant(Seeds {
+        id: "dracula-vial-cyber-lavender",
+        family_id: "dracula-vial",
+        name: "Dracula's Vial Cyber Lavender",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#151622",
+        shell: "#0f101a",
+        raised: "#282a3d",
+        card: "#1e2030",
+        text: "#f8f7fc",
+        muted: "#b2b3c3",
+        faint: "#6b6f8a",
+        accent: "#d8b4fe",
+        danger: "#f87171",
+        warning: "#fda4af",
+        success: "#86efac",
+        terminal_background: "#0f101a",
+        ansi: [
+            "#151622", "#f87171", "#86efac", "#fef08a", "#d8b4fe", "#d8b4fe", "#67e8f9", "#ffffff",
+            "#6b6f8a", "#f87171", "#86efac", "#fef08a", "#d8b4fe", "#e9d5ff", "#67e8f9", "#ffffff",
+        ],
+        syntax: [
+            "#6b6f8a", "#d8b4fe", "#fda4af", "#fef08a", "#86efac", "#67e8f9", "#e9d5ff", "#f8f7fc",
+            "#f8f7fc", "#67e8f9", "#fbcfe8", "#f87171",
+        ],
+        source: source(
+            "dracula-vial-cyber-lavender",
+            "vscode",
+            "https://github.com/sevnth/draculas-vial",
+            "3e6afeb6db76aeee3741dd0ee33974b3ec54b027",
             "MIT",
         ),
     })
