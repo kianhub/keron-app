@@ -180,6 +180,9 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    // Hand-drawn Slack mark (four pills and their nubs) in the Solar Linear
+    // style, for Home's Slack widget; the embedded set has no brand marks.
+    (SLACK, "slack"),
     // Hand-drawn bot head (antenna + eyes + ears) in the Solar Linear style
     // — the embedded set has no bot/robot glyph. Subagent tabs.
     (BOT, "bot"),

@@ -93,9 +93,13 @@ impl Render for Home {
         let theme = Theme::of(cx).clone();
         let columns = (((width + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)).floor() as u16)
             .clamp(1, MAX_COLUMNS);
-        let toolbar = self.render_toolbar(&theme, cx);
+        // The toolbar ends where the composer above it ends.
+        let toolbar = div()
+            .w(px(frame.composer.clamp(0.0, width)))
+            .mx_auto()
+            .child(self.render_toolbar(&theme, cx));
         let tray = self.customize.then(|| self.render_tray(&theme, cx));
-        let grid = self.render_grid(&theme, columns, cx);
+        let grid = self.render_grid(&theme, columns, width, cx);
         let content = div()
             .w(px(width))
             .mx_auto()
@@ -632,6 +636,7 @@ impl Home {
         &self,
         theme: &Theme,
         columns: u16,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let slots = self.grid_slots();
@@ -673,6 +678,16 @@ impl Home {
                 }
             })
             .collect();
+        // Fewer cards than columns: the grid narrows to the columns they
+        // fill, at the same column width, and centers under the composer.
+        let column_width = (width - GRID_GAP * f32::from(columns - 1)) / f32::from(columns);
+        let used = widths
+            .iter()
+            .map(|&w| u16::from(w))
+            .sum::<u16>()
+            .clamp(1, columns);
+        let columns = used;
+        let grid_width = column_width * f32::from(used) + GRID_GAP * f32::from(used - 1);
         let cells = dense_cells(&widths, columns);
         let reduced = motion::reduced_motion(cx);
         let mut cards = Vec::with_capacity(count);
@@ -724,7 +739,8 @@ impl Home {
         }
         let grid = div()
             .id("home-grid")
-            .w_full()
+            .w(px(grid_width))
+            .mx_auto()
             .grid()
             .grid_cols(columns)
             // Each card is as tall as its content, not its row's tallest card.
@@ -2291,6 +2307,7 @@ fn icon_for(manifest: &Manifest) -> &'static str {
     match manifest.icon.as_deref() {
         Some("flag") => icons::FLAG,
         Some("chat") => icons::CHAT_ROUND_LINE,
+        Some("slack") => icons::SLACK,
         Some("check") => icons::CHECK,
         Some("calendar") => icons::CALENDAR,
         Some("tree") => icons::FILE_TREE,

@@ -100,6 +100,8 @@ pub enum HomeEvent {
 struct Frame {
     top: f32,
     width: f32,
+    /// The composer's width above Home: the toolbar ends where it ends.
+    composer: f32,
     opacity: f32,
 }
 
@@ -413,22 +415,32 @@ impl Home {
 
     // ---- from the shell ----
 
-    /// Where to draw: `top` in window coordinates, the composer column's
-    /// `width`, and the route fade's `opacity`.
     /// Home's width in a conversation column `column` wide: the column less its
     /// margins, up to MAX_WIDTH, and never narrower than the composer above it.
     pub fn frame_width(column: f32, composer: f32) -> f32 {
         (column - 2.0 * SIDE_MARGIN).min(MAX_WIDTH).max(composer)
     }
 
-    pub fn set_frame(&mut self, top: f32, width: f32, opacity: f32, cx: &mut Context<Self>) {
+    /// Where to draw: `top` in window coordinates, Home's `width`
+    /// ([`Home::frame_width`]), the `composer`'s width above it, and the
+    /// route fade's `opacity`.
+    pub fn set_frame(
+        &mut self,
+        top: f32,
+        width: f32,
+        composer: f32,
+        opacity: f32,
+        cx: &mut Context<Self>,
+    ) {
         let next = Frame {
             top,
             width,
+            composer,
             opacity,
         };
         let same = (next.top - self.frame.top).abs() < 0.5
             && (next.width - self.frame.width).abs() < 0.5
+            && (next.composer - self.frame.composer).abs() < 0.5
             && (next.opacity - self.frame.opacity).abs() < 0.002;
         if same {
             return;

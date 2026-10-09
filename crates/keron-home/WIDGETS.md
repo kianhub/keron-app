@@ -40,7 +40,7 @@ empty  = "Nobody's waiting"
 | `kind` | yes | | How the card is drawn: `list`, `timeline`, `stat`, `agenda` or `devices`. |
 | `source` | yes | | Where the data comes from. See "Sources". |
 | `every` | no | `1m` | How often to refresh: `30s`, `5m`, `1h`. A bare number is seconds. The fastest is `5s`, the slowest `24h`. |
-| `icon` | no | none | One of `flag`, `chat`, `check`, `calendar`, `tree`, `pulse`, `devices`, `pr`, `mail`, `mic`, `bars`, `widget`, `bell`, `star`, `list`, `globe`. |
+| `icon` | no | none | One of `flag`, `chat`, `check`, `calendar`, `tree`, `pulse`, `devices`, `pr`, `mail`, `mic`, `bars`, `widget`, `bell`, `star`, `list`, `globe`, `slack`. |
 | `wide` | no | `false` | Take two columns instead of one, until you resize it in Customize. |
 | `limit` | no | all | The most rows shown, from 1 to 50. |
 | `empty` | no | | The text shown when there are no rows (on the card, or in the tooltip of its icon once it's collapsed). |

@@ -16,13 +16,14 @@ pub const README: &str = include_str!("../WIDGETS.md");
 /// the last is [`README`]'s. A README.md matching one is an unedited copy,
 /// so [`refresh_readme`] may replace it. When WIDGETS.md changes, append its
 /// new fingerprint (a test says so).
-const SEEDED_READMES: [u64; 6] = [
+const SEEDED_READMES: [u64; 7] = [
     0x44002d8dae033d70,
     0x97faf17121760427,
     0x08fd2bb9e7d63fa6,
     0x93a22c72952120cf,
     0xd7812d38f2dca372,
     0x7c514e1be6f33dcc,
+    0xc8d6b755772d971a,
 ];
 
 /// The hidden file listing the built-ins this folder has had (seeded or

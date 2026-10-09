@@ -10579,7 +10579,7 @@ impl Shell {
                 });
             self.home.update(cx, |home, cx| {
                 let width = crate::home::Home::frame_width(main_content_width, composer_width);
-                home.set_frame(top + footer + 12.0, width, home_opacity, cx)
+                home.set_frame(top + footer + 12.0, width, composer_width, home_opacity, cx)
             });
         } else {
             self.home.update(cx, |home, _| home.hide());

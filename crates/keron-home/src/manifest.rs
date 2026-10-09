@@ -24,7 +24,7 @@ use crate::{Kind, SourceSpec, zeron};
 /// Icon names a manifest may use; the app draws each one.
 pub const ICONS: &[&str] = &[
     "flag", "chat", "check", "calendar", "tree", "pulse", "devices", "pr", "mail", "mic", "bars",
-    "widget", "bell", "star", "list", "globe",
+    "widget", "bell", "star", "list", "globe", "slack",
 ];
 
 /// Default refresh.
@@ -256,7 +256,7 @@ title  = "Slack · waiting on you"
 kind   = "list"
 source = "keron-sources:slack-waiting"
 every  = "1m"
-icon   = "chat"
+icon   = "slack"
 empty  = "Nobody's waiting"
 "#,
     ),
