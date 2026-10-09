@@ -816,6 +816,10 @@ pub struct AppState {
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
+    /// Counts the resets the selected chat's watch has delivered, so a view
+    /// can tell a fresh replay from the copy `select_chat` restores from the
+    /// transcript cache.
+    pub(crate) transcript_replays: u64,
     /// Changes whenever an input of [`Self::file_link_roots`] does — chat
     /// rows, projects, this device's id — so views can memoize the roots.
     pub(crate) link_roots_revision: u64,
@@ -915,6 +919,7 @@ impl AppState {
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
+            transcript_replays: 0,
             link_roots_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -1479,6 +1484,7 @@ impl AppState {
         }
         self.transcript = entries;
         self.transcript_replayed = true;
+        self.transcript_replays = self.transcript_replays.wrapping_add(1);
         self.ack_pending_send_from_transcript();
     }
 
@@ -1496,6 +1502,7 @@ impl AppState {
         zeron_doc::apply_transcript_frame(&mut self.transcript, frame)?;
         if is_reset {
             self.transcript_replayed = true;
+            self.transcript_replays = self.transcript_replays.wrapping_add(1);
         }
         if let Some(chat_id) = self.selected_chat.as_deref()
             && let Some(echoes) = self.echoes.get_mut(chat_id)

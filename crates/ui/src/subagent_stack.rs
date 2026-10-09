@@ -23,7 +23,7 @@ use gpui::{
     AnyElement, App, Context, Entity, EntityId, EventEmitter, Hsla, IntoElement, PathBuilder,
     Pixels, Point, Render, SharedString, Subscription, Window, canvas, div, point, prelude::*, px,
 };
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry, SubagentStatus};
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec};
@@ -82,17 +82,50 @@ pub(crate) struct Spawn {
     pub tail: Option<String>,
     /// When the turn that spawned it was written, epoch ms.
     pub spawned_at: i64,
-    /// Spawned (or steered) since the latest user message.
+    /// Spawned (or steered) since the latest user message that started a
+    /// run. Only a scan of what happened unwatched goes by this; a watched
+    /// chat follows its prompts as they come (see [`track`]).
     pub current_run: bool,
+}
+
+/// The agent's latest reply in `entries` is still streaming.
+fn reply_streams(entries: &[SessionMessageEntry]) -> bool {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::Assistant)
+        .is_some_and(|entry| entry.status == Some(MessageStatus::Streaming))
+}
+
+/// Whether the chat's newest prompt (an unconfirmed echo when `echoed`, else
+/// its last user entry) starts a new run. A steer doesn't: it lands behind
+/// the agent's still-streaming reply while the session is at work.
+pub(crate) fn starts_run(
+    transcript: &[SessionMessageEntry],
+    echoed: bool,
+    session_active: bool,
+) -> bool {
+    let before = if echoed {
+        transcript.len()
+    } else {
+        transcript
+            .iter()
+            .rposition(|entry| entry.role == MessageRole::User)
+            .unwrap_or(0)
+    };
+    !(session_active && reply_streams(&transcript[..before]))
 }
 
 /// The spawn chips of `transcript`, one per subagent doc, in spawn order.
 /// Only genuine spawns with a stamped doc ref count, as in the right pane's
 /// Subagents section; a steered subagent updates its entry in place.
 pub(crate) fn spawns(transcript: &[SessionMessageEntry]) -> Vec<Spawn> {
-    let run_start = transcript
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User)
+    // A steer still waiting behind the streaming reply doesn't start a run.
+    // Once that reply ends it reads like any prompt, which is why a watched
+    // chat decides as each prompt lands instead.
+    let run_start = (0..transcript.len())
+        .rev()
+        .find(|&ix| transcript[ix].role == MessageRole::User && !reply_streams(&transcript[..ix]))
         .map_or(0, |ix| ix + 1);
     let mut spawns: Vec<Spawn> = Vec::new();
     for (ix, entry) in transcript.iter().enumerate() {
@@ -127,15 +160,18 @@ pub(crate) fn spawns(transcript: &[SessionMessageEntry]) -> Vec<Spawn> {
     spawns
 }
 
-/// What the stack remembers about one subagent between scans.
+/// What the stack remembers about one subagent between scans, and across
+/// chat switches.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Track {
     /// Clock base, epoch ms.
     started_at: i64,
     status: Option<SubagentStatus>,
     /// When this view saw it finish. `None` while it runs, and for one that
-    /// had finished before the view was watching: that one never lingers.
+    /// finished while the view wasn't watching: that one never lingers.
     finished_at: Option<i64>,
+    /// It belongs to the chat's current run.
+    current_run: bool,
 }
 
 fn is_finished(status: Option<SubagentStatus>) -> bool {
@@ -145,12 +181,31 @@ fn is_finished(status: Option<SubagentStatus>) -> bool {
     )
 }
 
-/// Fold a fresh scan into `tracks`. `live` is false for a chat's first scan:
-/// whatever is already there started with its turn and, if it has finished,
-/// finished before anyone was watching. Later scans see changes as they
-/// happen, at `now` (epoch ms).
-pub(crate) fn track(tracks: &mut HashMap<String, Track>, spawns: &[Spawn], live: bool, now: i64) {
+/// How a scan relates to what the view watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scan {
+    /// What is new in it happened unwatched: a chat's first scan, or a
+    /// cached transcript and the fresh replay that follows it.
+    Cold,
+    /// Changes in it are happening now.
+    Live,
+    /// Live, and the chat took a prompt that starts a new run.
+    NewRun,
+}
+
+/// Fold a fresh scan into `tracks` at `now` (epoch ms). A subagent first
+/// seen cold started with its turn and, if it has finished, finished before
+/// anyone was watching; its run is the transcript's guess. One first seen
+/// live started now, in the current run, and a new run leaves every earlier
+/// one behind. A steer starts nothing, so it keeps "N done".
+pub(crate) fn track(tracks: &mut HashMap<String, Track>, spawns: &[Spawn], scan: Scan, now: i64) {
+    let live = scan != Scan::Cold;
     tracks.retain(|doc_id, _| spawns.iter().any(|spawn| &spawn.doc_id == doc_id));
+    if scan == Scan::NewRun {
+        for track in tracks.values_mut() {
+            track.current_run = false;
+        }
+    }
     for spawn in spawns {
         let Some(track) = tracks.get_mut(&spawn.doc_id) else {
             tracks.insert(
@@ -159,19 +214,24 @@ pub(crate) fn track(tracks: &mut HashMap<String, Track>, spawns: &[Spawn], live:
                     started_at: if live { now } else { spawn.spawned_at },
                     status: spawn.status,
                     finished_at: (live && is_finished(spawn.status)).then_some(now),
+                    current_run: live || spawn.current_run,
                 },
             );
             continue;
         };
+        if !live {
+            track.current_run = spawn.current_run;
+        }
         if track.status == spawn.status {
             continue;
         }
         if is_finished(spawn.status) && !is_finished(track.status) {
-            track.finished_at = Some(now);
+            track.finished_at = live.then_some(now);
         } else if spawn.status == Some(SubagentStatus::Running) && is_finished(track.status) {
-            // Steered back to work: a fresh clock.
-            track.started_at = now;
+            // Steered back to work: a fresh clock, in this run.
+            track.started_at = if live { now } else { spawn.spawned_at };
             track.finished_at = None;
+            track.current_run |= live;
         }
         track.status = spawn.status;
     }
@@ -209,7 +269,7 @@ pub(crate) fn subagents(
                 title: spawn.title.clone(),
                 status,
                 activity: activity(spawn),
-                current_run: spawn.current_run,
+                current_run: track.current_run,
                 started_at: track.started_at,
                 finished_at: track.finished_at,
             })
@@ -287,15 +347,26 @@ impl Stack {
     pub fn folding(&self) -> bool {
         self.rows.iter().any(|row| row.fold > 0.0)
     }
+
+    /// How long until the next lingering row starts to fold, in ms.
+    pub fn next_fold(&self, now: i64) -> Option<i64> {
+        self.rows
+            .iter()
+            .filter(|row| row.fold == 0.0)
+            .filter_map(|row| row.subagent.finished_at)
+            .map(|at| (at + LINGER_MS - now).max(0))
+            .min()
+    }
 }
 
 /// Which entries show at `now` (epoch ms). Running subagents take the rows
 /// first, at most [`MAX_ROWS`], with the rest behind "+N more". A subagent
-/// seen finishing keeps its row (at most [`MAX_FINISHED_ROWS`] at once,
-/// first finished first) for [`LINGER_MS`], then folds over `fold_ms` into
-/// "N done", which counts this run's finished subagents and lasts while the
-/// run does or anything still runs. Rows keep spawn order, so a subagent
-/// that finishes turns into its check in place.
+/// seen finishing keeps its row for [`LINGER_MS`], then folds over `fold_ms`
+/// into "N done", which counts this run's finished subagents and lasts while
+/// the run does or anything still runs. At most [`MAX_FINISHED_ROWS`] hold a
+/// row at once: one finishing while they do goes straight into "N done" and
+/// stays there. Rows keep spawn order, so a subagent that finishes turns
+/// into its check in place.
 pub(crate) fn stack(subagents: &[Subagent], run_active: bool, fold_ms: i64, now: i64) -> Stack {
     let running = subagents
         .iter()
@@ -307,17 +378,30 @@ pub(crate) fn stack(subagents: &[Subagent], run_active: bool, fold_ms: i64, now:
         .take(MAX_ROWS)
         .map(|s| (s.doc_id.as_str(), 0.0))
         .collect();
-    // Finished subagents still lingering or folding, by how long ago they
-    // finished. A row keeps its place until it has folded; one finishing past
-    // the cap goes straight into "N done".
-    let mut finishing: Vec<(&Subagent, i64)> = subagents
+    // Hand out the finished rows in the order the subagents finished: each
+    // takes one unless the cap's worth of earlier ones still hold theirs at
+    // that moment. Decided from the finish times alone, so a row folding
+    // away later never hands its place to one that already went to "N done".
+    let window = LINGER_MS + fold_ms;
+    let mut finishers: Vec<(&Subagent, i64)> = subagents
         .iter()
         .filter(|s| s.status != SubagentStatus::Running)
-        .filter_map(|s| Some((s, now - s.finished_at?)))
-        .filter(|(_, since)| *since < LINGER_MS + fold_ms)
+        .filter_map(|s| Some((s, s.finished_at?)))
         .collect();
-    finishing.sort_by_key(|(_, since)| std::cmp::Reverse(*since));
-    finishing.truncate(MAX_FINISHED_ROWS);
+    finishers.sort_by_key(|(_, at)| *at);
+    let mut held: Vec<(&Subagent, i64)> = Vec::new();
+    for (s, at) in finishers {
+        let holding = held.iter().filter(|(_, from)| at - from < window).count();
+        if holding < MAX_FINISHED_ROWS {
+            held.push((s, at));
+        }
+    }
+    // Still lingering or folding, by how long ago they finished.
+    let finishing: Vec<(&Subagent, i64)> = held
+        .into_iter()
+        .map(|(s, at)| (s, now - at))
+        .filter(|(_, since)| *since < window)
+        .collect();
     shown.extend(finishing.iter().map(|(s, since)| {
         let fold = if *since >= LINGER_MS {
             (since - LINGER_MS) as f32 / fold_ms as f32
@@ -423,10 +507,18 @@ pub(crate) enum SubagentStackEvent {
 pub(crate) struct SubagentStack {
     state: Entity<AppState>,
     chat_id: Option<String>,
-    /// This chat's first replayed transcript has been scanned.
+    /// Scans of this chat now see changes as they happen.
     live: bool,
+    /// The chat's watch had replayed this many times when it was selected
+    /// with a cached transcript; `None` when it had none.
+    replays_at_select: Option<u64>,
     revision: Option<u64>,
+    /// The chat's user entries and unconfirmed echoes at the last scan.
+    prompts: usize,
     tracks: HashMap<String, Track>,
+    /// Tracks of chats switched away from, by chat id, so a return keeps
+    /// their clocks.
+    stashed: HashMap<String, HashMap<String, Track>>,
     subagents: Vec<Subagent>,
     run_active: bool,
     placement: Placement,
@@ -448,8 +540,11 @@ impl SubagentStack {
             state,
             chat_id: None,
             live: false,
+            replays_at_select: None,
             revision: None,
+            prompts: 0,
             tracks: HashMap::new(),
+            stashed: HashMap::new(),
             subagents: Vec::new(),
             run_active: false,
             placement: Placement::Chip,
@@ -500,29 +595,71 @@ impl SubagentStack {
         let now = Utc::now();
         let state = self.state.read(cx);
         if state.selected_chat != self.chat_id {
+            if let Some(left) = self.chat_id.take()
+                && !self.tracks.is_empty()
+            {
+                self.stashed.insert(left, std::mem::take(&mut self.tracks));
+            }
+            self.stashed
+                .retain(|chat_id, _| state.chats.iter().any(|chat| &chat.id == chat_id));
             self.chat_id = state.selected_chat.clone();
+            self.tracks = self
+                .chat_id
+                .as_ref()
+                .and_then(|chat_id| self.stashed.remove(chat_id))
+                .unwrap_or_default();
             self.live = false;
+            // A transcript already in place came from the cache: what is new
+            // in it, and in the replay that refreshes it, happened unwatched.
+            self.replays_at_select = state
+                .transcript_replayed
+                .then_some(state.transcript_replays);
             self.revision = None;
-            self.tracks.clear();
             self.subagents.clear();
             self.popup = popover::Popup::default();
         }
-        self.run_active = self.chat_id.as_deref().is_some_and(|chat_id| {
-            matches!(
-                state.indicator_for(chat_id, now),
-                Indicator::Working | Indicator::AwaitingInput
-            )
-        });
+        let active = |indicator: Indicator| {
+            matches!(indicator, Indicator::Working | Indicator::AwaitingInput)
+        };
+        self.run_active = self
+            .chat_id
+            .as_deref()
+            .is_some_and(|chat_id| active(state.indicator_for(chat_id, now)));
         // Before the replay lands the transcript is empty or only echoes;
         // scanning it would read every spawn as newly seen.
-        if self.chat_id.is_some()
+        if let Some(chat_id) = self.chat_id.as_deref()
             && state.transcript_replayed
             && self.revision != Some(state.transcript_revision)
         {
             self.revision = Some(state.transcript_revision);
+            let echoes = state.pending_echoes().len();
+            let prompts = echoes
+                + state
+                    .transcript
+                    .iter()
+                    .filter(|entry| entry.role == MessageRole::User)
+                    .count();
+            // The session's own state, not the send overlay, which reads
+            // Working for any prompt.
+            let session_active = active(crate::state::effective_indicator(
+                state.session_for(chat_id),
+                now,
+            ));
+            let scan = if !self.live {
+                Scan::Cold
+            } else if prompts > self.prompts
+                && starts_run(&state.transcript, echoes > 0, session_active)
+            {
+                Scan::NewRun
+            } else {
+                Scan::Live
+            };
+            self.prompts = prompts;
             let spawns = spawns(&state.transcript);
-            track(&mut self.tracks, &spawns, self.live, now.timestamp_millis());
-            self.live = true;
+            track(&mut self.tracks, &spawns, scan, now.timestamp_millis());
+            self.live = self
+                .replays_at_select
+                .is_none_or(|replays| replays != state.transcript_replays);
             self.subagents = subagents(&spawns, &self.tracks, |spawn| {
                 activity(spawn, state.sub_transcript(&spawn.doc_id))
             });
@@ -534,34 +671,48 @@ impl SubagentStack {
         }
     }
 
-    /// Tick once a second while anything shows: the clocks advance, finished
-    /// rows fold away, and a run that went quiet is noticed.
+    /// Tick while anything shows: once a second for the clocks and to notice
+    /// a run that went quiet, and as a lingering row starts to fold, so the
+    /// fold plays even when nothing else is drawing frames.
     fn ensure_tick(&mut self, cx: &mut Context<Self>) {
         if self.ticking {
             return;
         }
         self.ticking = true;
+        let mut delay = self.tick_delay();
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let showing = this
+                cx.background_executor().timer(delay).await;
+                let next = this
                     .update(cx, |stack, cx| {
                         stack.sync(cx);
-                        let showing = !stack.last.is_empty();
-                        if showing {
-                            cx.notify();
-                        } else {
+                        if stack.last.is_empty() {
                             stack.ticking = false;
+                            return None;
                         }
-                        showing
+                        cx.notify();
+                        Some(stack.tick_delay())
                     })
-                    .unwrap_or(false);
-                if !showing {
+                    .ok()
+                    .flatten();
+                let Some(next) = next else {
                     break;
-                }
+                };
+                delay = next;
             }
         })
         .detach();
+    }
+
+    fn tick_delay(&self) -> Duration {
+        // A frame past the fold's start, so the render that wakes sees it
+        // under way and keeps requesting frames until it ends.
+        const FRAME_MS: i64 = 16;
+        let ms = self
+            .last
+            .next_fold(Utc::now().timestamp_millis())
+            .map_or(1_000, |ms| (ms + FRAME_MS).min(1_000));
+        Duration::from_millis(ms as u64)
     }
 
     fn open(&mut self, event: SubagentStackEvent, cx: &mut Context<Self>) {
@@ -1032,6 +1183,11 @@ mod tests {
         }
     }
 
+    fn streaming(mut entry: SessionMessageEntry) -> SessionMessageEntry {
+        entry.status = Some(MessageStatus::Streaming);
+        entry
+    }
+
     #[test]
     fn running_subagents_take_four_rows_and_the_rest_wait_behind_more() {
         let mut all: Vec<Subagent> = (1..=6)
@@ -1049,6 +1205,32 @@ mod tests {
         );
         assert_eq!((shown.more, shown.done, shown.running()), (2, 1, 6));
         assert_eq!(shown.finished(), 3);
+    }
+
+    #[test]
+    fn a_finish_past_the_cap_stays_in_done_while_earlier_rows_fold() {
+        // Three of four parallel subagents finish a second apart: the third
+        // finds both finished rows taken and goes straight into "N done".
+        let all = [
+            sub("a", SubagentStatus::Done, Some(20_000)),
+            sub("b", SubagentStatus::Done, Some(21_000)),
+            sub("c", SubagentStatus::Done, Some(22_000)),
+            sub("d", SubagentStatus::Running, None),
+        ];
+        let mut done = 0;
+        for now in (22_000..=28_000).step_by(50) {
+            let shown = stack(&all, true, FOLD_MS, now);
+            assert!(!ids(&shown).contains(&"c"), "c came back at {now}");
+            assert!(shown.done >= done, "done went down at {now}");
+            done = shown.done;
+            // The tick wakes as the next row starts to fold.
+            if let Some(ms) = shown.next_fold(now) {
+                let row_folds = stack(&all, true, FOLD_MS, now + ms + 16);
+                assert!(row_folds.folding() || row_folds.rows.len() < shown.rows.len());
+            }
+        }
+        let settled = stack(&all, true, FOLD_MS, 28_000);
+        assert_eq!((ids(&settled), settled.done), (vec!["d"], 3));
     }
 
     #[test]
@@ -1102,7 +1284,7 @@ mod tests {
         ];
         let found = spawns(&transcript);
         let mut tracks = HashMap::new();
-        track(&mut tracks, &found, false, 70_000);
+        track(&mut tracks, &found, Scan::Cold, 70_000);
         let all = subagents(&found, &tracks, |_| None);
         // Running clocks start with the turn that spawned them.
         assert_eq!(all[2].started_at, 61_000);
@@ -1121,6 +1303,143 @@ mod tests {
     }
 
     #[test]
+    fn a_new_prompt_starts_a_run_and_a_steer_keeps_it() {
+        let reply = |status: SubagentStatus| {
+            turn(
+                "a1",
+                MessageRole::Assistant,
+                1_000,
+                vec![
+                    spawn_part("p", SubagentStatus::Done),
+                    spawn_part("q", status),
+                ],
+            )
+        };
+        let user = |id: &str, at| turn(id, MessageRole::User, at, vec![]);
+        let done = |tracks: &HashMap<String, Track>, found: &[Spawn]| {
+            stack(&subagents(found, tracks, |_| None), true, FOLD_MS, 90_000).done
+        };
+
+        // The run ended with both finished. A prompt sent now starts the
+        // next run while it is still only an echo: the old "2 done" stays
+        // gone instead of coming back under it.
+        let ended = vec![user("u1", 0), reply(SubagentStatus::Done)];
+        assert!(starts_run(&ended, true, false));
+        let found = spawns(&ended);
+        let mut tracks = HashMap::new();
+        track(&mut tracks, &found, Scan::Cold, 60_000);
+        assert_eq!(done(&tracks, &found), 2);
+        track(&mut tracks, &found, Scan::NewRun, 61_000);
+        assert_eq!(done(&tracks, &found), 0);
+
+        // Mid-run, p done and q at work. A steer lands behind the streaming
+        // reply and starts nothing, as an echo or once written back.
+        let working = vec![user("u1", 0), streaming(reply(SubagentStatus::Running))];
+        assert!(!starts_run(&working, true, true));
+        let mut steered = working.clone();
+        steered.push(user("u2", 5_000));
+        assert!(!starts_run(&steered, false, true));
+        // Opened cold mid-steer, the steer isn't taken for a run's start.
+        assert!(spawns(&steered).iter().all(|spawn| spawn.current_run));
+        // A reply left streaming by a run that died doesn't make a steer.
+        assert!(starts_run(&steered, false, false));
+
+        let mut tracks = HashMap::new();
+        track(&mut tracks, &spawns(&working), Scan::Cold, 60_000);
+        // The reply ends at the steer and the next one streams: the steer
+        // now reads like any prompt in the transcript, but the run goes on,
+        // and q finishing joins p in "N done".
+        let after = vec![
+            user("u1", 0),
+            reply(SubagentStatus::Done),
+            user("u2", 5_000),
+            streaming(turn("a2", MessageRole::Assistant, 6_000, vec![])),
+        ];
+        let found = spawns(&after);
+        assert!(found.iter().all(|spawn| !spawn.current_run));
+        track(&mut tracks, &found, Scan::Live, 62_000);
+        assert_eq!(done(&tracks, &found), 2);
+    }
+
+    #[gpui::test]
+    fn a_prompt_sent_after_a_run_leaves_its_done_line_behind(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("c".into());
+            state
+        });
+        let view = cx.new(|cx| SubagentStack::new(state.clone(), cx));
+        let session = |status| zeron_proto::Session {
+            last_completed_turn: None,
+            chat_id: "c".into(),
+            device_id: "dev".into(),
+            status,
+            started_at: None,
+            updated_at: Utc::now(),
+        };
+        state.update(cx, |state, cx| {
+            state.apply_sessions(vec![session(zeron_proto::SessionStatus::Working)]);
+            state.apply_transcript(vec![
+                turn("u1", MessageRole::User, 0, vec![]),
+                turn(
+                    "a1",
+                    MessageRole::Assistant,
+                    1_000,
+                    vec![
+                        spawn_part("p", SubagentStatus::Done),
+                        spawn_part("q", SubagentStatus::Done),
+                    ],
+                ),
+            ]);
+            cx.notify();
+        });
+        view.read_with(cx, |view, _| assert_eq!(view.last.done, 2));
+        state.update(cx, |state, cx| {
+            state.apply_sessions(vec![session(zeron_proto::SessionStatus::Idle)]);
+            cx.notify();
+        });
+        view.read_with(cx, |view, _| assert!(view.last.is_empty()));
+
+        // The send overlay reads Working at once, before the host writes the
+        // prompt back; the last run's "2 done" must not return under it.
+        state.update(cx, |state, cx| {
+            state.push_echo("c", turn("u2", MessageRole::User, 90_000, vec![]));
+            state.begin_pending_send("c", "u2", Utc::now());
+            cx.notify();
+        });
+        view.read_with(cx, |view, _| {
+            assert!(view.run_active);
+            assert!(view.last.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_clock_keeps_its_base_over_scans_of_what_happened_unwatched() {
+        let reply = |parts| vec![turn("a1", MessageRole::Assistant, 1_000, parts)];
+        // Watched from five minutes into the turn: its clock starts then.
+        let mut tracks = HashMap::new();
+        track(&mut tracks, &[], Scan::Cold, 300_000);
+        let watched = spawns(&reply(vec![spawn_part("w", SubagentStatus::Running)]));
+        track(&mut tracks, &watched, Scan::Live, 300_000);
+
+        // Back from elsewhere (cached copy, then its fresh replay): w keeps
+        // its base, n spawned meanwhile counts from its turn instead of from
+        // zero, and x finished meanwhile shows no fresh check.
+        let returned = spawns(&reply(vec![
+            spawn_part("w", SubagentStatus::Running),
+            spawn_part("n", SubagentStatus::Running),
+            spawn_part("x", SubagentStatus::Done),
+        ]));
+        track(&mut tracks, &returned, Scan::Cold, 400_000);
+        track(&mut tracks, &returned, Scan::Cold, 400_500);
+        let all = subagents(&returned, &tracks, |_| None);
+        let base = |id: &str| all.iter().find(|s| s.doc_id == id).unwrap().started_at;
+        assert_eq!((base("w"), base("n")), (300_000, 1_000));
+        let shown = stack(&all, true, FOLD_MS, 400_500);
+        assert_eq!((ids(&shown), shown.done), (vec!["w", "n"], 1));
+    }
+
+    #[test]
     fn only_a_finish_seen_live_lingers() {
         let transcript = |status| {
             vec![turn(
@@ -1133,7 +1452,7 @@ mod tests {
         // Opening a chat whose subagent already finished: no check lingers.
         let found = spawns(&transcript(SubagentStatus::Done));
         let mut tracks = HashMap::new();
-        track(&mut tracks, &found, false, 50_000);
+        track(&mut tracks, &found, Scan::Cold, 50_000);
         let shown = stack(&subagents(&found, &tracks, |_| None), true, FOLD_MS, 50_000);
         assert!(shown.rows.is_empty());
         assert_eq!(shown.done, 1);
@@ -1141,9 +1460,9 @@ mod tests {
         // Watching it run, then finish: the check stays for the linger.
         let mut tracks = HashMap::new();
         let running = spawns(&transcript(SubagentStatus::Running));
-        track(&mut tracks, &running, false, 50_000);
+        track(&mut tracks, &running, Scan::Cold, 50_000);
         let finished = spawns(&transcript(SubagentStatus::Done));
-        track(&mut tracks, &finished, true, 52_000);
+        track(&mut tracks, &finished, Scan::Live, 52_000);
         let all = subagents(&finished, &tracks, |_| None);
         assert_eq!(ids(&stack(&all, true, FOLD_MS, 53_000)), ["x"]);
         assert!(
