@@ -260,7 +260,8 @@ pub struct Home {
     chip_in: HashMap<String, Instant>,
     card_in: HashMap<String, Instant>,
     drag: Option<CardDrag>,
-    /// Each shown card's bounds from the last frame (Customize only).
+    /// Each shown card's bounds from the last frame: their heights lay out
+    /// the grid, and Customize's drag hit-tests them.
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
@@ -1308,7 +1309,6 @@ impl Home {
     pub(crate) fn toggle_customize(&mut self, cx: &mut Context<Self>) {
         self.customize = !self.customize;
         self.drag = None;
-        self.card_bounds.borrow_mut().clear();
         self.sync_quiet(cx);
         cx.notify();
     }
@@ -1628,30 +1628,25 @@ fn drop_target(all: &[&str], shown: &[&str], id: &str, over: usize) -> usize {
     }
 }
 
-/// Grid cells, `(row, column)` from 0, for cards of these widths, packed like
-/// CSS `grid-auto-flow: row dense`: each card takes the first free cell from
-/// the top, so a wide card after an odd one doesn't leave a hole.
-fn dense_cells(widths: &[u8], columns: u16) -> Vec<(u16, u16)> {
+/// Where each card goes in `columns` columns, as `(column, top)`, and the
+/// grid's height: in order, each card goes into the shortest column (a wide
+/// card into the lowest pair side by side, the leftmost on a tie), so a short
+/// card never leaves a gap under it the height of a tall neighbour.
+fn masonry(widths: &[u8], heights: &[f32], columns: u16, gap: f32) -> (Vec<(u16, f32)>, f32) {
     let columns = usize::from(columns.max(1));
-    let mut taken: Vec<Vec<bool>> = Vec::new();
-    let mut cells = Vec::with_capacity(widths.len());
-    for &width in widths {
+    let mut stacks = vec![0.0_f32; columns];
+    let mut places = Vec::with_capacity(widths.len());
+    for (&width, &height) in widths.iter().zip(heights) {
         let span = usize::from(width).clamp(1, columns);
-        let mut row = 0;
-        loop {
-            if taken.len() <= row {
-                taken.push(vec![false; columns]);
-            }
-            let free = (0..=columns - span).find(|&col| (col..col + span).all(|c| !taken[row][c]));
-            if let Some(col) = free {
-                taken[row][col..col + span].fill(true);
-                cells.push((row as u16, col as u16));
-                break;
-            }
-            row += 1;
-        }
+        let (column, top) = (0..=columns - span)
+            .map(|c| (c, stacks[c..c + span].iter().copied().fold(0.0, f32::max)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap_or((0, 0.0));
+        stacks[column..column + span].fill(top + height + gap);
+        places.push((column as u16, top));
     }
-    cells
+    let bottom = stacks.iter().copied().fold(0.0, f32::max);
+    (places, (bottom - gap).max(0.0))
 }
 
 /// The login shell's PATH joined after the app's own, as the harnesses

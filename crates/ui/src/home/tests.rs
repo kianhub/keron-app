@@ -303,14 +303,16 @@ fn a_dropped_card_lands_between_the_right_widgets_when_some_are_hidden() {
 }
 
 #[test]
-fn wide_cards_pack_densely() {
-    // narrow, wide, narrow, narrow in two columns: the third card fills the
-    // hole the wide one left beside the first.
-    assert_eq!(
-        dense_cells(&[1, 2, 1, 1], 2),
-        vec![(0, 0), (1, 0), (0, 1), (2, 0)]
-    );
-    assert_eq!(dense_cells(&[2, 1], 1), vec![(0, 0), (1, 0)]);
+fn short_cards_leave_no_gap_under_a_tall_neighbour() {
+    // Loose ends and Slack (short), Memory (wide and tall), then Usage in four
+    // columns: Usage goes under the shorter of the two, not below Memory.
+    let (places, height) = masonry(&[1, 1, 2, 1], &[110.0, 70.0, 380.0, 220.0], 4, 10.0);
+    assert_eq!(places, vec![(0, 0.0), (1, 0.0), (2, 0.0), (1, 80.0)]);
+    assert_eq!(height, 380.0);
+    // One column: a plain stack, wide cards included.
+    let (places, height) = masonry(&[2, 1], &[50.0, 40.0], 1, 10.0);
+    assert_eq!(places, vec![(0, 0.0), (0, 60.0)]);
+    assert_eq!(height, 100.0);
 }
 
 /// What the fake banner and record hooks saw.
