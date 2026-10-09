@@ -17,6 +17,7 @@ pub enum UiFontFamily {
     #[default]
     Geist,
     GeistMono,
+    JetBrainsMono,
     System,
     Installed(String),
 }
@@ -26,6 +27,7 @@ impl UiFontFamily {
         match self {
             Self::Geist => "Geist",
             Self::GeistMono => "Geist Mono",
+            Self::JetBrainsMono => "JetBrains Mono",
             Self::System => "System UI",
             Self::Installed(name) => name,
         }
@@ -35,6 +37,7 @@ impl UiFontFamily {
         match self {
             Self::Geist => "Geist",
             Self::GeistMono => "Geist Mono",
+            Self::JetBrainsMono => "JetBrains Mono",
             Self::System => ".SystemUIFont",
             Self::Installed(name) => name,
         }
@@ -49,6 +52,7 @@ impl Serialize for UiFontFamily {
         match self {
             Self::Geist => serializer.serialize_str("geist"),
             Self::GeistMono => serializer.serialize_str("geistMono"),
+            Self::JetBrainsMono => serializer.serialize_str("jetbrainsMono"),
             Self::System => serializer.serialize_str("system"),
             Self::Installed(name) => serializer.serialize_str(&format!("installed:{name}")),
         }
@@ -64,6 +68,7 @@ impl<'de> Deserialize<'de> for UiFontFamily {
         Ok(match value.as_str() {
             "geist" => Self::Geist,
             "geistMono" => Self::GeistMono,
+            "jetbrainsMono" => Self::JetBrainsMono,
             "system" => Self::System,
             // Preserve selections written by the previous fixed catalog. They
             // now resolve only when the family is installed on this device.
@@ -137,6 +142,7 @@ pub fn clamp_font_size(size: f32) -> f32 {
 pub struct FontAvailability {
     geist: bool,
     geist_mono: bool,
+    jetbrains_mono: bool,
     choices: Vec<UiFontFamily>,
     fixed_width: Vec<UiFontFamily>,
 }
@@ -147,15 +153,18 @@ impl FontAvailability {
         Self {
             geist: true,
             geist_mono: true,
+            jetbrains_mono: true,
             choices: vec![
                 UiFontFamily::Geist,
                 UiFontFamily::GeistMono,
+                UiFontFamily::JetBrainsMono,
                 UiFontFamily::System,
                 UiFontFamily::Installed("Arial".into()),
                 UiFontFamily::Installed("Menlo".into()),
             ],
             fixed_width: vec![
                 UiFontFamily::GeistMono,
+                UiFontFamily::JetBrainsMono,
                 UiFontFamily::Installed("Menlo".into()),
             ],
         }
@@ -174,6 +183,7 @@ impl FontAvailability {
         match family {
             UiFontFamily::Geist => self.geist,
             UiFontFamily::GeistMono => self.geist_mono,
+            UiFontFamily::JetBrainsMono => self.jetbrains_mono,
             UiFontFamily::System => true,
             UiFontFamily::Installed(_) => self.choices.contains(family),
         }
@@ -207,6 +217,7 @@ impl FontAvailability {
         match family {
             UiFontFamily::Geist => self.geist = false,
             UiFontFamily::GeistMono => self.geist_mono = false,
+            UiFontFamily::JetBrainsMono => self.jetbrains_mono = false,
             UiFontFamily::System => {}
             UiFontFamily::Installed(_) => self.choices.retain(|choice| choice != family),
         }
@@ -220,6 +231,7 @@ impl Default for FontAvailability {
         Self {
             geist: false,
             geist_mono: false,
+            jetbrains_mono: false,
             choices: vec![UiFontFamily::System],
             fixed_width: Vec::new(),
         }
@@ -270,6 +282,18 @@ const GEIST_MONO: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/GeistMono-SemiBoldItalic.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
     include_bytes!("../assets/fonts/GeistMono-BoldItalic.ttf"),
+];
+
+/// JetBrains Mono 2.304 (OFL 1.1), offered for the terminal and code.
+const JETBRAINS_MONO: [&[u8]; 8] = [
+    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-MediumItalic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-SemiBoldItalic.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
 /// Font faces shared by the interface and SVG text-to-path conversion.
@@ -361,17 +385,19 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         .all_font_names()
         .into_iter()
         .filter(|name| !name.starts_with('.'))
-        .filter(|name| name != "Geist" && name != "Geist Mono")
+        .filter(|name| !matches!(name.as_str(), "Geist" | "Geist Mono" | "JetBrains Mono"))
         .filter(|name| families_with_latin_metrics.contains_key(name))
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
+    let jetbrains_mono = register_family(cx, &UiFontFamily::JetBrainsMono, &JETBRAINS_MONO);
     let mut choices = vec![
         UiFontFamily::Geist,
         UiFontFamily::GeistMono,
+        UiFontFamily::JetBrainsMono,
         UiFontFamily::System,
     ];
-    let mut fixed_width = vec![UiFontFamily::GeistMono];
+    let mut fixed_width = vec![UiFontFamily::GeistMono, UiFontFamily::JetBrainsMono];
     for name in system_names {
         if families_with_latin_metrics.get(&name) == Some(&true) {
             fixed_width.push(UiFontFamily::Installed(name.clone()));
@@ -381,6 +407,7 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
     FontAvailability {
         geist,
         geist_mono,
+        jetbrains_mono,
         choices,
         fixed_width,
     }
@@ -812,12 +839,34 @@ mod tests {
     fn catalog_keeps_bundled_and_virtual_choices_first() {
         let availability = FontAvailability::all();
         assert_eq!(
-            availability.choices()[..3],
+            availability.choices()[..4],
             [
                 UiFontFamily::Geist,
                 UiFontFamily::GeistMono,
+                UiFontFamily::JetBrainsMono,
                 UiFontFamily::System
             ]
+        );
+    }
+
+    #[test]
+    fn jetbrains_mono_is_a_saved_terminal_choice_with_a_mono_fallback() {
+        let saved = serde_json::to_string(&UiFontFamily::JetBrainsMono).unwrap();
+        assert_eq!(saved, r#""jetbrainsMono""#);
+        assert_eq!(
+            serde_json::from_str::<UiFontFamily>(&saved).unwrap(),
+            UiFontFamily::JetBrainsMono
+        );
+        let availability = FontAvailability::all();
+        assert_eq!(
+            resolve_effective_mono(&UiFontFamily::JetBrainsMono, &availability, true),
+            UiFontFamily::JetBrainsMono
+        );
+        // Without the bundled faces the terminal keeps a mono face.
+        let without = availability.without(&UiFontFamily::JetBrainsMono);
+        assert_eq!(
+            resolve_effective_mono(&UiFontFamily::JetBrainsMono, &without, true),
+            UiFontFamily::GeistMono
         );
     }
 

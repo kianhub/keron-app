@@ -4338,13 +4338,20 @@ mod tests {
     fn font_options_appear_once_in_stable_order() {
         let catalog = FontAvailability::all();
         let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
-        assert_eq!(labels.len(), 5);
+        assert_eq!(labels.len(), 6);
         assert_eq!(
             labels,
-            ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]
+            [
+                "Geist",
+                "Geist Mono",
+                "JetBrains Mono",
+                "System UI",
+                "Arial",
+                "Menlo"
+            ]
         );
         let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), 5);
+        assert_eq!(unique.len(), 6);
     }
 
     #[test]
@@ -4355,7 +4362,7 @@ mod tests {
             .iter()
             .map(UiFontFamily::label)
             .collect();
-        assert_eq!(terminal, ["Geist Mono", "Menlo"]);
+        assert_eq!(terminal, ["Geist Mono", "JetBrains Mono", "Menlo"]);
 
         for kind in [FontKind::Ui, FontKind::Code] {
             assert_eq!(kind.choices_for(&all), all.choices());
@@ -4430,6 +4437,7 @@ mod tests {
             vec![
                 UiFontFamily::Installed("Menlo".into()),
                 UiFontFamily::GeistMono,
+                UiFontFamily::JetBrainsMono,
                 UiFontFamily::System,
             ]
         );
