@@ -10,7 +10,8 @@
 //! Wiring: [`init`] registers the global action handlers (run once at boot),
 //! [`bind_keys`] installs the fixed application shortcuts (re-run by
 //! `shell::apply_keymap`, which clears every binding first), and
-//! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
+//! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`,
+//! and again by `shell::apply_keymap` so the items show rebound combos.
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
@@ -209,9 +210,11 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
         ]),
     ];
-    // Appearance lives under View on every platform — it is the only View verb
-    // today, but "Appearance" as a top-level menu would read oddly next to Edit.
+    // View holds where to look (Home) and how it looks (Appearance) on every
+    // platform; "Appearance" as a top-level menu would read oddly next to Edit.
     menus.push(Menu::new("View").items([
+        MenuItem::action("Show Home", shell::ShowHome),
+        MenuItem::separator(),
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
@@ -329,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_offers_all_three_appearance_modes() {
+    fn view_menu_offers_home_and_all_three_appearance_modes() {
         let menus = app_menus();
         let view = menus
             .iter()
@@ -338,6 +341,7 @@ mod tests {
         assert_eq!(
             action_names(view),
             vec![
+                shell::ShowHome.name(),
                 AppearanceSystem.name(),
                 AppearanceLight.name(),
                 AppearanceDark.name()
