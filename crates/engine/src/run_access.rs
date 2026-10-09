@@ -29,7 +29,11 @@
 //! the owner turns full access on mid-turn, a harness that asks approves
 //! what's waiting and stops asking for the rest of the run
 //! (`zeron_harness::permissions::approve`). Its sandbox and CLI flags stay
-//! as the run started them; those change from the next turn.
+//! as the run started them; those change from the next turn. A turn that
+//! started with full access keeps it until it ends. A prompt that starts the
+//! next turn in a warm runtime started with other access (a steer between
+//! turns) replaces the runtime first ([`still_applies`]), the way a fresh
+//! dispatch does.
 
 use tokio::sync::watch;
 use zeron_proto::{ChatConfig, RunRequest, SandboxLevel};
@@ -39,13 +43,33 @@ use crate::workspace_host::WorkspaceHost;
 /// Fit `request`'s sandbox and auto-approve flag to the session's choice.
 /// `session` is the chat row's config; a missing row or config asks.
 pub(crate) fn apply(request: &mut RunRequest, session: Option<&ChatConfig>) {
+    (request.sandbox, request.auto_approve) = fit(request.sandbox, session);
+}
+
+/// Whether a live runtime started with `sandbox` and `auto_approve` still
+/// has the access its session gives a run now ([`apply`]). A runtime keeps
+/// the access it started with (the CLI's flags, the sandbox), so a new turn
+/// in one that doesn't would run with the old access.
+pub(crate) fn still_applies(
+    sandbox: SandboxLevel,
+    auto_approve: bool,
+    session: Option<&ChatConfig>,
+) -> bool {
+    fit(sandbox, session) == (sandbox, auto_approve)
+}
+
+/// The sandbox and auto-approve flag a run asking for `sandbox` gets under
+/// the session's choice.
+fn fit(sandbox: SandboxLevel, session: Option<&ChatConfig>) -> (SandboxLevel, bool) {
     let full = session.is_some_and(|c| c.sandbox == SandboxLevel::DangerFullAccess);
-    if full {
-        request.sandbox = SandboxLevel::DangerFullAccess;
-    } else if request.sandbox == SandboxLevel::DangerFullAccess {
-        request.sandbox = SandboxLevel::WorkspaceWrite;
-    }
-    request.auto_approve = full;
+    let sandbox = if full {
+        SandboxLevel::DangerFullAccess
+    } else if sandbox == SandboxLevel::DangerFullAccess {
+        SandboxLevel::WorkspaceWrite
+    } else {
+        sandbox
+    };
+    (sandbox, full)
 }
 
 /// Keep a live run's view of its session's full access (`access`) in step

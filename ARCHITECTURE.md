@@ -72,7 +72,10 @@ Single binary `zeron`:
   follows the session's enforced row live (`run_access::follow` → `RunControls::access`), and
   Claude Code and Codex approve what's waiting and stop asking for the rest of the run
   (`zeron_harness::permissions::approve`). The sandbox and CLI flags stay as the run started them
-  until the next turn. Turning it off applies from the next turn.
+  until the next turn. Turned off, approvals ask again from the next one, but a turn that started
+  with full access keeps it until it ends. A prompt that starts the next turn in a warm runtime
+  started with other access (a steer between turns) replaces the runtime first, as a dispatch does
+  (`SessionsEngine::steer_at`, `run_access::still_applies`).
   The hidden voice orchestrator chat runs its own injected Keron MCP tools unasked: the host
   marks that one server `approve_tools` for chats whose id has the orchestrator prefix
   (`Inner::zeron_mcp`), which Claude spells `--allowedTools mcp__zeron` and Codex

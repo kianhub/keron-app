@@ -827,7 +827,8 @@ impl SessionsEngine {
     }
 
     /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
-    /// steerable run exists — the caller (command executor) dispatches a new turn.
+    /// steerable run exists, or when it would start the next turn with access its
+    /// session no longer gives — the caller (command executor) dispatches a new turn.
     pub async fn steer(
         &self,
         chat_id: &str,
@@ -854,11 +855,26 @@ impl SessionsEngine {
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                     h.fork_history_sent.clone(),
+                    (h.runtime_config.sandbox, h.runtime_config.auto_approve),
                 )
             });
-        let Some((run_id, harness_id, steer_tx, ledger, history_sent)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger, history_sent, (sandbox, auto_approve))) =
+            target
+        else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        // Between turns this prompt starts the next turn, which runs with the
+        // session's access as it is now (`run_access`). A runtime started
+        // with other access would run it with its old CLI flags and sandbox,
+        // full access included, so the caller's fresh dispatch replaces it.
+        // A steer into a turn still running joins that turn as it started.
+        if !self.turn_in_flight(chat_id)
+            && !self
+                .inner
+                .access_still_applies(chat_id, sandbox, auto_approve)
+        {
+            return Ok(SteerOutcome::NotSteerable);
+        }
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -1392,6 +1408,18 @@ impl Inner {
     fn apply_session_access(&self, chat_id: &str, request: &mut RunRequest) {
         let session = self.workspace().and_then(|ws| ws.session_config(chat_id));
         crate::run_access::apply(request, session.as_ref());
+    }
+
+    /// Whether a live runtime started with `sandbox` and `auto_approve` still
+    /// has the access the session gives a run now.
+    fn access_still_applies(
+        &self,
+        chat_id: &str,
+        sandbox: zeron_proto::SandboxLevel,
+        auto_approve: bool,
+    ) -> bool {
+        let session = self.workspace().and_then(|ws| ws.session_config(chat_id));
+        crate::run_access::still_applies(sandbox, auto_approve, session.as_ref())
     }
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {

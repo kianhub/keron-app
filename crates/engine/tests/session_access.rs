@@ -638,3 +638,190 @@ async fn full_access_turned_on_mid_run_approves_only_that_sessions_waiting_appro
         assert_eq!(outcome, Some((chat.to_owned(), false)));
     }
 }
+
+/// What a [`Parker`] runtime was handed: a fresh run, or a prompt steered
+/// into the warm one.
+#[derive(Debug, PartialEq)]
+enum Turn {
+    Run(String, SandboxLevel, bool),
+    Steer(String),
+}
+
+/// A steerable runtime that stays warm between turns, the way Claude Code
+/// and Codex do. A prompt starting with "hold" keeps its turn running until
+/// the next steer joins it; every other turn ends at once.
+struct Parker(tokio::sync::mpsc::UnboundedSender<Turn>);
+
+#[async_trait]
+impl Harness for Parker {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Parker"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let turns = self.0.clone();
+        let _ = turns.send(Turn::Run(
+            request.prompt.clone(),
+            request.sandbox,
+            request.auto_approve,
+        ));
+        let done = || {
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+        };
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let RunControls {
+                mut steering,
+                interrupt,
+                ..
+            } = controls;
+            if !request.prompt.starts_with("hold") {
+                let _ = events.send(done());
+            }
+            loop {
+                tokio::select! {
+                    () = interrupt.cancelled() => return,
+                    message = steering.recv() => {
+                        let Some(message) = message else { return };
+                        let _ = turns.send(Turn::Steer(message.prompt));
+                        let _ = events.send(Ok(AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        }));
+                        let _ = events.send(done());
+                    }
+                }
+            }
+        });
+        Ok(futures::stream::unfold(
+            rx,
+            |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+        )
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_steer_between_turns_runs_with_the_access_the_session_has_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (turns_tx, mut turns) = tokio::sync::mpsc::unbounded_channel();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Parker(turns_tx)));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let set_access = |sandbox: &'static str| {
+        client.call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig", "chatId": "s",
+                "config": { "harness": "mock", "sandbox": sandbox },
+            }),
+        )
+    };
+    let handle = core.doc_host.open("s").unwrap();
+    // A steer from any client: Steer on a queued row, an agent's
+    // `send_message` with mode "steer".
+    let steer = |id: &str| {
+        handle
+            .doc()
+            .queue_command(&SessionCommandEntry {
+                id: format!("cmd-{id}"),
+                payload: SessionCommandPayload::Steer {
+                    prompt: id.into(),
+                    message_id: Some(format!("m-{id}")),
+                },
+                issued_by: "viewer-device".into(),
+                issued_at: chrono::Utc::now().timestamp_millis(),
+                based_on: None,
+                expires_at: None,
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap()
+    };
+    let mut next_turn = async || {
+        tokio::time::timeout(Duration::from_secs(5), turns.recv())
+            .await
+            .expect("the prompt reached the agent")
+            .unwrap()
+    };
+    let between_turns = async || {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.sessions.turn_in_flight("s") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn ended")
+    };
+
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "s", "deviceId": core.device_id, "cwd": "/tmp",
+                "config": { "harness": "mock", "sandbox": "workspace-write" },
+            }),
+        )
+        .await
+        .unwrap();
+    set_access("danger-full-access").await.unwrap();
+    core.sessions
+        .dispatch(
+            "s",
+            HarnessId::Mock,
+            RunRequest {
+                prompt: "hold first".into(),
+                ..request(SandboxLevel::WorkspaceWrite, false)
+            },
+            Some("m-first".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next_turn().await,
+        Turn::Run("hold first".into(), SandboxLevel::DangerFullAccess, true)
+    );
+
+    // Turned off mid-turn: a steer joins the running turn as it started.
+    set_access("workspace-write").await.unwrap();
+    steer("join");
+    assert_eq!(next_turn().await, Turn::Steer("join".into()));
+    between_turns().await;
+
+    // The next turn asks: the warm runtime started with full access is
+    // replaced, not handed the prompt.
+    steer("next");
+    assert_eq!(
+        next_turn().await,
+        Turn::Run("next".into(), SandboxLevel::WorkspaceWrite, false)
+    );
+    between_turns().await;
+
+    // A runtime whose access still holds keeps taking prompts warm.
+    steer("again");
+    assert_eq!(next_turn().await, Turn::Steer("again".into()));
+}
