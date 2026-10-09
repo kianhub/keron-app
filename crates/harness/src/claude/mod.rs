@@ -16,7 +16,10 @@
 //!   alone starts the CLI with `--dangerously-skip-permissions`. Asking
 //!   sessions run in `acceptEdits`, so file edits in the working directory
 //!   don't ask; a pre-approved injected server's tools don't either;
-//!   `AskUserQuestion` round-trips through the same bridge either way.
+//!   `AskUserQuestion` round-trips through the same bridge either way. Full
+//!   access turned on mid-run ([`RunControls::access`]) allows the waiting
+//!   and later tool calls without asking; the CLI keeps the flags it started
+//!   with until the next turn starts a new one.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -782,6 +785,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        access,
     } = controls;
     let request_input = Arc::new(request_input);
 
@@ -830,7 +834,9 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, full_access, &request_input, &stdin_tx);
+                            handle_control_request(
+                                req, full_access, &access, &request_input, &stdin_tx,
+                            );
                         }
                         continue;
                     }
@@ -992,24 +998,23 @@ async fn run_session(session: Session) {
     }
 }
 
-type RequestInputFn = Box<
-    dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
-        + Send
-        + Sync,
->;
+type RequestInputFn = Box<crate::RequestInput>;
 
 /// Serve one `can_use_tool` control request (the CLI blocks until SOME
 /// response arrives, so every request must be answered). With full access
-/// every tool is allowed outright. Otherwise the tool call becomes a yes/no
-/// approval question through the engine's input bridge, and anything but
-/// "Yes" denies it. `AskUserQuestion` is intercepted in both modes — surface
-/// the questions through the input bridge (which owns the
+/// every tool is allowed outright: chosen before the run (`full_access`, the
+/// CLI's own flags) or turned on while it works (`access`). Otherwise the
+/// tool call becomes a yes/no approval question through the engine's input
+/// bridge ([`crate::permissions::approve`]), and anything but "Yes" denies
+/// it. `AskUserQuestion` is intercepted in both modes — surface the
+/// questions through the input bridge (which owns the
 /// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
 /// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// by question text, as the tool expects. Full access never answers it.
 fn handle_control_request(
     req: ControlRequestFrame,
     full_access: bool,
+    access: &crate::LiveAccess,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -1020,26 +1025,23 @@ fn handle_control_request(
         );
         return;
     }
-    if req.request.tool_name != "AskUserQuestion" && full_access {
+    if req.request.tool_name != "AskUserQuestion" && (full_access || access.full()) {
         let line = control_response_line(&req.request_id, allow_response(req.request.input));
         let _ = stdin_tx.send(StdinMsg::Line(line));
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
         let request_input = Arc::clone(request_input);
+        let mut access = access.clone();
         let stdin_tx = stdin_tx.clone();
         tokio::spawn(async move {
             let question = tool_question(&req.request.tool_name, &req.request.input);
-            // A dropped sender (caller went away) is a refusal, never a
-            // silent allow.
-            let answers = (request_input)(vec![question.clone()])
-                .await
-                .unwrap_or_default();
-            let response = if crate::permissions::approved(&question, &answers) {
-                allow_response(req.request.input)
-            } else {
-                deny_response("The user declined this tool call.")
-            };
+            let response =
+                if crate::permissions::approve(&**request_input, &mut access, question).await {
+                    allow_response(req.request.input)
+                } else {
+                    deny_response("The user declined this tool call.")
+                };
             let line = control_response_line(&req.request_id, response);
             let _ = stdin_tx.send(StdinMsg::Line(line));
         });

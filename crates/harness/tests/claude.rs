@@ -12,7 +12,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::{
-    CancellationToken, ClaudeHarness, Harness, HarnessError, RunControls, SteerMessage,
+    CancellationToken, ClaudeHarness, Harness, HarnessError, LiveAccess, RunControls, SteerMessage,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
@@ -76,6 +76,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        access: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -309,6 +310,7 @@ fn recording_controls(
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     (controls, asked, steer_tx)
 }
@@ -375,6 +377,7 @@ async fn an_unanswered_approval_is_a_denial() {
         request_input: Box::new(|_| oneshot::channel().1),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     let events = run_to_end(&harness(), req, controls).await;
     assert_eq!(
@@ -416,12 +419,107 @@ async fn approvals_and_agent_questions_interleave_in_a_session_that_asks() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     let events = run_to_end(&harness(), req, controls).await;
     let asked = asked.lock().unwrap().clone();
     let headers: Vec<_> = asked.iter().map(|q| q.header.as_str()).collect();
     assert_eq!(headers, ["Approve command", "Choice"], "{asked:?}");
-    assert_eq!(final_result(&events).as_deref(), Some("answered"), "{events:?}");
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("answered"),
+        "{events:?}"
+    );
+}
+
+/// Every question asked so far, each with its answer slot: the test answers
+/// by hand, or never.
+type Waiting = Arc<Mutex<Vec<(UserInputQuestion, oneshot::Sender<Vec<UserInputAnswer>>)>>>;
+
+/// Controls whose `request_input` answers nothing by itself.
+fn waiting_controls(access: LiveAccess) -> (RunControls, Waiting, mpsc::Sender<SteerMessage>) {
+    let waiting: Waiting = Arc::default();
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let slots = waiting.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |mut questions| {
+            assert_eq!(questions.len(), 1, "{questions:?}");
+            let (tx, rx) = oneshot::channel();
+            slots.lock().unwrap().push((questions.remove(0), tx));
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+        access,
+    };
+    (controls, waiting, steer_tx)
+}
+
+/// The questions asked once there are `count` of them.
+async fn asked(waiting: &Waiting, count: usize) -> Vec<UserInputQuestion> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            {
+                let waiting = waiting.lock().unwrap();
+                if waiting.len() >= count {
+                    return waiting.iter().map(|(q, _)| q.clone()).collect();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("questions asked in time")
+}
+
+#[tokio::test]
+async fn full_access_turned_on_mid_run_allows_the_waiting_and_later_tool_calls() {
+    let mut req = request("scenario:live-access");
+    req.sandbox = SandboxLevel::WorkspaceWrite;
+    req.auto_approve = false;
+    let (switch, access) = LiveAccess::channel(false);
+    let (controls, waiting, _steer) = waiting_controls(access);
+    let stream = harness().run(req, controls).await.expect("run starts");
+    let events = tokio::spawn(stream.map(|r| r.expect("stream event")).collect::<Vec<_>>());
+
+    // The Bash call waits for the user until the owner turns full access on.
+    assert_eq!(asked(&waiting, 1).await[0].header, "Approve command");
+    switch.send(true).unwrap();
+
+    // The Write call after it is allowed without asking; AskUserQuestion
+    // still reaches the user.
+    let headers: Vec<_> = asked(&waiting, 2)
+        .await
+        .into_iter()
+        .map(|q| q.header)
+        .collect();
+    assert_eq!(headers, ["Approve command", "Choice"]);
+    let (choice, answer) = {
+        let mut waiting = waiting.lock().unwrap();
+        // The approval stopped waiting, which resolves the user's pending
+        // question in the engine's input bridge.
+        assert!(waiting[0].1.is_closed());
+        waiting.remove(1)
+    };
+    // AskUserQuestion is never answered for the user.
+    answer
+        .send(vec![UserInputAnswer {
+            question_id: choice.id,
+            labels: vec!["B".into()],
+        }])
+        .unwrap();
+
+    let events = tokio::time::timeout(Duration::from_secs(10), events)
+        .await
+        .expect("run finished in time")
+        .unwrap();
+    assert_eq!(
+        final_result(&events).as_deref(),
+        Some("waiting=allowed next=allowed picked=B"),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
@@ -454,6 +552,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        access: Default::default(),
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 

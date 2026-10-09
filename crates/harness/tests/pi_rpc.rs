@@ -41,6 +41,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
                 let _ = tx.send(vec![]);
                 rx
             }),
+            access: Default::default(),
         },
         tx,
         token,

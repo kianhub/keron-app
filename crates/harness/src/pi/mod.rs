@@ -379,6 +379,9 @@ impl Harness for PiHarness {
                 request_input,
                 mut steering,
                 interrupt,
+                // Never asks for approvals, so full access turned on mid-run has
+                // nothing to answer; the run's settings apply from the next turn.
+                access: _,
             } = controls;
             runner.process.dialogs.input = Some(std::sync::Arc::from(request_input));
             let consumer = runner.tx.clone();

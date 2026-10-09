@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = tx.send(vec![]);
             rx
         }),
+        access: Default::default(),
     };
     let mut stream =
         tokio::time::timeout(Duration::from_secs(90), harness.run(request, controls)).await??;

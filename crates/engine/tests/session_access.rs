@@ -11,10 +11,10 @@ use zeron_doc::{
     SessionCommandStatus, SessionMessageEntry,
 };
 use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_harness::{Harness, HarnessError, RunControls, permissions};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -411,4 +411,417 @@ async fn only_the_voice_orchestrator_runs_its_zeron_tools_unasked() {
     }))
     .unwrap();
     assert!(!sent.mcp.unwrap().approve_tools);
+}
+
+/// Asks the user a question and then for one approval, the way the
+/// harnesses that ask do (`permissions::approve`), and reports how the
+/// approval went with the run's prompt. The turn ends once the question is
+/// answered.
+struct Asker(tokio::sync::mpsc::UnboundedSender<(String, bool)>);
+
+#[async_trait]
+impl Harness for Asker {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Asker"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let outcomes = self.0.clone();
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let RunControls {
+                request_input,
+                mut access,
+                ..
+            } = controls;
+            let question = request_input(vec![UserInputQuestion {
+                id: "pick".into(),
+                header: "Choice".into(),
+                question: "Pick one".into(),
+                options: vec!["A".into(), "B".into()],
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+            }]);
+            let approval =
+                permissions::approval_question("Approve command".into(), "Run `make`?".into());
+            let approved = permissions::approve(&*request_input, &mut access, approval).await;
+            let _ = outcomes.send((request.prompt, approved));
+            let _ = question.await;
+            let _ = events.send(Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            }));
+        });
+        Ok(futures::stream::unfold(
+            rx,
+            |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+        )
+        .boxed())
+    }
+}
+
+/// The run's questions as they're asked: request id by header.
+async fn questions(
+    events: &mut tokio::sync::broadcast::Receiver<zeron_engine::JournaledEvent>,
+) -> std::collections::HashMap<String, String> {
+    let mut asked = std::collections::HashMap::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while asked.len() < 2 {
+            if let AgentEvent::InputRequested {
+                request_id,
+                questions,
+            } = events.recv().await.unwrap().event
+            {
+                asked.insert(questions[0].header.clone(), request_id);
+            }
+        }
+    })
+    .await
+    .expect("both questions asked");
+    asked
+}
+
+#[tokio::test]
+async fn full_access_turned_on_mid_run_approves_only_that_sessions_waiting_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let (outcomes_tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Asker(outcomes_tx)));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    // Three sessions that ask, each with a question and an approval waiting.
+    let mut asked = std::collections::HashMap::new();
+    for chat in ["on", "other", "minted"] {
+        client
+            .call(
+                methods::MUTATE,
+                serde_json::json!({
+                    "op": "createChat", "chatId": chat, "deviceId": core.device_id,
+                    "cwd": "/tmp", "config": { "harness": "mock", "sandbox": "workspace-write" },
+                }),
+            )
+            .await
+            .unwrap();
+        let (_, mut events) = core.sessions.subscribe(chat, 0).unwrap();
+        core.sessions
+            .dispatch(
+                chat,
+                HarnessId::Mock,
+                RunRequest {
+                    prompt: chat.into(),
+                    ..request(SandboxLevel::WorkspaceWrite, false)
+                },
+                Some(format!("{chat}-m1")),
+            )
+            .await
+            .unwrap();
+        asked.insert(chat, (questions(&mut events).await, events));
+    }
+
+    // A whole-row write carrying full access isn't the session's choice: its
+    // run keeps asking.
+    core.workspace
+        .import_chat_row(&zeron_proto::Chat {
+            id: "minted".into(),
+            device_id: core.device_id.clone(),
+            title: None,
+            archived: false,
+            cwd: Some("/tmp".into()),
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: Some(zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::DangerFullAccess,
+            }),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: None,
+        })
+        .unwrap();
+
+    // The owner turns full access on for one session mid-turn: its waiting
+    // approval is approved, and the bridge resolves exactly that question,
+    // as if the owner had answered it.
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig", "chatId": "on",
+                "config": { "harness": "mock", "sandbox": "danger-full-access" },
+            }),
+        )
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+        .await
+        .expect("the waiting approval settles");
+    assert_eq!(outcome, Some(("on".to_owned(), true)));
+    let (on, events) = asked.get_mut("on").unwrap();
+    let resolved = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::InputResolved { request_id } = events.recv().await.unwrap().event {
+                return request_id;
+            }
+        }
+    })
+    .await
+    .expect("the approval's question resolves");
+    assert_eq!(resolved, on["Approve command"]);
+    assert!(
+        !core
+            .sessions
+            .respond_input("on", &on["Approve command"], Vec::new())
+            .unwrap(),
+        "nothing left to answer"
+    );
+    // The real question still waits for the owner.
+    assert!(
+        core.sessions
+            .respond_input(
+                "on",
+                &on["Choice"],
+                vec![UserInputAnswer {
+                    question_id: "pick".into(),
+                    labels: vec!["B".into()],
+                }],
+            )
+            .unwrap()
+    );
+
+    // No other session's approval moved: each still waits for its owner,
+    // and a dismissal refuses it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(outcomes.try_recv().is_err());
+    for chat in ["other", "minted"] {
+        let (ids, _) = &asked[chat];
+        assert!(
+            core.sessions
+                .respond_input(chat, &ids["Approve command"], Vec::new())
+                .unwrap(),
+            "{chat}'s approval still waits"
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+            .await
+            .unwrap();
+        assert_eq!(outcome, Some((chat.to_owned(), false)));
+    }
+}
+
+/// What a [`Parker`] runtime was handed: a fresh run, or a prompt steered
+/// into the warm one.
+#[derive(Debug, PartialEq)]
+enum Turn {
+    Run(String, SandboxLevel, bool),
+    Steer(String),
+}
+
+/// A steerable runtime that stays warm between turns, the way Claude Code
+/// and Codex do. A prompt starting with "hold" keeps its turn running until
+/// the next steer joins it; every other turn ends at once.
+struct Parker(tokio::sync::mpsc::UnboundedSender<Turn>);
+
+#[async_trait]
+impl Harness for Parker {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Parker"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let turns = self.0.clone();
+        let _ = turns.send(Turn::Run(
+            request.prompt.clone(),
+            request.sandbox,
+            request.auto_approve,
+        ));
+        let done = || {
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+        };
+        let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let RunControls {
+                mut steering,
+                interrupt,
+                ..
+            } = controls;
+            if !request.prompt.starts_with("hold") {
+                let _ = events.send(done());
+            }
+            loop {
+                tokio::select! {
+                    () = interrupt.cancelled() => return,
+                    message = steering.recv() => {
+                        let Some(message) = message else { return };
+                        let _ = turns.send(Turn::Steer(message.prompt));
+                        let _ = events.send(Ok(AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        }));
+                        let _ = events.send(done());
+                    }
+                }
+            }
+        });
+        Ok(futures::stream::unfold(
+            rx,
+            |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+        )
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_steer_between_turns_runs_with_the_access_the_session_has_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (turns_tx, mut turns) = tokio::sync::mpsc::unbounded_channel();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Parker(turns_tx)));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let set_access = |sandbox: &'static str| {
+        client.call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig", "chatId": "s",
+                "config": { "harness": "mock", "sandbox": sandbox },
+            }),
+        )
+    };
+    let handle = core.doc_host.open("s").unwrap();
+    // A steer from any client: Steer on a queued row, an agent's
+    // `send_message` with mode "steer".
+    let steer = |id: &str| {
+        handle
+            .doc()
+            .queue_command(&SessionCommandEntry {
+                id: format!("cmd-{id}"),
+                payload: SessionCommandPayload::Steer {
+                    prompt: id.into(),
+                    message_id: Some(format!("m-{id}")),
+                },
+                issued_by: "viewer-device".into(),
+                issued_at: chrono::Utc::now().timestamp_millis(),
+                based_on: None,
+                expires_at: None,
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap()
+    };
+    let mut next_turn = async || {
+        tokio::time::timeout(Duration::from_secs(5), turns.recv())
+            .await
+            .expect("the prompt reached the agent")
+            .unwrap()
+    };
+    let between_turns = async || {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.sessions.turn_in_flight("s") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn ended")
+    };
+
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "s", "deviceId": core.device_id, "cwd": "/tmp",
+                "config": { "harness": "mock", "sandbox": "workspace-write" },
+            }),
+        )
+        .await
+        .unwrap();
+    set_access("danger-full-access").await.unwrap();
+    core.sessions
+        .dispatch(
+            "s",
+            HarnessId::Mock,
+            RunRequest {
+                prompt: "hold first".into(),
+                ..request(SandboxLevel::WorkspaceWrite, false)
+            },
+            Some("m-first".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next_turn().await,
+        Turn::Run("hold first".into(), SandboxLevel::DangerFullAccess, true)
+    );
+
+    // Turned off mid-turn: a steer joins the running turn as it started.
+    set_access("workspace-write").await.unwrap();
+    steer("join");
+    assert_eq!(next_turn().await, Turn::Steer("join".into()));
+    between_turns().await;
+
+    // The next turn asks: the warm runtime started with full access is
+    // replaced, not handed the prompt.
+    steer("next");
+    assert_eq!(
+        next_turn().await,
+        Turn::Run("next".into(), SandboxLevel::WorkspaceWrite, false)
+    );
+    between_turns().await;
+
+    // A runtime whose access still holds keeps taking prompts warm.
+    steer("again");
+    assert_eq!(next_turn().await, Turn::Steer("again".into()));
 }

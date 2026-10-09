@@ -33,6 +33,7 @@ async fn main() {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     let request = RunRequest {
         mcp: None,

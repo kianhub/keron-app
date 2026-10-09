@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = tx.send(vec![]);
                     rx
                 }),
+                access: Default::default(),
             },
         )
         .await?;

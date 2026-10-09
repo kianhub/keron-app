@@ -46,6 +46,10 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// The input bridge: the run sends questions and awaits the answers.
+pub type RequestInput =
+    dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync;
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     pub realtime: Option<codex::realtime::RealtimeControls>,
@@ -55,15 +59,17 @@ pub struct RunControls {
     /// Standalone callers without an update coordinator can leave it unset.
     pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
-    pub request_input: Box<
-        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
-    >,
+    pub request_input: Box<RequestInput>,
     /// Steer prompts consumed at step/turn boundaries.
     pub steering: mpsc::Receiver<SteerMessage>,
     /// Cancel to interrupt the live run: the harness sends its protocol-level
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// The session's full access as the host enforces it, live: a harness
+    /// that asks for approvals stops asking (and approves what's waiting)
+    /// when the owner turns it on mid-run. See [`permissions`].
+    pub access: LiveAccess,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -402,6 +408,7 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
+pub use permissions::LiveAccess;
 pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
