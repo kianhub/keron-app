@@ -440,6 +440,18 @@ impl FilesSurface {
         }
     }
 
+    /// Open the Subagents section at the top of its list, where the running
+    /// ones lead: the composer's subagent stack sends "+N more" and "N done"
+    /// here.
+    pub(crate) fn reveal_subagents(&mut self, cx: &mut Context<Self>) {
+        if !self.sections.is_open(Section::Subagents) {
+            self.sections.open.insert(Section::Subagents, true);
+            self.sections.reveal = Some(Section::Subagents);
+        }
+        self.sections.scroll(Section::Subagents).scroll_to_item(0);
+        cx.notify();
+    }
+
     /// Open the Chats section, page it, and scroll its list so `chat_id`'s
     /// row shows — the inline rename's field must never sit on a hidden row.
     fn reveal_chat_row(&mut self, chat_id: &str, cx: &mut Context<Self>) {

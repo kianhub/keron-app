@@ -6108,6 +6108,9 @@ pub struct Composer {
     account_usage: Entity<crate::account_usage::AccountUsage>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
+    /// The selected chat's working subagents, which the shell hands the main
+    /// composer: a column left of the pill, or a chip in the footer.
+    subagents: Option<Entity<crate::subagent_stack::SubagentStack>>,
     _picker_focus: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
@@ -6375,6 +6378,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             account_usage,
             side_chat: false,
+            subagents: None,
             _picker_focus: picker_focus,
             _input_events: input_events,
             _dictation_events: dictation_events,
@@ -6574,6 +6578,28 @@ impl Composer {
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
         cx.notify();
+    }
+
+    /// Mount the shell's subagent stack beside this (the main) composer.
+    pub(crate) fn set_subagent_stack(
+        &mut self,
+        stack: Entity<crate::subagent_stack::SubagentStack>,
+        cx: &mut Context<Self>,
+    ) {
+        self.subagents = Some(stack);
+        cx.notify();
+    }
+
+    /// The shell's free width between the chat column's edge and the pill:
+    /// enough room puts the subagent stack in that gutter, too little in the
+    /// footer.
+    pub(crate) fn set_subagent_gutter(&mut self, gutter: f32, cx: &mut Context<Self>) {
+        let Some(stack) = self.subagents.clone() else {
+            return;
+        };
+        if stack.update(cx, |stack, cx| stack.set_gutter(gutter, cx)) {
+            cx.notify();
+        }
     }
 
     /// Whether the draft holds anything a close would lose: text, staged
@@ -11437,7 +11463,30 @@ impl Render for Composer {
             // Both completion popups span the full pill width above it —
             // the file-mention and slash tokens are mutually exclusive.
             .children(self.render_file_mention_popup(&theme, cx))
-            .children(self.render_slash_popup(&theme, cx));
+            .children(self.render_slash_popup(&theme, cx))
+            .children(
+                self.subagents
+                    .clone()
+                    .filter(|stack| {
+                        session_chrome_opacity > 0.0
+                            && !self.side_chat
+                            && matches!(
+                                stack.read(cx).placement(),
+                                crate::subagent_stack::Placement::Gutter(_)
+                            )
+                    })
+                    .map(|stack| {
+                        // In the empty gutter left of the pill, its foot level
+                        // with the pill's, growing upward as subagents join.
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .right(gpui::relative(1.0))
+                            .pr(px(crate::subagent_stack::GUTTER_GAP))
+                            .opacity(session_chrome_opacity)
+                            .child(stack)
+                    }),
+            );
         // Restore the original chip-only selector treatment: destination at
         // the top-right, no surrounding surface. Cancel the column gap as the
         // row collapses so the pill never jumps at the route boundary.
@@ -11550,6 +11599,11 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
+                                .children(self.subagents.clone().filter(|stack| {
+                                    !self.side_chat
+                                        && stack.read(cx).placement()
+                                            == crate::subagent_stack::Placement::Chip
+                                }))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
                                     // ends flush with the row, so the rings keep

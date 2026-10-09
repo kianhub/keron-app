@@ -2157,6 +2157,9 @@ pub struct Shell {
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
+    /// The composer's subagent stack: entries open subagent tabs, "+N more"
+    /// and "N done" the explorer's Subagents section.
+    _subagent_stack_events: Subscription,
     _transcript_invalidation: Subscription,
     /// Keron Home, the widget grid under the new-chat composer.
     home: Entity<crate::home::Home>,
@@ -2272,6 +2275,12 @@ impl Shell {
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
+        let subagent_stack =
+            cx.new(|cx| crate::subagent_stack::SubagentStack::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_subagent_stack(subagent_stack.clone(), cx)
+        });
+        let subagent_stack_events = cx.subscribe(&subagent_stack, Self::on_subagent_stack_event);
         // Working-indicator heartbeat: notify once a second while a session is
         // live so elapsed time and the flavour word stay fresh.
         let ticker = cx.spawn(async move |this, cx| {
@@ -2568,6 +2577,7 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            _subagent_stack_events: subagent_stack_events,
             _transcript_invalidation: transcript_invalidation,
             home,
             _home_events: home_events,
@@ -4084,6 +4094,38 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+        }
+    }
+
+    /// The composer's subagent stack: an entry opens like its spawn chip;
+    /// "+N more" and "N done" dock the explorer with its Subagents section
+    /// open (the next render runs the dock, which needs the window).
+    fn on_subagent_stack_event(
+        &mut self,
+        _: Entity<crate::subagent_stack::SubagentStack>,
+        event: &crate::subagent_stack::SubagentStackEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::subagent_stack::SubagentStackEvent;
+        match event {
+            SubagentStackEvent::Open {
+                doc_id,
+                title,
+                frozen,
+            } => self.add_subagent_surface(
+                self.active_chat.clone(),
+                doc_id.clone(),
+                title.clone(),
+                *frozen,
+                cx,
+            ),
+            SubagentStackEvent::OpenList => {
+                if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
+                    files.update(cx, |files, cx| files.reveal_subagents(cx));
+                }
+                self.pending_workspace_command = Some(crate::composer::WorkspaceCommand::Files);
+                cx.notify();
             }
         }
     }
@@ -10414,7 +10456,13 @@ impl Shell {
             frame_time,
         );
         self.composer.update(cx, |composer, cx| {
-            composer.set_available_width(composer_width, cx)
+            composer.set_available_width(composer_width, cx);
+            // The composer centers in the column and insets its pill by
+            // SPACE_LG: what lies left of the pill is the subagent gutter.
+            composer.set_subagent_gutter(
+                (main_content_width - composer_width) / 2.0 + Theme::SPACE_LG,
+                cx,
+            );
         });
         let terminal_geometry =
             std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
