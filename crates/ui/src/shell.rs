@@ -109,6 +109,7 @@ actions!(
         ToggleCommandPalette,
         OpenModelPicker,
         NewSession,
+        ShowHome,
         OpenSettings,
         NextSession,
         PrevSession,
@@ -505,6 +506,15 @@ pub fn apply_keymap(
             None,
         ),
     ]);
+    // Show Home arrives unbound when an older keymap already used its
+    // default; like a cleared jump slot, it then binds nothing.
+    if !keymap.show_home.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &valid_or_default(&keymap.show_home, ShortcutId::ShowHome.default_combo()),
+            ShowHome,
+            None,
+        )]);
+    }
     crate::browser::bind_keys(cx, keymap);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
@@ -521,6 +531,32 @@ pub fn apply_keymap(
             None,
         ))
     }));
+}
+
+/// The action each rebindable shortcut dispatches, as [`apply_keymap`] and
+/// the browser bind it. Settings → Shortcuts' key search uses it to map a live
+/// binding back to its row. `None` for the Appshot hotkey, which the OS
+/// delivers outside gpui's keymap.
+pub(crate) fn shortcut_action(id: ShortcutId) -> Option<Box<dyn gpui::Action>> {
+    Some(match id {
+        ShortcutId::ToggleDictation => Box::new(crate::composer::ToggleDictation),
+        ShortcutId::CaptureAppshot => return None,
+        ShortcutId::RandomWallpaper => Box::new(RandomWallpaper),
+        ShortcutId::SaveFile => Box::new(SaveFile),
+        ShortcutId::BrowserReload => Box::new(crate::browser::Reload),
+        ShortcutId::ToggleSidebar => Box::new(ToggleSidebar),
+        ShortcutId::ToggleChanges => Box::new(ToggleChanges),
+        ShortcutId::ToggleFiles => Box::new(ToggleFiles),
+        ShortcutId::ToggleTerminal => Box::new(ToggleTerminal),
+        ShortcutId::NewSession => Box::new(NewSession),
+        ShortcutId::ShowHome => Box::new(ShowHome),
+        ShortcutId::NewProject => Box::new(AddSpacePalette),
+        ShortcutId::OpenModelPicker => Box::new(OpenModelPicker),
+        ShortcutId::NextSession => Box::new(NextSession),
+        ShortcutId::PrevSession => Box::new(PrevSession),
+        ShortcutId::ArchiveSession => Box::new(ArchiveSession),
+        ShortcutId::JumpSession(slot) => Box::new(JumpSession(slot)),
+    })
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -2575,7 +2611,8 @@ impl Shell {
         }
     }
 
-    /// A clicked loose-ends banner: the new-chat screen, where Home shows.
+    /// A clicked loose-ends banner or Show Home: the new-chat screen, where
+    /// Home shows.
     pub(crate) fn open_home(&mut self, cx: &mut Context<Self>) {
         self.open_new_session(None, cx);
     }
@@ -13016,6 +13053,8 @@ impl Render for Shell {
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(None, cx)))
+            // Home lives on the new-chat page, so it is reachable the same way.
+            .on_action(cx.listener(|this, _: &ShowHome, _, cx| this.open_home(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
@@ -17304,6 +17343,9 @@ mod settings_modal_regressions {
             press(&keymap.prev_session),
             (Route::Chat, Some("newer".into()))
         );
+        // Show Home leaves both Settings and the open chat for the new-chat
+        // page, where Home shows.
+        assert_eq!(press(&keymap.show_home), (Route::Chat, None));
         assert_eq!(press(&keymap.new_session), (Route::Chat, None));
     }
 

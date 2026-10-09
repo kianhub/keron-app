@@ -1104,6 +1104,7 @@ pub enum ShortcutId {
     ToggleFiles,
     ToggleTerminal,
     NewSession,
+    ShowHome,
     NewProject,
     OpenModelPicker,
     NextSession,
@@ -1113,7 +1114,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 16 + JUMP_SLOTS] = [
         ShortcutId::ToggleDictation,
         ShortcutId::CaptureAppshot,
         ShortcutId::RandomWallpaper,
@@ -1124,6 +1125,7 @@ impl ShortcutId {
         ShortcutId::ToggleFiles,
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
+        ShortcutId::ShowHome,
         ShortcutId::NewProject,
         ShortcutId::OpenModelPicker,
         ShortcutId::NextSession,
@@ -1157,6 +1159,7 @@ impl ShortcutId {
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
+            ShortcutId::ShowHome => "Show Home",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
             ShortcutId::NextSession => "Next session or right pane tab",
@@ -1186,6 +1189,9 @@ impl ShortcutId {
             ShortcutId::ToggleFiles => "mod-e",
             ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::NewSession => "mod-n",
+            // Finder's Go → Home chord. Free in every keymap Keron installs:
+            // Cmd+H alone hides the app on macOS.
+            ShortcutId::ShowHome => "mod-shift-h",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
@@ -1235,6 +1241,7 @@ pub struct KeymapConfig {
     pub toggle_files: String,
     pub toggle_terminal: String,
     pub new_session: String,
+    pub show_home: String,
     pub new_project: String,
     pub open_model_picker: String,
     pub next_session: String,
@@ -1301,6 +1308,7 @@ impl Default for KeymapConfig {
             toggle_files: ShortcutId::ToggleFiles.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
+            show_home: ShortcutId::ShowHome.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
             open_model_picker: ShortcutId::OpenModelPicker.default_combo().into(),
             next_session: ShortcutId::NextSession.default_combo().into(),
@@ -1324,6 +1332,7 @@ impl KeymapConfig {
             ShortcutId::ToggleFiles => &self.toggle_files,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::NewSession => &self.new_session,
+            ShortcutId::ShowHome => &self.show_home,
             ShortcutId::NewProject => &self.new_project,
             ShortcutId::OpenModelPicker => &self.open_model_picker,
             ShortcutId::NextSession => &self.next_session,
@@ -1349,6 +1358,7 @@ impl KeymapConfig {
             ShortcutId::ToggleFiles => self.toggle_files = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::NewSession => self.new_session = combo,
+            ShortcutId::ShowHome => self.show_home = combo,
             ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::OpenModelPicker => self.open_model_picker = combo,
             ShortcutId::NextSession => self.next_session = combo,
@@ -1838,7 +1848,10 @@ impl UiSettings {
                         .get_mut("keymap")
                         .and_then(serde_json::Value::as_object_mut)
                     {
-                        for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
+                        for (id, field) in [
+                            (ShortcutId::ToggleFiles, "toggleFiles"),
+                            (ShortcutId::ShowHome, "showHome"),
+                        ] {
                             let default = platform_combo(id.default_combo());
                             let taken = !keymap.contains_key(field)
                                 && keymap.values().any(|existing| {
@@ -3369,6 +3382,27 @@ mod tests {
         assert_eq!(loaded.keymap.save_file, "");
         assert_eq!(loaded.keymap.new_session, "mod-s");
         assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
+    }
+
+    #[test]
+    fn show_home_keeps_an_older_binding_of_its_default() {
+        // An owner who already bound Cmd+Shift+H elsewhere keeps it, and
+        // Show Home arrives unbound instead of taking it over.
+        let dir = tempfile::tempdir().unwrap();
+        let write = |keymap: serde_json::Value| {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                serde_json::json!({ "keymap": keymap }).to_string(),
+            )
+            .unwrap();
+            UiSettings::load(dir.path()).keymap
+        };
+        let keymap = write(serde_json::json!({"toggleTerminal": "mod-shift-h"}));
+        assert_eq!(keymap.toggle_terminal, "mod-shift-h");
+        assert_eq!(keymap.show_home, "");
+        assert!(conflicted_shortcuts(&keymap).is_empty());
+        let keymap = write(serde_json::json!({"toggleTerminal": "mod-j"}));
+        assert_eq!(keymap.show_home, "mod-shift-h");
     }
 
     #[test]

@@ -116,6 +116,7 @@ impl ShortcutsPage {
                 ShortcutId::CaptureAppshot,
                 0,
                 self.recording,
+                false,
                 &theme,
                 cx,
             ));
