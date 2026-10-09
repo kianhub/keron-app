@@ -401,7 +401,8 @@ pub fn cluster_clearance(
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
-/// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// §1.4) and rebuilds the menu bar on them. Invalid persisted combos fall back
+/// to that shortcut's default.
 pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
@@ -531,6 +532,10 @@ pub fn apply_keymap(
             None,
         ))
     }));
+    // The menu bar shows each item's combo and macOS fires the item on it;
+    // gpui copies both when the menus are set, so a rebind (Show Home's, from
+    // the View menu) rebuilds them. Zed does the same on a keymap reload.
+    cx.set_menus(crate::app_menus::app_menus());
 }
 
 /// The action each rebindable shortcut dispatches, as [`apply_keymap`] and

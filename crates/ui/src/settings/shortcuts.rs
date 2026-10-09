@@ -77,12 +77,13 @@ pub struct ShortcutsPage {
     recording_interceptor: Option<gpui::Subscription>,
     /// Search by keys: `Some` while it listens.
     key_search: Option<KeySearch>,
-    key_search_subscriptions: Option<[gpui::Subscription; 2]>,
-    /// The Search by keys button's own handle: pressing it to stop a search
-    /// moves focus there, which must not count as leaving the page.
+    key_search_subscriptions: Option<[gpui::Subscription; 3]>,
+    /// The Search by keys button's own handle, a tab stop while no search
+    /// runs. During one the button stops tracking it, so pressing the button
+    /// in any way leaves focus on the page.
     key_search_button: FocusHandle,
-    /// Set when a search lands on a row; that row scrolls itself into view.
-    reveal_hit: Rc<Cell<bool>>,
+    /// Where a search's answer still has to scroll into view.
+    reveal: Rc<Cell<Reveal>>,
     /// A rejected record attempt ("{Combo} is already assigned to {label}.") —
     /// conflicts never persist; they're refused at record time, as in zeron.
     conflict_notice: Option<SharedString>,
@@ -129,7 +130,7 @@ impl ShortcutsPage {
             key_search: None,
             key_search_subscriptions: None,
             key_search_button: cx.focus_handle().tab_index(0).tab_stop(true),
-            reveal_hit: Rc::default(),
+            reveal: Rc::default(),
             conflict_notice: None,
             focus: cx.focus_handle(),
             appshots_enabled,
@@ -203,11 +204,14 @@ impl ShortcutsPage {
 
     /// Listen for a key combination and show what uses it. Like recording,
     /// it intercepts before bound actions run, and holds Appshots' hotkey so
-    /// that combination can be searched for too.
+    /// that combination can be searched for too. Unlike recording it keeps
+    /// listening, so it ends when focus leaves the page or the owner leaves
+    /// the window: the hold must not follow them into other apps.
     fn start_key_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_recording();
         self.conflict_notice = None;
         self.key_search = Some(KeySearch::default());
+        self.reveal.set(Reveal::Results { row: false });
         crate::appshots::set_recording(true);
         let page = cx.entity().downgrade();
         let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
@@ -217,13 +221,19 @@ impl ShortcutsPage {
                 }
             });
         });
-        let blur = cx.on_blur(&self.focus, window, |this, window, cx| {
-            if !this.key_search_button.is_focused(window) {
+        let blur = cx.on_blur(&self.focus, window, |this, _, cx| {
+            this.stop_key_search();
+            cx.notify();
+        });
+        // gpui reports leaving the window as a blur too, but only on its next
+        // frame, which a hidden or covered window may not draw.
+        let deactivate = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
                 this.stop_key_search();
                 cx.notify();
             }
         });
-        self.key_search_subscriptions = Some([interceptor, blur]);
+        self.key_search_subscriptions = Some([interceptor, blur, deactivate]);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -233,7 +243,7 @@ impl ShortcutsPage {
             crate::appshots::set_recording(false);
         }
         self.key_search_subscriptions = None;
-        self.reveal_hit.set(false);
+        self.reveal.set(Reveal::Done);
     }
 
     fn toggle_key_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -262,10 +272,11 @@ impl ShortcutsPage {
                     let keymap = keymap.borrow();
                     key_uses(keymap.bindings(), &self.keymap, keystroke)
                 };
-                self.reveal_hit.set(
-                    uses.iter()
+                self.reveal.set(Reveal::Results {
+                    row: uses
+                        .iter()
                         .any(|found| found.shortcut.is_some_and(listed_here)),
-                );
+                });
                 self.key_search = Some(KeySearch {
                     combo: Some(combo),
                     uses,
@@ -363,8 +374,9 @@ impl ShortcutsPage {
             .relative()
             .when(reveal, |row| {
                 row.child(reveal_marker(
-                    self.reveal_hit.clone(),
+                    self.reveal.clone(),
                     self.scroll.scroll.clone(),
+                    false,
                 ))
             })
             .child(
@@ -429,7 +441,9 @@ impl ShortcutsPage {
     }
 
     /// Search by keys: starts listening, and stops it when pressed again.
-    /// Listening wears the recording chip's accent wash.
+    /// Listening wears the recording chip's accent wash. While it listens
+    /// the button takes no focus, so a right-click or a press dragged off it
+    /// cannot pull focus from the page and leave a search that hears nothing.
     fn render_key_search_button(
         &self,
         theme: &Theme,
@@ -440,7 +454,7 @@ impl ShortcutsPage {
         widgets::ghost_action(theme)
             .id("shortcuts-key-search")
             .debug_selector(|| "shortcuts-key-search".into())
-            .track_focus(&self.key_search_button)
+            .when(!active, |el| el.track_focus(&self.key_search_button))
             .role(gpui::Role::Button)
             .aria_label("Search by keys")
             .aria_toggled(if active {
@@ -969,28 +983,59 @@ fn listed_here(id: ShortcutId) -> bool {
     !matches!(group(id), "Appshots" | "Voice")
 }
 
-/// Paints nothing. After a key search lands on its row, scrolls the page
-/// just enough to show the row clear of the titlebar and the bottom fade.
-fn reveal_marker(reveal: Rc<Cell<bool>>, scroll: gpui::ScrollHandle) -> impl IntoElement {
+/// Where a key search's answer still has to scroll into view. The results
+/// card sits above the table, so its marker runs first in each frame; when a
+/// hit row follows, it hands the row the shift it chose.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+enum Reveal {
+    #[default]
+    Done,
+    /// Show the results card, then the first hit row if `row`.
+    Results { row: bool },
+    /// The results card asked for `shift`; the row adds what it needs.
+    Row { shift: gpui::Pixels },
+}
+
+/// Paints nothing. After a key search, scrolls the page just enough to show
+/// the results card (`results`) or the first hit row clear of the titlebar
+/// and the bottom fade: the card first, then the row as far as both fit, so
+/// the answer is on screen even when no row matches.
+fn reveal_marker(
+    reveal: Rc<Cell<Reveal>>,
+    scroll: gpui::ScrollHandle,
+    results: bool,
+) -> impl IntoElement {
     gpui::canvas(
-        move |row, window, _| {
-            if !reveal.replace(false) {
-                return;
-            }
+        move |bounds, window, _| {
+            let (shift, then_row) = match (results, reveal.get()) {
+                (true, Reveal::Results { row }) => (px(0.0), row),
+                (false, Reveal::Row { shift }) => (shift, false),
+                _ => return,
+            };
             let view = scroll.bounds();
             let top = view.top() + px(Theme::TITLEBAR_HEIGHT + 16.0);
             let bottom = view.bottom() - px(16.0);
-            let shift = if row.top() < top {
-                top - row.top()
-            } else if row.bottom() > bottom {
-                (bottom - row.bottom()).max(top - row.top())
+            let (target_top, target_bottom) = (bounds.top() + shift, bounds.bottom() + shift);
+            let more = if target_top < top {
+                top - target_top
+            } else if target_bottom > bottom {
+                (bottom - target_bottom).max(top - target_top)
             } else {
-                return;
+                px(0.0)
             };
             let offset = scroll.offset();
-            let y = (offset.y + shift).clamp(-scroll.max_offset().y, px(0.0));
-            scroll.set_offset(gpui::point(offset.x, y));
-            window.refresh();
+            let y = (offset.y + shift + more).clamp(-scroll.max_offset().y, px(0.0));
+            if then_row {
+                reveal.set(Reveal::Row {
+                    shift: y - offset.y,
+                });
+                return;
+            }
+            reveal.set(Reveal::Done);
+            if y != offset.y {
+                scroll.set_offset(gpui::point(offset.x, y));
+                window.refresh();
+            }
         },
         |_, _, _, _| {},
     )
@@ -1320,10 +1365,16 @@ impl Render for ShortcutsPage {
             }
             groups.push(widgets::section(&theme, name, card).into_any_element());
         }
-        let key_search = self
-            .key_search
-            .as_ref()
-            .map(|search| render_key_search(search, &theme));
+        let key_search = self.key_search.as_ref().map(|search| {
+            render_key_search(search, &theme)
+                .relative()
+                .debug_selector(|| "shortcuts-key-search-results".into())
+                .child(reveal_marker(
+                    self.reveal.clone(),
+                    self.scroll.scroll.clone(),
+                    true,
+                ))
+        });
 
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (zeron settings.shortcuts.tsx).
@@ -1863,6 +1914,97 @@ mod tests {
         page.update(cx, |page, _| assert!(page.key_search.is_none()));
         cx.simulate_keystrokes(&new_session);
         assert!(fired.get(), "ending the search must restore normal actions");
+    }
+
+    fn new_page(cx: &mut Context<ShortcutsPage>) -> ShortcutsPage {
+        let state = cx.new(|_| AppState::new());
+        ShortcutsPage::new(
+            state,
+            KeymapConfig::default(),
+            false,
+            ComposerSendBehavior::default(),
+            false,
+            false,
+            AppshotDestination::Automatic,
+            cx,
+        )
+    }
+
+    #[gpui::test]
+    fn key_search_listens_until_the_owner_leaves(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let fired = Rc::new(Cell::new(false));
+        let observed = fired.clone();
+        install_keymap(cx, &KeymapConfig::default());
+        cx.update(|cx| {
+            cx.on_action(move |_: &crate::shell::NewSession, _| observed.set(true));
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| new_page(cx));
+        let none = gpui::Modifiers::default();
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear();
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("shortcuts-key-search").unwrap().center();
+        cx.simulate_click(button, none);
+        // A right-click on the lit button, or a press dragged off it, must
+        // not pull focus from the page and leave a search that hears nothing.
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.simulate_mouse_down(button, gpui::MouseButton::Right, none);
+        cx.simulate_mouse_up(button, gpui::MouseButton::Right, none);
+        cx.simulate_mouse_down(button, gpui::MouseButton::Left, none);
+        cx.simulate_mouse_up(gpui::point(px(1.0), px(1.0)), gpui::MouseButton::Left, none);
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-n"));
+        assert!(!fired.get(), "the searched action ran");
+        page.update(cx, |page, _| {
+            let search = page.key_search.as_ref().expect("still listening");
+            assert_eq!(search.combo.as_deref(), Some("mod-n"));
+        });
+        // Leaving the window ends it, and with it the hold on Appshots'
+        // hotkey, which must work in the app the owner went to.
+        assert!(cx.update(|window, _| window.is_window_active()));
+        cx.deactivate_window();
+        page.update(cx, |page, _| assert!(page.key_search.is_none()));
+    }
+
+    #[gpui::test]
+    fn key_search_answer_stays_on_screen(cx: &mut gpui::TestAppContext) {
+        install_keymap(cx, &KeymapConfig::default());
+        let (page, cx) = cx.add_window_view(|_, cx| new_page(cx));
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        // A reveal scrolls while painting and asks for one more frame.
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..2 {
+                cx.update(|window, cx| window.draw(cx).clear());
+            }
+        };
+        let answer_on_screen = |cx: &mut gpui::VisualTestContext| {
+            draw(cx);
+            let results = cx.debug_bounds("shortcuts-key-search-results").unwrap();
+            let view = page.update(cx, |page, _| page.scroll.scroll.bounds());
+            results.top() >= view.top() && results.bottom() <= view.bottom()
+        };
+        draw(cx);
+        let button = cx.debug_bounds("shortcuts-key-search").unwrap();
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        // The last jump slot is the foot of the table: the page scrolls to it.
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-9"));
+        draw(cx);
+        assert!(page.update(cx, |page, _| page.scroll.scroll.offset().y) < px(0.0));
+        // A combination no row has, or nothing has, scrolls its answer back.
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-k"));
+        assert!(answer_on_screen(cx));
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-9"));
+        draw(cx);
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-alt-shift-y"));
+        assert!(answer_on_screen(cx));
+        // A hit row near the top (Random wallpaper) keeps the answer above it
+        // in view, even coming back from the foot of the table.
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-9"));
+        draw(cx);
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-u"));
+        assert!(answer_on_screen(cx));
     }
 
     #[test]

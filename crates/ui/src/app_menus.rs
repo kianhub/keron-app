@@ -10,7 +10,8 @@
 //! Wiring: [`init`] registers the global action handlers (run once at boot),
 //! [`bind_keys`] installs the fixed application shortcuts (re-run by
 //! `shell::apply_keymap`, which clears every binding first), and
-//! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
+//! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`,
+//! and again by `shell::apply_keymap` so the items show rebound combos.
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
