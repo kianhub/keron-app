@@ -99,6 +99,22 @@ case "$first" in
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$decision bypass=$bypass\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-approval\"}"
   ;;
 
+*scenario:live-access*)
+  # The session switches to full access while a tool call waits for the
+  # user's approval. The result reports how each request was answered.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Write"],"cwd":"/tmp","session_id":"sess-live"}'
+  emit '{"type":"control_request","request_id":"cr-wait","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"make build"}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"request_id":"cr-wait"'*'"behavior":"allow"'*) waiting=allowed ;; *) waiting=denied ;; esac
+  emit '{"type":"control_request","request_id":"cr-next","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/out.txt"}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"request_id":"cr-next"'*'"behavior":"allow"'*) next=allowed ;; *) next=denied ;; esac
+  emit '{"type":"control_request","request_id":"cr-ask","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Choice","question":"Pick one","options":["A","B"],"multiSelect":false}]}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"Pick one":"B"'*) picked=B ;; *'"Pick one":""'*) picked=none ;; *) picked=other ;; esac
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"waiting=$waiting next=$next picked=$picked\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-live\"}"
+  ;;
+
 *scenario:askuser*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-ask"}'
   # A plain tool permission request: must be auto-allowed.

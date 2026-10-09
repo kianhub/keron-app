@@ -2,7 +2,10 @@
 //! before its agent acts (the default). Full access (no approval prompts, no
 //! sandbox) is chosen explicitly from this menu, applies to this session
 //! only, and shows as a warning-tinted badge for as long as it is on. The
-//! host enforces the choice from the session's config row.
+//! host enforces the choice from the session's config row. Turned on while
+//! the agent works, it approves the approvals waiting and stops asking for
+//! the rest of the turn at once; the sandbox can't change mid-turn and lifts
+//! from the next one. Turning it off applies from the next turn.
 //!
 //! Only Claude Code and Codex enforce it today. The other harnesses (the ACP
 //! agents, OpenCode, Pi, Cursor) still act without asking, so their sessions
@@ -130,7 +133,9 @@ impl Pickers {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
                         "Full access turns off approval prompts and the \
-                         sandbox, for this session only. Turning it off \
+                         sandbox, for this session only. Turned on mid-turn, \
+                         it approves what's waiting and stops asking; the \
+                         sandbox lifts from the next turn. Turning it off \
                          applies from the next turn.",
                     )),
             )

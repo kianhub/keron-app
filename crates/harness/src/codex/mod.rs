@@ -21,7 +21,10 @@
 //!   approval requests round-trip through [`RunControls::request_input`] as
 //!   a synthesized yes/no question. Only a session that chose full access
 //!   ([`crate::permissions`]) runs with `"never"` and `danger-full-access`,
-//!   where any stray approval request is accepted outright.
+//!   where any stray approval request is accepted outright. Full access
+//!   turned on mid-run ([`RunControls::access`]) accepts the waiting and
+//!   later approval requests without asking; the thread keeps its sandbox and
+//!   approval policy until the next turn starts a new run.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -56,7 +59,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    RunRequest, SlashCommand, SteeringMode, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -1002,6 +1005,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        access,
     } = controls;
     let request_input = Arc::new(request_input);
 
@@ -1558,6 +1562,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         full_access,
+                        &access,
                         &request_input,
                     );
                 }
@@ -1759,11 +1764,7 @@ async fn steer_as_new_turn(
 // Approvals (approval-as-input parity with zeron's UX)
 // ---------------------------------------------------------------------------
 
-type RequestInputFn = Box<
-    dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
-        + Send
-        + Sync,
->;
+type RequestInputFn = Box<crate::RequestInput>;
 
 /// The approval policy a run sends on `thread/start` and every `turn/start`,
 /// and whether it runs with full access. A session asks (`"on-request"`)
@@ -1833,17 +1834,20 @@ fn approval_request(method: &str, params: &Value) -> Option<Approval> {
 }
 
 /// Serve one server→client request. Approval requests round-trip through
-/// `request_input` as a synthesized yes/no question (in a subtask so the
-/// message loop keeps flowing); with full access they're accepted outright
-/// (belt to the wire-level `approvalPolicy: "never"`). Anything else is
-/// declined or rejected as unsupported so the server never wedges awaiting a
-/// reply.
+/// `request_input` as a synthesized yes/no question
+/// ([`crate::permissions::approve`], in a subtask so the message loop keeps
+/// flowing); with full access they're accepted outright (belt to the
+/// wire-level `approvalPolicy: "never"`), and so are the waiting and later
+/// ones once the owner turns full access on mid-run (`access`). Anything
+/// else is declined or rejected as unsupported so the server never wedges
+/// awaiting a reply.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
     full_access: bool,
+    access: &crate::LiveAccess,
     request_input: &Arc<RequestInputFn>,
 ) {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
@@ -1886,13 +1890,14 @@ fn handle_server_request(
         }
         return;
     };
-    if full_access {
+    if full_access || access.full() {
         client.respond(&id, approval.accept);
         return;
     }
 
     let client = client.clone();
     let request_input = Arc::clone(request_input);
+    let mut access = access.clone();
     tokio::spawn(async move {
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
@@ -1906,10 +1911,7 @@ fn handle_server_request(
             accept,
             decline,
         } = approval;
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
-        let answer = if crate::permissions::approved(&question, &answers) {
+        let answer = if crate::permissions::approve(&**request_input, &mut access, question).await {
             accept
         } else {
             decline

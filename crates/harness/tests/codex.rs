@@ -11,7 +11,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::{
-    CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
+    CancellationToken, CodexHarness, Harness, HarnessError, LiveAccess, RunControls, SteerMessage,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
@@ -131,6 +131,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        access: Default::default(),
     };
     (controls, steer_tx, token)
 }
@@ -478,6 +479,7 @@ async fn approvals_round_trip_as_input_requests() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        access: Default::default(),
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
@@ -527,6 +529,7 @@ async fn full_access_runs_without_approvals_or_sandbox() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     let mut req = request("scenario:full-access");
     req.sandbox = SandboxLevel::DangerFullAccess;
@@ -542,6 +545,101 @@ async fn full_access_runs_without_approvals_or_sandbox() {
         "{events:?}"
     );
     assert!(asked.lock().unwrap().is_empty(), "full access never asks");
+}
+
+/// Every question asked so far, each with its answer slot: the test answers
+/// by hand, or never.
+type Waiting = Arc<Mutex<Vec<(UserInputQuestion, oneshot::Sender<Vec<UserInputAnswer>>)>>>;
+
+/// Controls whose `request_input` answers nothing by itself.
+fn waiting_controls(access: LiveAccess) -> (RunControls, Waiting, mpsc::Sender<SteerMessage>) {
+    let waiting: Waiting = Arc::default();
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let slots = waiting.clone();
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(move |mut questions| {
+            assert_eq!(questions.len(), 1, "{questions:?}");
+            let (tx, rx) = oneshot::channel();
+            slots.lock().unwrap().push((questions.remove(0), tx));
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+        access,
+    };
+    (controls, waiting, steer_tx)
+}
+
+/// The questions asked once there are `count` of them.
+async fn asked(waiting: &Waiting, count: usize) -> Vec<UserInputQuestion> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            {
+                let waiting = waiting.lock().unwrap();
+                if waiting.len() >= count {
+                    return waiting.iter().map(|(q, _)| q.clone()).collect();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("questions asked in time")
+}
+
+#[tokio::test]
+async fn full_access_turned_on_mid_run_accepts_the_waiting_and_later_approvals() {
+    let mut req = request("scenario:live-access");
+    req.auto_approve = false;
+    let (switch, access) = LiveAccess::channel(false);
+    let (controls, waiting, _steer) = waiting_controls(access);
+    let stream = harness().run(req, controls).await.expect("run starts");
+    let events = tokio::spawn(stream.map(|r| r.expect("stream event")).collect::<Vec<_>>());
+
+    // The command waits for the user until the owner turns full access on.
+    assert_eq!(asked(&waiting, 1).await[0].header, "Approve command");
+    switch.send(true).unwrap();
+
+    // The file change after it is accepted without asking; the tool's own
+    // question still reaches the user.
+    let headers: Vec<_> = asked(&waiting, 2)
+        .await
+        .into_iter()
+        .map(|q| q.header)
+        .collect();
+    assert_eq!(headers, ["Approve command", "Choice"]);
+    let (choice, answer) = {
+        let mut waiting = waiting.lock().unwrap();
+        // The approval stopped waiting, which resolves the user's pending
+        // question in the engine's input bridge.
+        assert!(waiting[0].1.is_closed());
+        waiting.remove(1)
+    };
+    // A real question is never answered for the user.
+    answer
+        .send(vec![UserInputAnswer {
+            question_id: choice.id,
+            labels: vec!["B".into()],
+        }])
+        .unwrap();
+
+    // The fake only completes the turn after both accepts and the answer.
+    let events = tokio::time::timeout(Duration::from_secs(10), events)
+        .await
+        .expect("run finished in time")
+        .unwrap();
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
@@ -568,6 +666,7 @@ async fn permission_and_mcp_tool_approvals_are_asked_and_answered() {
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
+        access: Default::default(),
     };
     let events = run_to_end(&harness(), request("scenario:extra-approvals"), controls).await;
     assert!(

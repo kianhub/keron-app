@@ -814,6 +814,11 @@ impl WorkspaceHost {
         Ok(space.id)
     }
 
+    /// Wakes on every registry change, local or synced from another device.
+    pub(crate) fn watch_changes(&self) -> watch::Receiver<u64> {
+        self.inner.changed_tx.subscribe()
+    }
+
     /// The chat's configured harness/model row, when present (RunRequest harness
     /// selection; callers fall back to the engine default).
     pub fn chat_config(&self, chat_id: &str) -> Option<ChatConfig> {

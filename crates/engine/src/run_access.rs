@@ -24,8 +24,17 @@
 //! session keeps asking, and the host rewrites the row so that device's
 //! controls show "Ask first" again. This fails safe; choosing full access
 //! again once the clocks agree takes effect.
+//!
+//! A run in flight follows the same enforced view live ([`follow`]): when
+//! the owner turns full access on mid-turn, a harness that asks approves
+//! what's waiting and stops asking for the rest of the run
+//! (`zeron_harness::permissions::approve`). Its sandbox and CLI flags stay
+//! as the run started them; those change from the next turn.
 
+use tokio::sync::watch;
 use zeron_proto::{ChatConfig, RunRequest, SandboxLevel};
+
+use crate::workspace_host::WorkspaceHost;
 
 /// Fit `request`'s sandbox and auto-approve flag to the session's choice.
 /// `session` is the chat row's config; a missing row or config asks.
@@ -37,6 +46,27 @@ pub(crate) fn apply(request: &mut RunRequest, session: Option<&ChatConfig>) {
         request.sandbox = SandboxLevel::WorkspaceWrite;
     }
     request.auto_approve = full;
+}
+
+/// Keep a live run's view of its session's full access (`access`) in step
+/// with the host's enforced row ([`WorkspaceHost::session_config`]) on every
+/// registry change, whichever device made it. Ends once the run lets go of
+/// its view: a harness that never asks drops it at once.
+pub(crate) fn follow(workspace: WorkspaceHost, chat_id: String, access: watch::Sender<bool>) {
+    // Subscribed before the first read, so no change slips between them.
+    let mut changes = workspace.watch_changes();
+    tokio::spawn(async move {
+        loop {
+            let full = workspace
+                .session_config(&chat_id)
+                .is_some_and(|c| c.sandbox == SandboxLevel::DangerFullAccess);
+            access.send_if_modified(|current| std::mem::replace(current, full) != full);
+            tokio::select! {
+                changed = changes.changed() => if changed.is_err() { break },
+                () = access.closed() => break,
+            }
+        }
+    });
 }
 
 /// A new session (or a fork) starts asking: full access is turned on

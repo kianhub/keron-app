@@ -358,6 +358,27 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
+*scenario:live-access*)
+  # The session switches to full access while a command waits for the
+  # user's approval: it and the next approval are accepted, and a real
+  # question still waits for the user's answer.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":501,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"make build"}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":501' && has "$a1" '"decision":"accept"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"waiting approval not accepted"}}}}'; exit 0; }
+  emit '{"id":502,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","changes":[{"path":"/tmp/b.rs","kind":"update"}]}}'
+  read -r a2 || exit 1
+  { has "$a2" '"id":502' && has "$a2" '"decision":"accept"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"later approval not accepted"}}}}'; exit 0; }
+  emit '{"id":503,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"q1","header":"Choice","question":"Pick one","options":["A","B"]}]}}'
+  read -r a3 || exit 1
+  { has "$a3" '"id":503' && has "$a3" '"q1":{"answers":["B"]}'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"question not answered by the user"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
 *scenario:full-access*)
   # The session chose full access: no approvals, no sandbox, and a stray
   # approval request is accepted without asking anyone.

@@ -28,7 +28,7 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, LiveAccess, RunControls, SteerMessage};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
     UserInputQuestion,
@@ -718,12 +718,20 @@ impl SessionsEngine {
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (voice_handle, realtime, _voice_events) = zeron_harness::codex::realtime::channel();
         let voice_active = Arc::new(VoiceActivity::default());
+        // The session's access, followed live from its chat row while the
+        // run works (the owner can turn full access on mid-turn).
+        let (access_tx, access) =
+            LiveAccess::channel(zeron_harness::permissions::full_access(&request));
+        if let Some(ws) = self.inner.workspace() {
+            crate::run_access::follow(ws, chat_id.to_string(), access_tx);
+        }
         let controls = RunControls {
             realtime: (harness_id == HarnessId::Codex).then_some(realtime),
             execution_lease: None,
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            access,
         };
 
         lock(&self.inner.runs).insert(

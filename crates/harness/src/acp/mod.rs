@@ -3510,6 +3510,9 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        // Never asks for approvals, so full access turned on mid-run has
+        // nothing to answer; the run's settings apply from the next turn.
+        access: _,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
 

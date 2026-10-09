@@ -68,6 +68,11 @@ Single binary `zeron`:
   edits in the working directory go through and Bash and every other tool ask
   (`crates/harness/src/claude/mod.rs`); Codex's `workspace-write` sandbox already lets edits in
   the workspace through. Full access stays `--dangerously-skip-permissions` / Codex full access.
+  Turned on while a run that asks is working, it takes effect at once for prompts only: the host
+  follows the session's enforced row live (`run_access::follow` → `RunControls::access`), and
+  Claude Code and Codex approve what's waiting and stop asking for the rest of the run
+  (`zeron_harness::permissions::approve`). The sandbox and CLI flags stay as the run started them
+  until the next turn. Turning it off applies from the next turn.
   The hidden voice orchestrator chat runs its own injected Keron MCP tools unasked: the host
   marks that one server `approve_tools` for chats whose id has the orchestrator prefix
   (`Inner::zeron_mcp`), which Claude spells `--allowedTools mcp__zeron` and Codex
