@@ -442,6 +442,11 @@ impl gpui::Element for TerminalElement {
             ("calt".into(), 0),
             ("dlig".into(), 0),
         ]));
+        // Prompt icons (Nerd Font glyphs in the private-use area) aren't in
+        // text fonts; without this they render as the system's "?" boxes.
+        mono.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
+            crate::typography::TERMINAL_SYMBOLS_FAMILY.into(),
+        ]));
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(theme.terminal_font_size);
