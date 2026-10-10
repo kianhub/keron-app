@@ -8790,6 +8790,10 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
+        // "New chats start with full access": a chat this send mints asks the
+        // host for it. Only an engine in this process honours the ask, for a
+        // chat it hosts (`run_access`); everywhere else the chat asks.
+        let full_access = self.state.read(cx).new_chats_full_access(cx);
         let existing_cwd = self
             .state
             .read(cx)
@@ -8839,7 +8843,7 @@ impl Composer {
                 }
                 state.apply_chat_config(&chat_id, config);
             }
-            state.unsaved_side_chat_create(&chat_id)
+            state.unsaved_side_chat_create(&chat_id, full_access)
         });
         if queue && !is_new {
             let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
@@ -9292,6 +9296,9 @@ impl Composer {
                             && let Ok(config) = serde_json::to_value(&config)
                         {
                             object.insert("config".into(), config);
+                        }
+                        if full_access {
+                            object.insert("fullAccess".into(), serde_json::Value::Bool(true));
                         }
                     }
                     if let Err(err) = attachments::call_with_timeout(

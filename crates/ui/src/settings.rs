@@ -356,6 +356,14 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+/// Whether chats started here start with full access.
+pub fn new_chats_full_access(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map_or(UiSettings::default().new_chats_full_access, |store| {
+            store.current.new_chats_full_access
+        })
+}
+
 /// Copy a selected image into Zeron's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -893,6 +901,12 @@ pub struct UiSettings {
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
+    /// Chats started from this device's own UI (new chats, forks and side
+    /// chats it hosts) start with full access instead of asking. Device-local
+    /// and on by default (the owner's decision, 9 Oct); the engine honours it
+    /// only from its in-process UI (`run_access`), so a window attached to a
+    /// daemon doesn't send it (`AppState::new_chats_full_access`).
+    pub new_chats_full_access: bool,
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
     /// palette reopen it; links naming a section replace it. Files without
     /// it, or with a name this build does not know, open on General.
@@ -1017,6 +1031,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
+            new_chats_full_access: true,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             skills_in_slash_menu: false,
@@ -1675,6 +1690,7 @@ impl UiSettings {
             appshot_sound_enabled,
             appshot_destination,
             escape_stops_active_agent,
+            new_chats_full_access,
             settings_section,
             appearance,
             git_history_columns,
@@ -1975,6 +1991,14 @@ mod tests {
         settings.skills_in_slash_menu = true;
         settings.save(dir.path()).unwrap();
         assert!(UiSettings::load(dir.path()).skills_in_slash_menu);
+    }
+
+    /// On for everyone, including a settings file from before it existed.
+    /// Turning it off persists (see `round_trip`).
+    #[test]
+    fn new_chats_start_with_full_access_by_default() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.new_chats_full_access);
     }
 
     #[test]
@@ -2695,6 +2719,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             escape_stops_active_agent: true,
+            new_chats_full_access: false,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             skills_in_slash_menu: true,

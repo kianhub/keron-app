@@ -197,6 +197,131 @@ async fn runs_take_their_access_from_the_session_not_the_request() {
 }
 
 #[tokio::test]
+async fn sessions_this_devices_own_ui_starts_have_full_access_from_the_first_turn() {
+    // With "New chats start with full access" on, the composer asks for it
+    // in its createChat (and a fork, in its call). Only this device's own
+    // UI is heard: the IPC port and the relay serve `rpc_service`.
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let host_ui = zeron_rpc::memory_client(core.host_ui_rpc_service());
+    let other_client = zeron_rpc::memory_client(core.rpc_service());
+    let sandbox = |chat: &str| {
+        core.workspace
+            .chat(chat)
+            .unwrap()
+            .and_then(|c| c.config)
+            .map(|c| c.sandbox)
+    };
+    let create = |chat: &str, device: &str, full_access: bool| {
+        serde_json::json!({
+            "op": "createChat", "chatId": chat, "deviceId": device, "cwd": "/tmp",
+            "config": { "harness": "mock", "sandbox": "workspace-write" },
+            "fullAccess": full_access,
+        })
+    };
+    // The composer's first send: createChat, then the Run it queues.
+    let first_turn = async |client: &zeron_rpc::RpcClient, chat: &str, turn: usize| {
+        let command = SessionCommandPayload::Run {
+            request: request(SandboxLevel::WorkspaceWrite, false),
+            message_id: format!("{chat}-m1"),
+        };
+        client
+            .call(
+                methods::QUEUE_COMMAND,
+                serde_json::json!({ "chatId": chat, "command": command }),
+            )
+            .await
+            .unwrap();
+        wait_for(&requests, turn).await
+    };
+
+    host_ui
+        .call(methods::MUTATE, create("mine", &core.device_id, true))
+        .await
+        .unwrap();
+    assert_eq!(sandbox("mine"), Some(SandboxLevel::DangerFullAccess));
+    let ran = first_turn(&host_ui, "mine", 1).await;
+    assert_eq!(ran.sandbox, SandboxLevel::DangerFullAccess);
+    assert!(ran.auto_approve);
+    // The host's own choice counts: running it leaves the row as it was.
+    assert_eq!(sandbox("mine"), Some(SandboxLevel::DangerFullAccess));
+
+    // The same ask from any other client, with the setting off, or for the
+    // voice orchestrator starts asking.
+    let orchestrator = format!("{}1", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
+    let asking = [
+        (&other_client, "theirs", true),
+        (&host_ui, "setting-off", false),
+        (&host_ui, orchestrator.as_str(), true),
+    ];
+    for (turn, (client, chat, full_access)) in asking.into_iter().enumerate() {
+        client
+            .call(methods::MUTATE, create(chat, &core.device_id, full_access))
+            .await
+            .unwrap();
+        assert_eq!(sandbox(chat), Some(SandboxLevel::WorkspaceWrite), "{chat}");
+        let ran = first_turn(client, chat, turn + 2).await;
+        assert_eq!(ran.sandbox, SandboxLevel::WorkspaceWrite, "{chat}");
+        assert!(!ran.auto_approve, "{chat}");
+    }
+    // So does a session the UI starts on another device: that host decides.
+    host_ui
+        .call(methods::MUTATE, create("elsewhere", "other-device", true))
+        .await
+        .unwrap();
+    assert_eq!(sandbox("elsewhere"), Some(SandboxLevel::WorkspaceWrite));
+
+    // Sent before the UI resolved a harness, the createChat has no config:
+    // the host writes one on the harness the run falls back to.
+    host_ui
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "no-config", "deviceId": &core.device_id,
+                "cwd": "/tmp", "fullAccess": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let config = core.workspace.chat("no-config").unwrap().unwrap().config;
+    assert_eq!(
+        config.map(|c| (c.harness, c.sandbox)),
+        Some((HarnessId::Mock, SandboxLevel::DangerFullAccess))
+    );
+    let ran = first_turn(&host_ui, "no-config", 5).await;
+    assert_eq!(ran.sandbox, SandboxLevel::DangerFullAccess);
+    assert!(ran.auto_approve);
+
+    // A fork follows the same rule as a new chat.
+    let source = core.doc_host.open("theirs").unwrap();
+    source
+        .doc()
+        .push_message(&message("u1", MessageRole::User, "hello"))
+        .unwrap();
+    source
+        .doc()
+        .push_message(&message("a1", MessageRole::Assistant, "hi"))
+        .unwrap();
+    for (client, fork, expected) in [
+        (&host_ui, "fork-mine", SandboxLevel::DangerFullAccess),
+        (&other_client, "fork-theirs", SandboxLevel::WorkspaceWrite),
+    ] {
+        let forked = client
+            .call_as::<zeron_proto::Chat>(
+                methods::FORK_SIDE_CHAT,
+                serde_json::json!({ "chatId": fork, "sourceChatId": "theirs", "fullAccess": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forked.config.map(|c| c.sandbox), Some(expected), "{fork}");
+        assert_eq!(sandbox(fork), Some(expected), "{fork}");
+    }
+}
+
+#[tokio::test]
 async fn a_queued_run_never_seeds_full_access_into_a_claimed_session() {
     // A Run can reach the host before its chat row does (claim on first
     // command); the host then stamps the row from the run. That stamp must

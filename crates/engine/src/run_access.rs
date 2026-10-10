@@ -5,8 +5,24 @@
 //! `setChatConfig` from the session's own controls. A run request can't
 //! widen access by itself (a client's `autoApprove` flag, an agent asking
 //! for `danger-full-access` through the Zeron MCP tools), and new sessions
-//! and forks always start asking. A session that did choose full access gets
-//! it on every run, whichever device or client queued the prompt.
+//! and forks start asking. A session that did choose full access gets it on
+//! every run, whichever device or client queued the prompt.
+//!
+//! One exception, the owner's (9 Oct): with "New chats start with full
+//! access" on, a session or fork the owner starts from this device's own UI
+//! starts with full access ([`host_ui_full_access`]). Only the in-process UI
+//! can ask for it (`EngineCore::host_ui_rpc_service`; the IPC port and the
+//! relay serve a service that ignores the ask), and only for a session this
+//! device hosts. The host writes the choice itself, as a config write right
+//! after the mint in the same registry write
+//! (`WorkspaceHost::mint_chat_row`), so it counts below from the first run
+//! and no device ever sees the row asking first. A chat sent before the UI
+//! resolved a harness carries no config; the host writes one on the harness
+//! its runs fall back to. Everything else still starts asking: sessions
+//! from another client or device (a window attached to a daemon over IPC
+//! included, whose UI therefore doesn't request it), an agent's through the
+//! Zeron MCP tools, the voice orchestrator and the sessions it creates, and
+//! imported, claimed or re-homed rows.
 //!
 //! The host can't see who wrote a row, only the registry's per-field clocks,
 //! so "chose it" means the row's `config` was written after the row was
@@ -94,11 +110,20 @@ pub(crate) fn follow(workspace: WorkspaceHost, chat_id: String, access: watch::S
 }
 
 /// A new session (or a fork) starts asking: full access is turned on
-/// afterwards, on the session itself.
+/// afterwards, on the session itself, or by the host for its own UI
+/// ([`host_ui_full_access`]).
 pub(crate) fn start_asking(config: &mut ChatConfig) {
     if config.sandbox == SandboxLevel::DangerFullAccess {
         config.sandbox = SandboxLevel::WorkspaceWrite;
     }
+}
+
+/// Whether a new session or fork starts with full access: `asked` by the
+/// owner's setting, from this device's own UI (`from_host_ui`), and not the
+/// voice orchestrator, which drives other sessions mid-call. Every other
+/// session starts asking (see the module docs).
+pub(crate) fn host_ui_full_access(from_host_ui: bool, asked: bool, chat_id: &str) -> bool {
+    from_host_ui && asked && !zeron_proto::voice::is_orchestrator_chat(chat_id)
 }
 
 /// A session row's config as the host enforces it. `chosen_later`: the

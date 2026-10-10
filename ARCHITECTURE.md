@@ -59,11 +59,15 @@ Single binary `zeron`:
   create a chat on a harness that never asks (Cursor, OpenCode, Pi and the ACP agents run without
   approvals; only Claude Code and Codex ask). That chat's agent then acts without approvals,
   gated only by the user approving that one `create_chat` call (and not even that in the voice
-  orchestrator, below). New chats never start with full access (`create_chat` refuses
-  `danger-full-access`, and the host starts every new row asking), but that doesn't bind a
-  harness that never asks. The owner accepted both risks for now (7 Oct 2026). If that changes,
-  the options are turning network access off in the default sandbox, moving the secret into a
-  Keychain item the sandbox can't read, and refusing never-asking harnesses in `create_chat`.
+  orchestrator, below). Chats an agent creates never start with full access (`create_chat`
+  refuses `danger-full-access`, and the host starts every row another client mints asking),
+  but that doesn't bind a harness that never asks. Only the window's own UI, through the
+  in-process `EngineCore::host_ui_rpc_service`, can start a chat with full access (the owner's
+  "New chats start with full access" setting, 9 Oct 2026; `run_access`); the IPC port and the
+  relay serve `rpc_service`, which ignores the ask. The owner accepted both risks for now
+  (7 Oct 2026). If that changes, the options are turning network access off in the default
+  sandbox, moving the secret into a Keychain item the sandbox can't read, and refusing
+  never-asking harnesses in `create_chat`.
 - "Ask first" (Keron, the owner's call, 7 Oct 2026): Claude Code runs in `acceptEdits`, so file
   edits in the working directory go through and Bash and every other tool ask
   (`crates/harness/src/claude/mod.rs`); Codex's `workspace-write` sandbox already lets edits in

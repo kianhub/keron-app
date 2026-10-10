@@ -457,7 +457,20 @@ impl EngineCore {
         zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
     }
 
+    /// The RPC surface every transport serves: the relay, the IPC port (other
+    /// viewports, agents' Zeron MCP server) and tests.
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
+        Arc::new(self.build_rpc())
+    }
+
+    /// [`Self::rpc_service`] for this device's own UI, in process: the one
+    /// caller whose new sessions may start with full access (`run_access`).
+    /// Never serve it on the IPC port or the relay.
+    pub fn host_ui_rpc_service(&self) -> Arc<EngineRpc> {
+        Arc::new(self.build_rpc().for_host_ui())
+    }
+
+    fn build_rpc(&self) -> EngineRpc {
         let mut rpc = EngineRpc::new(
             self.sessions.clone(),
             self.doc_host.clone(),
@@ -485,7 +498,7 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
-        Arc::new(rpc)
+        rpc
     }
 
     /// Revoke every account-scoped transport before any slower graceful

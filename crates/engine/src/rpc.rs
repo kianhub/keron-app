@@ -546,6 +546,11 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// Start with full access: the owner's "New chats start with full
+        /// access" setting. Honoured only from this device's own UI
+        /// (`run_access::host_ui_full_access`); every other caller asks.
+        #[serde(default)]
+        full_access: bool,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -645,6 +650,10 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
+    /// Serves this device's own UI, in process (`for_host_ui`): the one
+    /// caller whose new sessions may start with full access. False for the
+    /// IPC port and the relay.
+    host_ui: bool,
 }
 
 impl EngineRpc {
@@ -691,7 +700,16 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             engine_info,
+            host_ui: false,
         }
+    }
+
+    /// This service as this device's own UI's, in process: its new sessions
+    /// and forks may start with full access (`run_access`). Never serve it
+    /// on the IPC port or the relay.
+    pub fn for_host_ui(mut self) -> Self {
+        self.host_ui = true;
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1236,17 +1254,27 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                full_access,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
                 // the user's top-level sessions rather than its side chats.
                 let parent_chat_id = parent_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
-                // Sessions start asking, whoever creates them (an agent's MCP
-                // call included); full access is chosen on the session later.
+                // Sessions start asking, whoever creates them (another
+                // device, an agent's MCP call, the voice orchestrator); full
+                // access is chosen on the session later. The exception: a
+                // session this device's own UI starts with the owner's
+                // setting on, which the host gives full access as it mints
+                // the row (see `run_access`).
                 let config = config.map(|mut config| {
                     crate::run_access::start_asking(&mut config);
                     config
                 });
+                // A chat sent before the UI resolved a harness has no config:
+                // the host writes one on the harness its runs fall back to.
+                let full_access =
+                    crate::run_access::host_ui_full_access(self.host_ui, full_access, &chat_id)
+                        .then(|| self.doc_host.harness_for(&chat_id));
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -1255,6 +1283,7 @@ impl EngineRpc {
                         config,
                         cwd,
                         parent_chat_id,
+                        full_access,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -2047,6 +2076,10 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     parent_chat_id: Option<String>,
+                    /// Start with full access, as a new chat does (the
+                    /// `createChat` field of the same name).
+                    #[serde(default)]
+                    full_access: bool,
                 }
                 let p: ForkParams = parse_params(params)?;
                 let parent_chat_id = p
@@ -2094,10 +2127,15 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
-                // A fork asks even when its source has full access.
+                // A fork asks even when its source has full access, unless
+                // this device's own UI starts it with full access like a new
+                // chat (minted below).
                 if let Some(config) = chat.config.as_mut() {
                     crate::run_access::start_asking(config);
                 }
+                let full_access =
+                    crate::run_access::host_ui_full_access(self.host_ui, p.full_access, &chat.id)
+                        .then(|| self.doc_host.harness_for(&chat.id));
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
@@ -2160,7 +2198,15 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 self.doc_host.persist_fork(&target).map_err(failed)?;
-                self.workspace.import_chat_row(&chat).map_err(failed)?;
+                self.workspace
+                    .mint_chat_row(&chat, full_access)
+                    .map_err(failed)?;
+                // The row as minted: the caller shows its access at once.
+                let chat = self
+                    .workspace
+                    .chat(&chat.id)
+                    .map_err(failed)?
+                    .unwrap_or(chat);
                 RpcReply::value(&chat)
             }
             methods::FOCUS_CHAT => {

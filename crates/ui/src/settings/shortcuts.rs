@@ -98,7 +98,7 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
-    _state: Entity<AppState>,
+    state: Entity<AppState>,
 }
 
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
@@ -145,7 +145,7 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
-            _state: state,
+            state,
         }
     }
 
@@ -1301,6 +1301,56 @@ impl Render for ShortcutsPage {
                     this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);
                 })),
             );
+        let full_access = crate::settings::new_chats_full_access(cx);
+        // Only an engine in this process honours the setting
+        // (`AppState::new_chats_full_access`); a window attached to a daemon
+        // starts its chats asking.
+        let full_access_note = if self
+            .state
+            .read(cx)
+            .engine()
+            .is_some_and(|engine| !engine.is_host_ui())
+        {
+            "This window uses the background engine, so its chats still ask."
+        } else {
+            "Chats you start here skip approval prompts and the sandbox."
+        };
+        let full_access_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(
+                        &theme,
+                        "New chats start with full access",
+                    ))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![div().child(full_access_note).into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, full_access, "new-chats-full-access")
+                    .id("new-chats-full-access-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("New chats start with full access")
+                    .aria_toggled(if full_access {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(
+                            crate::settings::SavePolicy::Debounced,
+                            cx,
+                            |settings| settings.new_chats_full_access = !full_access,
+                        );
+                        cx.notify();
+                    })),
+            );
         if self.general_page {
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
@@ -1326,7 +1376,8 @@ impl Render for ShortcutsPage {
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
-                                            .child(escape_behavior_row),
+                                            .child(escape_behavior_row)
+                                            .child(full_access_row),
                                     )
                                     .child(self.thread_naming.clone()),
                             ),
