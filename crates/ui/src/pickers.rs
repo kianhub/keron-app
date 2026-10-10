@@ -725,6 +725,12 @@ pub struct Pickers {
     chat_run_active: bool,
     /// The chat branch popover's search field is naming a new branch.
     naming_branch: bool,
+    /// In-flight `SwitchChatBranch`: the chat whose checkout is switching
+    /// and the branch it goes to. Only that chat's popover waits on it.
+    chat_switch: Option<(String, String)>,
+    chat_switch_task: Option<Task<()>>,
+    /// The selected chat's last switch refusal (git's reason).
+    chat_switch_error: Option<String>,
     /// Coming back to the window re-reads the chat's branch (a terminal may
     /// have switched it meanwhile).
     window_activation: Option<Subscription>,
@@ -820,6 +826,7 @@ impl Pickers {
                 this.chat_branches_owner = None;
                 this.chat_branches_task = None;
                 this.naming_branch = false;
+                this.chat_switch_error = None;
             }
             // A run ending re-reads the branch: the agent may have switched.
             let running = this.selected_chat_running(cx);
@@ -970,6 +977,9 @@ impl Pickers {
             chat_branches_task: None,
             chat_run_active: false,
             naming_branch: false,
+            chat_switch: None,
+            chat_switch_task: None,
+            chat_switch_error: None,
             window_activation: None,
             mutate_task: None,
             _search_events: search_events,
@@ -1441,6 +1451,7 @@ impl Pickers {
         match kind {
             PickerKind::Branch => {
                 self.switch_error = None; // stale mid-session failures don't linger
+                self.chat_switch_error = None;
                 self.naming_branch = false;
                 let placeholder = if self.in_session(cx) {
                     "Search branches…"

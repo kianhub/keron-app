@@ -858,9 +858,12 @@ impl EngineRpc {
         ))
     }
 
-    /// The folder a chat this device hosts works in. Chat-scoped git RPCs
-    /// resolve it from the chat's row, never from a path the client sends.
-    fn hosted_chat_cwd(&self, chat_id: &str) -> Result<std::path::PathBuf, RpcError> {
+    /// A chat this device hosts and the folder it works in. Chat-scoped git
+    /// RPCs resolve it from the chat's row, never from a path the client sends.
+    fn hosted_chat(
+        &self,
+        chat_id: &str,
+    ) -> Result<(zeron_proto::Chat, std::path::PathBuf), RpcError> {
         let chat = self
             .workspace
             .chat(chat_id)
@@ -873,9 +876,27 @@ impl EngineRpc {
             .cwd
             .as_deref()
             .ok_or_else(|| RpcError::Failed("chat has no checkout".into()))?;
-        crate::repos::expand_home(cwd)
+        let cwd = crate::repos::expand_home(cwd)
             .map(std::path::PathBuf::from)
-            .map_err(|e| RpcError::Failed(e.to_string()))
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        Ok((chat, cwd))
+    }
+
+    /// Whether `cwd` is a linked worktree of the chat's own, not its
+    /// project's folder, which every Local-checkout chat in the project
+    /// shares.
+    fn chat_owns_checkout(&self, chat: &zeron_proto::Chat, cwd: &std::path::Path) -> bool {
+        let trim = |path: &str| path.trim_end_matches('/').to_owned();
+        let Some(space_path) = chat
+            .space_id
+            .as_deref()
+            .and_then(|id| self.workspace.space(id).ok().flatten())
+            .and_then(|space| crate::repos::expand_home(&space.path).ok())
+        else {
+            return false;
+        };
+        crate::workspace_host::linked_worktree_root(cwd).is_some()
+            && trim(&cwd.to_string_lossy()) != trim(&space_path)
     }
 
     /// A local chat with a run in flight in the checkout `identity` names.
@@ -3065,12 +3086,23 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_CHAT_BRANCHES => {
                 let p: ChatBranchParams = parse_params(params)?;
-                let cwd = self.hosted_chat_cwd(&p.chat_id)?;
+                let (chat, cwd) = self.hosted_chat(&p.chat_id)?;
                 let branches = self
                     .repos
                     .checkout_branches(&cwd)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // A worktree belongs to its chat, so the recorded branch (the
+                // sidebar's tooltip, the PR badge) follows whatever its agent
+                // or a terminal checked out there. Chats sharing the project's
+                // folder keep the branch they were recorded on.
+                if let Some(current) = branches.current.as_deref()
+                    && chat.branch.as_deref() != Some(current)
+                    && self.chat_owns_checkout(&chat, &cwd)
+                    && let Err(err) = self.workspace.set_chat_branch(&chat.id, current)
+                {
+                    tracing::warn!(chat = %chat.id, error = %err, "chat branch follow failed");
+                }
                 RpcReply::value(&branches)
             }
             methods::SWITCH_CHAT_BRANCH => {
@@ -3078,7 +3110,7 @@ impl RpcService for EngineRpc {
                 // stack frame, like the other checkout mutations.
                 Box::pin(async move {
                     let p: ChatBranchParams = parse_params(params)?;
-                    let cwd = self.hosted_chat_cwd(&p.chat_id)?;
+                    let (_, cwd) = self.hosted_chat(&p.chat_id)?;
                     let identity = self
                         .repos
                         .checkout_identity(&cwd)

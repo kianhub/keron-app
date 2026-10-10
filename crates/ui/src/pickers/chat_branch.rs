@@ -67,6 +67,16 @@ impl Pickers {
             .is_some_and(|chat| chat_running(state, chat))
     }
 
+    /// The branch the selected chat's checkout is switching to. A switch
+    /// another chat started doesn't hold this chat's rows.
+    fn switching_branch(&self, cx: &App) -> Option<&str> {
+        let selected = self.state.read(cx).selected_chat.as_deref()?;
+        self.chat_switch
+            .as_ref()
+            .filter(|(chat, _)| chat == selected)
+            .map(|(_, branch)| branch.as_str())
+    }
+
     /// Why the selected chat's checkout can't switch right now. Switching
     /// under a working agent breaks its work, whichever chat it serves.
     fn switch_block(&self, cx: &App) -> Option<&'static str> {
@@ -225,7 +235,7 @@ impl Pickers {
             return;
         }
         self.naming_branch = true;
-        self.switch_error = None;
+        self.chat_switch_error = None;
         self.search.update(cx, |input, cx| {
             input.set_placeholder("New branch name", cx);
         });
@@ -235,7 +245,7 @@ impl Pickers {
     /// Escape while naming goes back to the branch list.
     pub(super) fn stop_naming_branch(&mut self, cx: &mut Context<Self>) {
         self.naming_branch = false;
-        self.switch_error = None;
+        self.chat_switch_error = None;
         self.search_reset_muted = !self.search.read(cx).text().is_empty();
         self.search.update(cx, |input, cx| {
             input.set_placeholder("Search branches…", cx);
@@ -250,8 +260,8 @@ impl Pickers {
     /// `SwitchChatBranch` on the chat's host. Success replaces the listing
     /// and closes; a refusal keeps the popover open with the reason.
     fn switch_chat_branch(&mut self, name: String, create: bool, cx: &mut Context<Self>) {
-        if self.switching.is_some() {
-            return; // one switch at a time
+        if self.switching_branch(cx).is_some() {
+            return; // one switch at a time per chat
         }
         let Some((chat, local)) = ({
             let state = self.state.read(cx);
@@ -264,9 +274,13 @@ impl Pickers {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        self.switch_error = None;
-        self.switching = Some(name.clone());
-        self.switch_task = Some(cx.spawn(async move |this, cx| {
+        self.chat_switch_error = None;
+        self.chat_switch = Some((chat.id.clone(), name.clone()));
+        // A switch another chat left in flight still settles itself.
+        if let Some(earlier) = self.chat_switch_task.take() {
+            earlier.detach();
+        }
+        self.chat_switch_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(
@@ -279,21 +293,46 @@ impl Pickers {
                     serde_json::from_value::<CheckoutBranches>(value).map_err(|e| e.to_string())
                 });
             this.update(cx, |pickers, cx| {
-                pickers.switching = None;
-                match result {
-                    Ok(branches) => {
-                        if pickers.chat_branches_owner.as_deref() == Some(chat.id.as_str()) {
-                            pickers.chat_branches = Loadable::Ready(branches);
-                        }
-                        pickers.naming_branch = false;
-                        pickers.close(cx);
-                    }
-                    Err(err) => pickers.switch_error = Some(err),
-                }
-                cx.notify();
+                pickers.finish_chat_switch(&chat.id, &name, result, cx);
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    /// A switch landed. Its chat's listing takes the result; the popover
+    /// closes or shows git's reason only while that chat is still selected,
+    /// never in another chat's popover.
+    fn finish_chat_switch(
+        &mut self,
+        chat_id: &str,
+        branch: &str,
+        result: Result<CheckoutBranches, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chat_switch
+            .as_ref()
+            .is_some_and(|(chat, name)| chat == chat_id && name == branch)
+        {
+            self.chat_switch = None;
+        }
+        let selected = self.state.read(cx).selected_chat.as_deref() == Some(chat_id);
+        match result {
+            Ok(branches) => {
+                if self.chat_branches_owner.as_deref() == Some(chat_id) {
+                    self.chat_branches = Loadable::Ready(branches);
+                }
+                if selected {
+                    self.naming_branch = false;
+                    if self.open_kind() == Some(PickerKind::Branch) {
+                        self.close(cx);
+                    }
+                }
+            }
+            Err(err) if selected => self.chat_switch_error = Some(err),
+            Err(_) => {}
+        }
         cx.notify();
     }
 
@@ -322,7 +361,7 @@ impl Pickers {
                     .is_some_and(|space| chat_worktree(chat, space).is_none())
             })
         };
-        let switching = self.switching.clone();
+        let switching = self.switching_branch(cx).map(str::to_owned);
         let current = self
             .chat_branches
             .ready()
@@ -465,7 +504,7 @@ impl Pickers {
         // refused, and that a shared folder moves every chat in it.
         let notes: Vec<(SharedString, gpui::Hsla)> = [
             block.map(|text| (SharedString::from(text), theme.warning)),
-            self.switch_error
+            self.chat_switch_error
                 .clone()
                 .map(|text| (SharedString::from(text), theme.danger.opacity(0.9))),
             local_checkout.then(|| {
@@ -561,5 +600,51 @@ mod tests {
         // Until git answers (or when the host can't be reached).
         assert_eq!(chat_branch_label(None, Some("main")), "main");
         assert_eq!(chat_branch_label(None, None), "No ref");
+    }
+
+    #[gpui::test]
+    fn a_switch_in_flight_stays_with_the_chat_that_started_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            for id in ["a", "b"] {
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "device", "archived": false,
+                        "createdAt": "2026-09-01T00:00:00Z"
+                    }))
+                    .unwrap(),
+                );
+            }
+            state.selected_chat = Some("a".into());
+            state
+        });
+        let select = |id: &str, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, cx| {
+                state.selected_chat = Some(id.into());
+                cx.notify();
+            });
+        };
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.chat_switch = Some(("a".into(), "feature".into()));
+            assert_eq!(pickers.switching_branch(cx), Some("feature"));
+        });
+        // A's switch is still in flight when B is picked in the sidebar.
+        select("b", cx);
+        pickers.update(cx, |pickers, cx| {
+            assert_eq!(pickers.switching_branch(cx), None);
+            pickers.finish_chat_switch("a", "feature", Err("dirty tree".into()), cx);
+            assert_eq!(pickers.chat_switch_error, None);
+            assert_eq!(pickers.chat_switch, None);
+        });
+        // A's own refusal shows in A.
+        select("a", cx);
+        pickers.update(cx, |pickers, cx| {
+            pickers.chat_switch = Some(("a".into(), "feature".into()));
+            pickers.finish_chat_switch("a", "feature", Err("dirty tree".into()), cx);
+            assert_eq!(pickers.chat_switch_error.as_deref(), Some("dirty tree"));
+            assert_eq!(pickers.switching_branch(cx), None);
+        });
     }
 }

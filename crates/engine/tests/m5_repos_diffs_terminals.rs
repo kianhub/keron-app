@@ -2208,6 +2208,62 @@ async fn chat_branch_rpcs_switch_the_chats_checkout() {
     core.shutdown().await;
 }
 
+/// A worktree chat's recorded branch follows a switch its agent made there;
+/// a chat on the project's shared folder keeps the branch it was recorded on.
+#[tokio::test]
+async fn listing_a_worktree_chats_branches_records_its_live_branch() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core = assemble(&tmp.path().join("data"));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let repo = tmp.path().join("repo");
+    let tree = tmp.path().join("brave-otter");
+    init_repo(&repo).await;
+    let tree_path = tree.to_string_lossy().to_string();
+    git(
+        &repo,
+        &["worktree", "add", "-b", "zeron/brave-otter", &tree_path],
+    )
+    .await;
+    let repo_path = repo.to_string_lossy().to_string();
+    core.workspace
+        .create_space("space-follow", &core.device_id, &repo_path, None, true)
+        .expect("space");
+    for (chat, cwd, branch) in [
+        ("chat-tree", &tree_path, "zeron/brave-otter"),
+        ("chat-local", &repo_path, "main"),
+    ] {
+        core.workspace
+            .create_chat(chat, Some("space-follow"), None, None, Some(cwd.clone()))
+            .expect("chat");
+        core.workspace
+            .set_chat_branch(chat, branch)
+            .expect("record branch");
+    }
+    // The agents switch branches themselves, outside the dropdown.
+    git(&tree, &["switch", "-c", "fix/login"]).await;
+    git(&repo, &["switch", "-c", "scratch"]).await;
+
+    for chat in ["chat-tree", "chat-local"] {
+        client
+            .call(
+                methods::LIST_CHAT_BRANCHES,
+                serde_json::json!({ "chatId": chat }),
+            )
+            .await
+            .expect("ListChatBranches");
+    }
+    let recorded = |id: &str| {
+        core.workspace
+            .chat(id)
+            .expect("read chat")
+            .expect("chat row")
+            .branch
+    };
+    assert_eq!(recorded("chat-tree").as_deref(), Some("fix/login"));
+    assert_eq!(recorded("chat-local").as_deref(), Some("main"));
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_dispatch_for_m5_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
