@@ -27,7 +27,9 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
+use zeron_proto::{
+    Chat, ChatConfig, Device, SandboxLevel, Session, SidebarPreferencesState, Space,
+};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -935,11 +937,14 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None)
+        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None, false)
     }
 
     /// [`create_chat`](Self::create_chat) recording the creating chat
-    /// (`parentChatId`) — the Zeron MCP's orchestration link.
+    /// (`parentChatId`) — the Zeron MCP's orchestration link. `full_access`:
+    /// this device's own UI starts the session with full access (see
+    /// [`Self::mint_chat_row`]).
+    #[allow(clippy::too_many_arguments)] // the createChat Mutate's fields, one to one
     pub fn create_chat_with_parent(
         &self,
         chat_id: &str,
@@ -948,6 +953,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         parent_chat_id: Option<String>,
+        full_access: bool,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
@@ -968,10 +974,10 @@ impl WorkspaceHost {
                 ));
             }
         };
-        self.mutate(|doc| {
-            doc.upsert_chat(&Chat {
+        self.mint_chat_row(
+            &Chat {
                 id: chat_id.to_string(),
-                device_id: host_device.clone(),
+                device_id: host_device,
                 title: None,
                 archived: false,
                 cwd: Some(cwd.unwrap_or_else(|| {
@@ -996,7 +1002,34 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
-            })
+            },
+            full_access,
+        )
+    }
+
+    /// Write a new session's whole row (a created chat or a fork). With
+    /// `full_access` (this device's own UI started it with the owner's
+    /// setting on, `run_access::host_ui_full_access`), the same registry
+    /// write then sets the row's config to full access: a config write
+    /// after the mint, the host's own choice, which `run_access` counts from
+    /// the first run. Both land under one lock, so no reader ever sees the
+    /// row asking first. A row another device hosts, or one without a
+    /// config, starts asking regardless.
+    pub fn mint_chat_row(&self, chat: &Chat, full_access: bool) -> Result<(), EngineError> {
+        let chosen = chat
+            .config
+            .clone()
+            .filter(|_| full_access && chat.device_id == self.device_id())
+            .map(|mut config| {
+                config.sandbox = SandboxLevel::DangerFullAccess;
+                config
+            });
+        self.mutate(|doc| -> Result<(), zeron_doc::DocError> {
+            doc.upsert_chat(chat)?;
+            if let Some(config) = &chosen {
+                doc.set_chat_config(&chat.id, config)?;
+            }
+            Ok(())
         })?;
         Ok(())
     }

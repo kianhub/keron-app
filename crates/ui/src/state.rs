@@ -349,27 +349,35 @@ impl EngineHandle {
         let engine_info = Engine::engine_info(&engine_config, workspace_scope)?;
         let refresh_task = auth.spawn_refresh_loop();
         let (state_tx, mut state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
+        // Two views of one engine: this window's own (in process, the host
+        // UI's service, whose new chats may start with full access) and the
+        // IPC port's (other viewports and agents' Zeron MCP server, whose
+        // new chats always start asking; see `run_access`).
         let assembled_service = Arc::new(tokio::sync::OnceCell::new());
-        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc {
-            auth: AuthRpc::new(auth.clone()),
-            engine_info: engine_info.clone(),
-            state: state_rx.clone(),
-            service: assembled_service.clone(),
-        });
+        let host_ui_service = Arc::new(tokio::sync::OnceCell::new());
+        let deferred = |service: &Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>| {
+            Arc::new(DeferredEngineRpc {
+                auth: AuthRpc::new(auth.clone()),
+                engine_info: engine_info.clone(),
+                state: state_rx.clone(),
+                service: service.clone(),
+            }) as Arc<dyn RpcService>
+        };
+        let service = deferred(&host_ui_service);
+        let ipc_service = deferred(&assembled_service);
         let client = memory_client(service.clone());
 
-        // Serve the same service on the IPC port so a terminal viewport can
-        // attach to this window's engine with no setup. Deliberately the
-        // *deferred* service, not the assembled one: a viewport that connects
-        // during cloud onboarding gets EngineInfo and AuthRpc immediately, and
-        // its data subscriptions wait exactly as this window's do.
+        // Serve the engine on the IPC port so a terminal viewport can attach
+        // to this window's engine with no setup. Deliberately a *deferred*
+        // service, not the assembled one: a viewport that connects during
+        // cloud onboarding gets EngineInfo and AuthRpc immediately, and its
+        // data subscriptions wait exactly as this window's do.
         //
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one. Never served without its secret.
         let ipc_task = match IpcSecret::load_or_create(&engine_config.data_dir) {
             Ok(secret) => {
-                match zeron_engine::serve_ipc(engine_config.ipc_port, service.clone(), secret).await
-                {
+                match zeron_engine::serve_ipc(engine_config.ipc_port, ipc_service, secret).await {
                     Ok(task) => Some(task),
                     Err(err) => {
                         tracing::warn!(
@@ -392,6 +400,7 @@ impl EngineHandle {
         let runtime = Arc::new(tokio::sync::Mutex::new(None));
         let runtime_for_boot = runtime.clone();
         let service_for_boot = assembled_service.clone();
+        let host_ui_for_boot = host_ui_service.clone();
         // Agents only learn a port THIS window serves: a lost bind race must
         // not point their injected MCP server at some other engine.
         let served_ipc_port = ipc_task.as_ref().map(|_| engine_config.ipc_port);
@@ -431,6 +440,7 @@ impl EngineHandle {
             match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
                 Ok(engine_runtime) => {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
+                    let host_ui: Arc<dyn RpcService> = engine_runtime.core().host_ui_rpc_service();
                     if let Some(port) = served_ipc_port {
                         engine_runtime.core().sessions.set_ipc_port(port);
                         engine_runtime
@@ -439,7 +449,9 @@ impl EngineHandle {
                             .set_ipc_secret_file(ipc_secret_file);
                     }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
-                    if service_for_boot.set(service).is_err() {
+                    if service_for_boot.set(service).is_err()
+                        || host_ui_for_boot.set(host_ui).is_err()
+                    {
                         state_tx.send_replace(DeferredEngineState::Failed(
                             "embedded engine RPC service was assembled more than once".into(),
                         ));
@@ -2302,12 +2314,23 @@ impl AppState {
     }
 
     /// The `Mutate createChat` params that mint the unsaved side chat
-    /// `chat_id` on its first send; `None` once it exists.
-    pub(crate) fn unsaved_side_chat_create(&self, chat_id: &str) -> Option<serde_json::Value> {
+    /// `chat_id` on its first send; `None` once it exists. `full_access`:
+    /// the "New chats start with full access" setting. The chat asks the host
+    /// for it while its own access chip still shows it.
+    pub(crate) fn unsaved_side_chat_create(
+        &self,
+        chat_id: &str,
+        full_access: bool,
+    ) -> Option<serde_json::Value> {
         if !self.is_unsaved_side_chat(chat_id) {
             return None;
         }
         let chat = self.pending_side_chat.as_ref()?;
+        let full_access = full_access
+            && chat
+                .config
+                .as_ref()
+                .is_some_and(|c| c.sandbox == zeron_proto::SandboxLevel::DangerFullAccess);
         Some(serde_json::json!({
             "op": "createChat",
             "chatId": chat.id,
@@ -2317,6 +2340,7 @@ impl AppState {
             "branch": chat.branch,
             "cwd": chat.cwd,
             "parentChatId": chat.parent_chat_id,
+            "fullAccess": full_access,
         }))
     }
 

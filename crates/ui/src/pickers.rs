@@ -6516,7 +6516,10 @@ mod tests {
                 assert_eq!(resolved.model, None);
                 assert_eq!(resolved.reasoning, None);
                 assert!(resolved.model_options.is_empty());
-                let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
+                let create = state
+                    .read(cx)
+                    .unsaved_side_chat_create("side", true)
+                    .unwrap();
                 assert_eq!(create["config"]["harness"], "codex");
                 assert_eq!(create["config"]["model"], serde_json::Value::Null);
                 assert_eq!(create["config"]["sandbox"], "read-only");
@@ -6568,7 +6571,10 @@ mod tests {
                 assert_eq!(rows[0].harness, HarnessId::Codex);
                 pickers.activate_model_index(0, cx);
                 pickers.pick_reasoning(ReasoningLevel::Low, cx);
-                let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
+                let create = state
+                    .read(cx)
+                    .unsaved_side_chat_create("side", true)
+                    .unwrap();
                 assert_eq!(create["config"]["harness"], "codex");
                 assert_eq!(create["config"]["model"], "codex-model");
                 assert_eq!(create["config"]["reasoning"], "low");
