@@ -296,6 +296,18 @@ const JETBRAINS_MONO: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
+/// Nerd Fonts' symbols (v3.4.0, MIT; glyph sources in the bundled notice),
+/// the Mono variant so every icon fits one cell. Never a choice in the font
+/// menus: the terminal falls back to it for the icon glyphs prompts use
+/// (the Apple logo, folders, git branches) that text fonts don't have, as
+/// Ghostty does with the same font.
+const TERMINAL_SYMBOLS: [&[u8]; 1] = [include_bytes!(
+    "../assets/fonts/SymbolsNerdFontMono-Regular.ttf"
+)];
+
+/// The family name of [`TERMINAL_SYMBOLS`], for a font's fallback list.
+pub const TERMINAL_SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+
 /// Font faces shared by the interface and SVG text-to-path conversion.
 pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
@@ -385,12 +397,19 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         .all_font_names()
         .into_iter()
         .filter(|name| !name.starts_with('.'))
-        .filter(|name| !matches!(name.as_str(), "Geist" | "Geist Mono" | "JetBrains Mono"))
+        .filter(|name| {
+            !matches!(
+                name.as_str(),
+                "Geist" | "Geist Mono" | "JetBrains Mono" | TERMINAL_SYMBOLS_FAMILY
+            )
+        })
         .filter(|name| families_with_latin_metrics.contains_key(name))
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
     let jetbrains_mono = register_family(cx, &UiFontFamily::JetBrainsMono, &JETBRAINS_MONO);
+    let symbols = UiFontFamily::Installed(TERMINAL_SYMBOLS_FAMILY.into());
+    register_family(cx, &symbols, &TERMINAL_SYMBOLS);
     let mut choices = vec![
         UiFontFamily::Geist,
         UiFontFamily::GeistMono,
