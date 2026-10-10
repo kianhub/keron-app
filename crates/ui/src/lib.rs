@@ -60,6 +60,7 @@ pub mod settings;
 pub mod shell;
 pub mod sound;
 pub mod state;
+mod subagent_stack;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
