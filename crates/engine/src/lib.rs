@@ -46,6 +46,10 @@ pub mod voice;
 pub mod workspace_files;
 pub mod workspace_host;
 
+#[cfg(test)]
+#[path = "../tests/support/git.rs"]
+mod git_fixture;
+
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};

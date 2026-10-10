@@ -160,6 +160,10 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
     }
 }
 
+/// A `--version` probe still running after this long is hung: the child is
+/// killed and the executable reports no version.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Probe once per executable identity. Failures are cached too, including timeout.
 /// Keep the lock during the short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
@@ -208,7 +212,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         let success = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
-                Ok(None) if start.elapsed() < Duration::from_secs(2) => {
+                Ok(None) if start.elapsed() < VERSION_PROBE_TIMEOUT => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
                 _ => {
@@ -227,7 +231,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         }
         let mut bytes = Vec::new();
         for reader in readers {
-            while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
+            while !reader.is_finished() && start.elapsed() < VERSION_PROBE_TIMEOUT {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !reader.is_finished() {
@@ -256,7 +260,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                         .stdout(crate::process::Stdio::piped())
                         .stderr(crate::process::Stdio::piped())
                         .kill_on_drop(true);
-                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+                    let output = tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.output())
                         .await
                         .ok()?
                         .ok()?;
@@ -645,15 +649,22 @@ mod tests {
     fn version_probe_bounds_hangs_and_rejects_nonzero() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        for (name, body) in [("failed", "echo 9.0.0; exit 1"), ("hung", "sleep 30")] {
+        let finished = dir.path().join("hung-finished");
+        let hung = format!("sleep 60; touch {}", finished.display());
+        for (name, body) in [("failed", "echo 9.0.0; exit 1"), ("hung", hung.as_str())] {
             let path = dir.path().join(name);
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             let started = std::time::Instant::now();
             assert_eq!(binary_version(&path), None);
-            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            // The probe returns on its own deadline, not the script's: the
+            // margin covers a loaded machine stretching the spawn and the
+            // kill, and stays far below the hung script's own lifetime.
+            assert!(started.elapsed() < VERSION_PROBE_TIMEOUT * 10);
             assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
         }
+        // The hung script was killed rather than waited out.
+        assert!(!finished.exists());
     }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {

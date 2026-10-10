@@ -142,7 +142,9 @@ async fn relay(hold: Hold) -> Relay {
 }
 
 async fn until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // A progress deadline, not a budget: a 29-chat catch-up takes a couple
+    // of seconds on an idle machine and several on a loaded one.
+    tokio::time::timeout(Duration::from_secs(20), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

@@ -16,10 +16,11 @@ fn write_executable(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[path = "support/git.rs"]
+mod git_fixture;
+
 fn run_git(cwd: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+    let output = git_fixture::command(cwd, args)
         .output()
         .expect("git fixture command starts");
     assert!(

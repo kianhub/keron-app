@@ -44,7 +44,16 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                // A Zeron or Keron app running on this machine looks for dev
+                // servers by sending `HEAD /` to every listener whose process
+                // runs under one of its projects, and this test binary runs
+                // under the repo. The engine never sends a bare HEAD to Edge,
+                // so such a probe is not its traffic: drop it unanswered so
+                // the prober backs off instead of listing a preview.
+                if request[..read].starts_with(b"HEAD / ") {
+                    return;
+                }
                 seen.fetch_add(1, Ordering::SeqCst);
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(

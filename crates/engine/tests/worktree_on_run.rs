@@ -6,7 +6,6 @@
 //! instead of minting another.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -130,12 +129,11 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
     }
 }
 
+#[path = "support/git.rs"]
+mod git_fixture;
+
 fn git(cwd: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("git runs");
+    let out = git_fixture::command(cwd, args).output().expect("git runs");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",

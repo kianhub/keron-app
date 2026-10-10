@@ -1807,7 +1807,7 @@ mod generated_image_tests {
 
     #[tokio::test]
     async fn a_queued_file_reads_back_with_its_bytes_and_display_name() {
-        let executor = gpui_platform::background_executor();
+        let executor = crate::test_platform::background_executor();
         for bytes in [b"# notes\n".to_vec(), Vec::new()] {
             let engine = EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(
                 FileRpc(bytes.clone()),
@@ -1835,7 +1835,7 @@ mod generated_image_tests {
 
     #[tokio::test]
     async fn generated_image_chunk_reader_targets_owner_and_bounds_decode() {
-        let executor = gpui_platform::background_executor();
+        let executor = crate::test_platform::background_executor();
         for (width, target, expected, succeeds) in [
             (64, Some("remote-owner"), "image/png", true),
             (64, None, "image/png", true),
