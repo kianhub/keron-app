@@ -198,14 +198,11 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
 }
 
+#[path = "support/git.rs"]
+mod git_fixture;
+
 async fn git(cwd: &std::path::Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test")
+    let output = tokio::process::Command::from(git_fixture::command(cwd, args))
         .output()
         .await
         .expect("git spawns");
@@ -272,9 +269,7 @@ impl CheckoutChangeRequestLookup for StaticChangeRequestLookup {
 
 fn init_git_repo(path: &std::path::Path) {
     std::fs::create_dir_all(path).expect("create git fixture");
-    let status = std::process::Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .current_dir(path)
+    let status = git_fixture::command(path, &["init", "-q", "-b", "main"])
         .status()
         .expect("spawn git init");
     assert!(status.success(), "git init failed");

@@ -26,14 +26,11 @@ use zeron_rpc::methods;
 // Fixtures
 // ---------------------------------------------------------------------------
 
+#[path = "support/git.rs"]
+mod git_fixture;
+
 async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test")
+    let output = tokio::process::Command::from(git_fixture::command(cwd, args))
         .output()
         .await
         .expect("git spawns");
@@ -46,9 +43,7 @@ async fn git(cwd: &Path, args: &[&str]) {
 }
 
 async fn git_stdout(cwd: &Path, args: &[&str]) -> String {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+    let output = tokio::process::Command::from(git_fixture::command(cwd, args))
         .output()
         .await
         .expect("git spawns");

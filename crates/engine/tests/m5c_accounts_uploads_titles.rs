@@ -168,14 +168,11 @@ fn assemble_with_mock(dir: &Path, script: Vec<AgentEvent>) -> EngineCore {
     EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None).expect("engine assembles")
 }
 
+#[path = "support/git.rs"]
+mod git_fixture;
+
 async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test")
+    let output = tokio::process::Command::from(git_fixture::command(cwd, args))
         .output()
         .await
         .expect("git spawns");

@@ -5952,13 +5952,10 @@ mod transfer_progress_tests {
 #[cfg(test)]
 mod source_context_tests {
     use super::{DocHost, DocHostConfig};
-    use std::process::Command;
     use std::sync::Arc;
 
     fn git(repo: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(repo)
+        let status = crate::git_fixture::command(repo, args)
             .status()
             .expect("git runs");
         assert!(status.success(), "git {args:?} failed");

@@ -930,9 +930,7 @@ mod tests {
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
+        let output = crate::git_fixture::command(cwd, args)
             .output()
             .expect("git fixture command starts");
         assert!(
