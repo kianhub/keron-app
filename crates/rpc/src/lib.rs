@@ -161,6 +161,11 @@ pub mod methods {
     /// Update remote-tracking refs without changing HEAD, the index, or files.
     pub const FETCH_ALL: &str = "FetchAll";
     pub const SWITCH_REF: &str = "SwitchRef";
+    /// A chat's checkout as git reports it now: current branch and the local
+    /// branches it could switch to.
+    pub const LIST_CHAT_BRANCHES: &str = "ListChatBranches";
+    /// Switch a chat's checkout to a local branch, or create one from HEAD.
+    pub const SWITCH_CHAT_BRANCH: &str = "SwitchChatBranch";
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";

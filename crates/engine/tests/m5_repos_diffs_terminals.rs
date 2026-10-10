@@ -2130,6 +2130,84 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
 // RPC dispatch over the in-memory transport
 // ---------------------------------------------------------------------------
 
+/// The chat branch RPCs act on the chat's own folder, resolved from its row,
+/// and the conversation follows the branch it was switched to.
+#[tokio::test]
+async fn chat_branch_rpcs_switch_the_chats_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core = assemble(&tmp.path().join("data"));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let repo = tmp.path().join("repo");
+    init_repo(&repo).await;
+    git(&repo, &["branch", "feature"]).await;
+    let repo_path = repo.to_string_lossy().to_string();
+    core.workspace
+        .create_space("space-branch", &core.device_id, &repo_path, None, true)
+        .expect("space");
+    core.workspace
+        .create_chat("chat-branch", Some("space-branch"), None, None, None)
+        .expect("chat");
+
+    let listed = client
+        .call(
+            methods::LIST_CHAT_BRANCHES,
+            serde_json::json!({ "chatId": "chat-branch" }),
+        )
+        .await
+        .expect("ListChatBranches");
+    assert_eq!(listed["current"], "main");
+
+    let switched = client
+        .call(
+            methods::SWITCH_CHAT_BRANCH,
+            serde_json::json!({ "chatId": "chat-branch", "branch": "feature" }),
+        )
+        .await
+        .expect("SwitchChatBranch");
+    assert_eq!(switched["current"], "feature");
+    assert_eq!(
+        git_stdout(&repo, &["branch", "--show-current"]).await,
+        "feature"
+    );
+    let chat = core
+        .workspace
+        .chat("chat-branch")
+        .expect("read chat")
+        .expect("chat row");
+    assert_eq!(chat.branch.as_deref(), Some("feature"));
+
+    let created = client
+        .call(
+            methods::SWITCH_CHAT_BRANCH,
+            serde_json::json!({ "chatId": "chat-branch", "branch": "topic", "create": true }),
+        )
+        .await
+        .expect("SwitchChatBranch create");
+    assert_eq!(created["current"], "topic");
+
+    // A chat this device doesn't host is never switched from here.
+    core.workspace
+        .create_chat("chat-elsewhere", Some("space-branch"), None, None, None)
+        .expect("second chat");
+    core.workspace
+        .set_chat_host("chat-elsewhere", "other-device")
+        .expect("re-home chat");
+    assert!(
+        client
+            .call(
+                methods::SWITCH_CHAT_BRANCH,
+                serde_json::json!({ "chatId": "chat-elsewhere", "branch": "main" }),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git_stdout(&repo, &["branch", "--show-current"]).await,
+        "topic"
+    );
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_dispatch_for_m5_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");

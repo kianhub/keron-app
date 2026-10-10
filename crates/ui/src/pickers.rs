@@ -12,7 +12,10 @@
 //! rendered as skeletons / inline errors with Retry.
 
 mod access;
+mod chat_branch;
 mod compact;
+
+pub(crate) use chat_branch::{chat_worktree, folder_name};
 
 use crate::roll_text::{roll_text, rolling};
 use std::collections::{HashMap, HashSet};
@@ -711,6 +714,20 @@ pub struct Pickers {
     switch_task: Option<Task<()>>,
     /// Last mid-session switch failure (shown in the ref popover).
     switch_error: Option<String>,
+    /// The selected chat's checkout as git reports it now
+    /// (`ListChatBranches`): the session footer's branch chip and popover.
+    chat_branches: Loadable<zeron_proto::CheckoutBranches>,
+    /// Chat the `chat_branches` slot belongs to.
+    chat_branches_owner: Option<String>,
+    chat_branches_task: Option<Task<()>>,
+    /// The selected chat's agent was running at the last state change; the
+    /// run ending re-reads its branch (agents switch branches themselves).
+    chat_run_active: bool,
+    /// The chat branch popover's search field is naming a new branch.
+    naming_branch: bool,
+    /// Coming back to the window re-reads the chat's branch (a terminal may
+    /// have switched it meanwhile).
+    window_activation: Option<Subscription>,
     mutate_task: Option<Task<()>>,
     _search_events: Subscription,
     _state_observe: Subscription,
@@ -798,6 +815,16 @@ impl Pickers {
                 this.config.model = None;
                 this.config.reasoning = None;
                 this.switch_error = None;
+                // The branch slot belongs to the previous chat.
+                this.chat_branches = Loadable::Idle;
+                this.chat_branches_owner = None;
+                this.chat_branches_task = None;
+                this.naming_branch = false;
+            }
+            // A run ending re-reads the branch: the agent may have switched.
+            let running = this.selected_chat_running(cx);
+            if std::mem::replace(&mut this.chat_run_active, running) && !running {
+                this.ensure_chat_branches(true, cx);
             }
             // A space switch invalidates the branch draft + cache — the folder
             // (and possibly the device) changed under them.
@@ -938,6 +965,12 @@ impl Pickers {
             switching: None,
             switch_task: None,
             switch_error: None,
+            chat_branches: Loadable::Idle,
+            chat_branches_owner: None,
+            chat_branches_task: None,
+            chat_run_active: false,
+            naming_branch: false,
+            window_activation: None,
             mutate_task: None,
             _search_events: search_events,
             _state_observe: state_observe,
@@ -1388,6 +1421,7 @@ impl Pickers {
                 CheckoutKind::Local => 0,
                 CheckoutKind::NewWorktree => 1,
             },
+            PickerKind::Branch if self.in_session(cx) => self.chat_branch_index(cx),
             PickerKind::Branch => self.selected_ref_index(cx),
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
@@ -1407,9 +1441,15 @@ impl Pickers {
         match kind {
             PickerKind::Branch => {
                 self.switch_error = None; // stale mid-session failures don't linger
+                self.naming_branch = false;
+                let placeholder = if self.in_session(cx) {
+                    "Search branches…"
+                } else {
+                    "Search refs…"
+                };
                 let handle = self.search.read(cx).focus_handle(cx);
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search refs…", cx);
+                    input.set_placeholder(placeholder, cx);
                 });
                 window.focus(&handle, cx);
             }
@@ -1440,6 +1480,8 @@ impl Pickers {
             // Force: the checkout state moves under us (a send mints a
             // worktree+branch, terminals switch refs) — every open
             // revalidates, keeping stale rows visible until fresh ones land.
+            // A chat's own checkout moves too (its agent, a terminal).
+            PickerKind::Branch if self.in_session(cx) => self.ensure_chat_branches(true, cx),
             PickerKind::Branch | PickerKind::Checkout => self.ensure_refs(true, cx),
             PickerKind::HarnessModel => {
                 // Force: the enabled set moves under us (Settings → Providers,
@@ -2882,6 +2924,10 @@ impl Pickers {
     }
 
     fn on_search_submit(&mut self, cx: &mut Context<Self>) {
+        if self.open_kind() == Some(PickerKind::Branch) && self.in_session(cx) {
+            self.submit_chat_branch(cx);
+            return;
+        }
         if self.open_kind() == Some(PickerKind::Branch)
             && let Some(row) = self.filtered_ref_rows(cx).into_iter().nth(self.active)
         {
@@ -2996,6 +3042,12 @@ impl Pickers {
         );
 
         match key {
+            MenuKey::Escape
+                if self.naming_branch && self.open_kind() == Some(PickerKind::Branch) =>
+            {
+                self.stop_naming_branch(cx);
+                cx.stop_propagation();
+            }
             MenuKey::Escape => {
                 self.animate_close(cx);
                 cx.notify();
@@ -3004,6 +3056,9 @@ impl Pickers {
             MenuKey::Up | MenuKey::Down => {
                 let delta = if key == MenuKey::Up { -1 } else { 1 };
                 let count = match self.open_kind() {
+                    Some(PickerKind::Branch) if self.in_session(cx) => {
+                        self.chat_branch_row_count(cx)
+                    }
                     Some(PickerKind::Branch) => self.filtered_ref_rows(cx).len().min(MAX_REF_ROWS),
                     Some(PickerKind::Checkout) | Some(PickerKind::Access) => 2,
                     // Continue from model rows into the pinned settings triggers.
@@ -3425,21 +3480,6 @@ impl Pickers {
             .child(div().min_w_0().truncate().child(label))
     }
 
-    /// A [`Self::footer_label`] that takes whatever width the row leaves it
-    /// and fades its tail only when that isn't enough.
-    fn footer_faded_label(
-        id: &'static str,
-        icon_path: &'static str,
-        label: SharedString,
-        theme: &Theme,
-    ) -> gpui::Div {
-        Self::footer_label_shell(icon_path, theme).child(crate::shell::sidebar_faded_label(
-            id.into(),
-            false,
-            label,
-        ))
-    }
-
     fn footer_label_shell(icon_path: &'static str, theme: &Theme) -> gpui::Div {
         div()
             .h(px(20.0))
@@ -3652,8 +3692,10 @@ impl Pickers {
                 "access-popover",
                 closing,
             );
-            // Sessions never move: read-only checkout-kind + ref labels,
-            // LEFT-aligned, only when the session's project has git. The
+            // Sessions never move folders: the checkout is a read-only label
+            // (a worktree by name, its path on hover), LEFT-aligned, only
+            // when the session's project has git. The branch is the chat
+            // checkout's live one, and switchable (see `chat_branch`). The
             // target (project @ device) lives in the titlebar now.
             let Some(space) = space.as_ref().filter(|s| s.git_detected) else {
                 return Some(
@@ -3664,11 +3706,23 @@ impl Pickers {
                         .into_any_element(),
                 );
             };
-            let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
-            let (icon_path, label) = if is_worktree {
-                (crate::icons::WORKTREE, "Worktree")
-            } else {
-                (crate::icons::FOLDER, "Local checkout")
+            let checkout = match chat_worktree(chat, space) {
+                Some(path) => Self::footer_label(
+                    crate::icons::WORKTREE,
+                    SharedString::from(folder_name(path).to_owned()),
+                    &theme,
+                )
+                .id("composer-session-worktree")
+                .tooltip(crate::settings::widgets::text_tooltip_above(
+                    path.to_owned(),
+                ))
+                .into_any_element(),
+                None => Self::footer_label(
+                    crate::icons::FOLDER,
+                    SharedString::from("Local checkout"),
+                    &theme,
+                )
+                .into_any_element(),
             };
             // Keep the same reading order and leading edge as the draft.
             let left = div()
@@ -3676,25 +3730,35 @@ impl Pickers {
                 .flex_row()
                 .items_center()
                 .min_w_0()
-                .child(Self::footer_label(
-                    icon_path,
-                    SharedString::from(label),
-                    &theme,
-                ));
+                .child(checkout);
+            self.ensure_chat_branches(false, cx);
+            let branch_label = chat_branch::chat_branch_label(
+                self.chat_branches
+                    .ready()
+                    .filter(|_| self.chat_branches_owner.as_deref() == Some(chat.id.as_str())),
+                chat.branch.as_deref(),
+            );
+            let branch_chip = self.footer_chip(
+                PickerKind::Branch,
+                "picker-branch",
+                crate::icons::GIT_BRANCH,
+                branch_label,
+                &theme,
+                cx,
+            );
+            let mut branch_overlay = self.chat_branch_overlay(cx);
             let right = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
                 .min_w_0()
-                .child(Self::footer_faded_label(
-                    "composer-session-branch",
-                    crate::icons::GIT_BRANCH,
-                    chat.branch
-                        .clone()
-                        .map(SharedString::from)
-                        .unwrap_or_else(|| SharedString::from("No ref")),
-                    &theme,
+                .child(attach_overlay(
+                    branch_chip,
+                    &mut branch_overlay,
+                    PickerKind::Branch,
+                    "branch-popover",
+                    closing,
                 ));
             // Checkout + branch stay together. PR and usage form the trailing
             // status group, independently of the branch label's length.
@@ -3905,6 +3969,9 @@ impl Pickers {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(move |this, _, _, cx| match kind {
+                        PickerKind::Branch if this.in_session(cx) => {
+                            this.ensure_chat_branches(true, cx)
+                        }
                         PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
@@ -6107,6 +6174,19 @@ impl Render for Pickers {
                 }
                 None => self.boot_focus_pending = false,
             }
+        }
+
+        // Coming back to the window re-reads the chat's branch: a terminal
+        // or another app may have switched it meanwhile.
+        if self.window_activation.is_none() && self.title.is_none() {
+            self.window_activation = Some(cx.observe_window_activation(
+                window,
+                |this: &mut Self, window, cx| {
+                    if window.is_window_active() {
+                        this.ensure_chat_branches(true, cx);
+                    }
+                },
+            ));
         }
 
         let focus_on_mount = std::mem::take(&mut self.focus_on_mount) && self.is_open();
