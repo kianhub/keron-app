@@ -569,6 +569,14 @@ pub enum AgentEvent {
     TextDelta {
         text: String,
     },
+    /// The complete text of the text block that just streamed, sent when its
+    /// deltas lost words before the end (a lost end arrives as a plain
+    /// `TextDelta`). `streamed` is exactly what the block's deltas carried;
+    /// the fold swaps it, at the end of the trailing text, for `text`.
+    TextReplaced {
+        streamed: String,
+        text: String,
+    },
     /// A generated raster asset. The engine materializes this path before publication.
     #[serde(rename_all = "camelCase")]
     GeneratedImage {

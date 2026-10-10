@@ -280,6 +280,8 @@ impl MessagePart {
 /// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
 /// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
 ///   (a tool call in between breaks the text block).
+/// - `TextReplaced` swaps a block's streamed text, at the end of the trailing text, for the
+///   block's complete text (deltas that lost words; never adds words already shown).
 /// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
 /// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
@@ -298,6 +300,21 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     id,
                     text: text.clone(),
                 });
+            }
+        }
+        AgentEvent::TextReplaced { streamed, text } => {
+            if let Some(MessagePart::Text { text: tail, .. }) = out.last_mut()
+                && tail.ends_with(streamed.as_str())
+            {
+                tail.truncate(tail.len() - streamed.len());
+                tail.push_str(text);
+            } else if !out.iter().any(
+                |p| matches!(p, MessagePart::Text { text: t, .. } if t.contains(streamed.as_str())),
+            ) {
+                // None of the block reached this segment: it arrives whole.
+                // (What streamed sitting elsewhere in it stays as it is,
+                // rather than show those words twice.)
+                fold_event_into_parts(out, &AgentEvent::TextDelta { text: text.clone() });
             }
         }
         AgentEvent::GeneratedImage {

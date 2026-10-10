@@ -1111,11 +1111,13 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
 /// live segment (from `fold_event_into_parts`) at each commit tick, it diffs against what's in
 /// the doc and writes only the delta:
 /// - trailing text growth → `LoroText` append (RLE-merged),
+/// - trailing text rewrite (`TextReplaced`) → `LoroText` splice from the first difference,
 /// - new parts → pushed,
 /// - tool call refresh / resolution / input resolution → in-place map updates.
 ///
-/// Invariant relied upon: the fold only ever APPENDS parts or grows the trailing text; earlier
-/// text never mutates. Tool/input parts may update fields in place.
+/// Invariant relied upon: the fold only ever APPENDS parts or changes the trailing text (grows
+/// it, or rewrites it when a block's complete text replaces what streamed); earlier text never
+/// mutates. Tool/input parts may update fields in place.
 pub struct SegmentWriter<'a> {
     doc: &'a SessionDoc,
     /// Index of this entry in the `messages` list.
@@ -1219,41 +1221,50 @@ impl<'a> SegmentWriter<'a> {
                 Some(prev) => {
                     // Trailing growth of a text-bodied part appends into its
                     // LoroText container instead of rewriting the map value.
-                    let grown = match (prev, part) {
+                    let text_body = match (prev, part) {
                         (
                             MessagePart::Text { text: old, .. },
                             MessagePart::Text { text: new, .. },
-                        ) if new.starts_with(old.as_str()) => Some(("text", old, new)),
+                        ) => Some(("text", old, new)),
                         (
                             MessagePart::Reasoning { text: old, .. },
                             MessagePart::Reasoning { text: new, .. },
-                        ) if new.starts_with(old.as_str()) => Some(("reasoning", old, new)),
+                        ) => Some(("reasoning", old, new)),
                         _ => None,
                     };
-                    match grown {
+                    match text_body {
                         Some((field, old, new)) => {
-                            let delta = &new[old.len()..];
-                            if !delta.is_empty() {
-                                let part_map = part_map_at(&parts, i)?;
-                                match part_map.get(field) {
-                                    Some(loro::ValueOrContainer::Container(
-                                        loro::Container::Text(t),
-                                    )) => {
-                                        let len = t.len_unicode();
-                                        t.insert(len, delta)?;
-                                    }
-                                    _ => {
-                                        return Err(DocError::Schema(format!(
-                                            "{field} part missing LoroText"
-                                        )));
-                                    }
+                            let part_map = part_map_at(&parts, i)?;
+                            let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) =
+                                part_map.get(field)
+                            else {
+                                return Err(DocError::Schema(format!(
+                                    "{field} part missing LoroText"
+                                )));
+                            };
+                            if let Some(delta) = new.strip_prefix(old.as_str()) {
+                                if !delta.is_empty() {
+                                    let len = t.len_unicode();
+                                    t.insert(len, delta)?;
+                                    dirty = true;
                                 }
+                            } else {
+                                // A rewrite (a block's complete text replacing
+                                // what streamed): splice from the first
+                                // difference on.
+                                let keep = old
+                                    .char_indices()
+                                    .zip(new.chars())
+                                    .find(|((_, a), b)| a != b)
+                                    .map_or(old.len().min(new.len()), |((at, _), _)| at);
+                                t.delete_utf8(keep, old.len() - keep)?;
+                                t.insert_utf8(keep, &new[keep..])?;
                                 dirty = true;
                             }
                         }
                         None => {
                             // Field-level update (tool refresh/resolve, input resolve, or a
-                            // non-append text rewrite, which the fold shouldn't produce —
+                            // part that changed kind, which the fold shouldn't produce —
                             // rewrite the part map fields defensively).
                             let part_map = part_map_at(&parts, i)?;
                             update_part_fields(&part_map, part)?;
@@ -1867,6 +1878,57 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A block whose deltas lost its start: its complete text replaces what
+    /// streamed, in the doc too, with the text before it untouched and no
+    /// word written twice.
+    #[test]
+    fn segment_writer_rewrites_a_block_its_complete_text_replaced() {
+        let doc = SessionDoc::init("chat-t").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        for delta in ["Ran it. ", "and how it ends."] {
+            fold_event_into_parts(&mut folded, &AgentEvent::TextDelta { text: delta.into() });
+            writer.sync(&folded).unwrap();
+        }
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextReplaced {
+                streamed: "and how it ends.".into(),
+                text: "How it starts, and how it ends.".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let text = |doc: &SessionDoc| match &doc.read_entries().unwrap()[0].parts[..] {
+            [MessagePart::Text { text, .. }] => text.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(text(&doc), "Ran it. How it starts, and how it ends.");
+
+        // What streamed sits before a tool chip: the block is left alone
+        // rather than shown twice.
+        let mut parts = Vec::new();
+        for event in [
+            AgentEvent::TextDelta {
+                text: "and how it ends.".into(),
+            },
+            AgentEvent::ToolCall {
+                id: "t1".into(),
+                call: ToolCall::Exec {
+                    command: "ls".into(),
+                },
+            },
+            AgentEvent::TextReplaced {
+                streamed: "and how it ends.".into(),
+                text: "How it starts, and how it ends.".into(),
+            },
+        ] {
+            fold_event_into_parts(&mut parts, &event);
+        }
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert!(matches!(&parts[0], MessagePart::Text { text, .. } if text == "and how it ends."));
     }
 
     /// Reasoning streams like text: LoroText appends into the `reasoning`
