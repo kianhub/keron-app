@@ -67,7 +67,7 @@ impl Shell {
             "sourceChatId": source.id,
             "parentChatId": parent_id,
             "targetDeviceId": source.device_id,
-            "fullAccess": crate::settings::new_chats_full_access(cx),
+            "fullAccess": self.state.read(cx).new_chats_full_access(cx),
         });
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -128,12 +128,13 @@ impl Shell {
         chat.room_gen = Some(2);
         // The draft's access chip shows how its first send starts it, not
         // the parent's choice: full access with "New chats start with full
-        // access" on and this device hosting it, else asking.
-        let hosted_here =
-            self.state.read(cx).local_device_id.as_deref() == Some(chat.device_id.as_str());
+        // access" on and this window's own engine hosting it, else asking.
+        let state = self.state.read(cx);
+        let full_access = state.new_chats_full_access(cx)
+            && state.local_device_id.as_deref() == Some(chat.device_id.as_str());
         if let Some(config) = chat.config.as_mut() {
             let full = zeron_proto::SandboxLevel::DangerFullAccess;
-            if hosted_here && crate::settings::new_chats_full_access(cx) {
+            if full_access {
                 config.sandbox = full;
             } else if config.sandbox == full {
                 config.sandbox = zeron_proto::SandboxLevel::WorkspaceWrite;
@@ -567,10 +568,24 @@ mod tests {
 
     /// A hand-started side chat is a new chat: its draft shows full access,
     /// and its first send asks for it, only with "New chats start with full
-    /// access" on, for a chat this device hosts, and while its own chip says
-    /// so, whatever the parent chose.
+    /// access" on, in a window whose engine runs in it, for a chat this
+    /// device hosts, and while its own chip says so, whatever the parent
+    /// chose.
     #[gpui::test]
     fn new_side_chat_follows_the_full_access_setting(cx: &mut TestAppContext) {
+        // RpcClient::new spawns its reader on tokio.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel(16);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(16);
+        let embedded = crate::state::EngineHandle::from_test_client_in_process(
+            zeron_rpc::RpcClient::new(out, inbound),
+        );
+        // Attached to a daemon over IPC, which starts every chat asking.
+        let (out, _daemon_requests) = tokio::sync::mpsc::channel(16);
+        let (_daemon_replies, inbound) = tokio::sync::mpsc::channel(16);
+        let attached =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
         let dir = tempfile::tempdir().unwrap();
         let window = shell_window(dir.path(), cx);
         window
@@ -594,22 +609,33 @@ mod tests {
                         .and_then(|c| c.config.as_ref())
                         .map(|c| c.sandbox)
                 };
-                for (on, shown) in [
-                    (true, zeron_proto::SandboxLevel::DangerFullAccess),
-                    (false, zeron_proto::SandboxLevel::WorkspaceWrite),
+                // What the composer's first send carries.
+                let create = |side: &Entity<AppState>, chat_id: &str, cx: &App| {
+                    let side = side.read(cx);
+                    side.unsaved_side_chat_create(chat_id, side.new_chats_full_access(cx))
+                        .unwrap()
+                };
+                for (engine, on, full) in [
+                    (&embedded, true, true),
+                    (&embedded, false, false),
+                    (&attached, true, false),
                 ] {
                     settings::update(settings::SavePolicy::Debounced, cx, |s| {
                         s.new_chats_full_access = on;
                     });
+                    shell
+                        .state
+                        .update(cx, |state, _| state.set_test_engine(engine.clone()));
                     shell.create_child_chat(None, cx);
                     let side = shell.side_chats[&shell.side_chat_seq].state.clone();
                     let chat_id = side.read(cx).selected_chat.clone().unwrap();
+                    let shown = if full {
+                        zeron_proto::SandboxLevel::DangerFullAccess
+                    } else {
+                        zeron_proto::SandboxLevel::WorkspaceWrite
+                    };
                     assert_eq!(sandbox(&side, cx), Some(shown));
-                    let create = side
-                        .read(cx)
-                        .unsaved_side_chat_create(&chat_id, on)
-                        .unwrap();
-                    assert_eq!(create["fullAccess"], on);
+                    assert_eq!(create(&side, &chat_id, cx)["fullAccess"], full);
                     // Switched to "Ask first" before the first send: it asks.
                     let mut config = side.read(cx).selected_chat_row().unwrap().config.clone();
                     if let Some(config) = config.as_mut() {
@@ -618,17 +644,14 @@ mod tests {
                     side.update(cx, |state, _| {
                         state.apply_chat_config(&chat_id, config.unwrap());
                     });
-                    let create = side
-                        .read(cx)
-                        .unsaved_side_chat_create(&chat_id, on)
-                        .unwrap();
-                    assert_eq!(create["fullAccess"], false);
+                    assert_eq!(create(&side, &chat_id, cx)["fullAccess"], false);
                 }
                 // A parent another device hosts: that host decides, and asks.
                 settings::update(settings::SavePolicy::Debounced, cx, |s| {
                     s.new_chats_full_access = true;
                 });
                 shell.state.update(cx, |state, _| {
+                    state.set_test_engine(embedded.clone());
                     state.chats[0].device_id = "other".into();
                 });
                 shell.create_child_chat(None, cx);

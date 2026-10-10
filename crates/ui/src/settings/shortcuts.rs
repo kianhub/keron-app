@@ -82,7 +82,7 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
-    _state: Entity<AppState>,
+    state: Entity<AppState>,
 }
 
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
@@ -125,7 +125,7 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
-            _state: state,
+            state,
         }
     }
 
@@ -879,6 +879,19 @@ impl Render for ShortcutsPage {
                 })),
             );
         let full_access = crate::settings::new_chats_full_access(cx);
+        // Only an engine in this process honours the setting
+        // (`AppState::new_chats_full_access`); a window attached to a daemon
+        // starts its chats asking.
+        let full_access_note = if self
+            .state
+            .read(cx)
+            .engine()
+            .is_some_and(|engine| !engine.is_host_ui())
+        {
+            "This window uses the background engine, so its chats still ask."
+        } else {
+            "Chats you start here skip approval prompts and the sandbox."
+        };
         let full_access_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -890,13 +903,7 @@ impl Render for ShortcutsPage {
                     ))
                     .child(widgets::meta_line(
                         &theme,
-                        vec![
-                            div()
-                                .child(
-                                    "Chats you start here skip approval prompts and the sandbox.",
-                                )
-                                .into_any_element(),
-                        ],
+                        vec![div().child(full_access_note).into_any_element()],
                     )),
             )
             .child(

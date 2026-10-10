@@ -274,6 +274,27 @@ async fn sessions_this_devices_own_ui_starts_have_full_access_from_the_first_tur
         .unwrap();
     assert_eq!(sandbox("elsewhere"), Some(SandboxLevel::WorkspaceWrite));
 
+    // Sent before the UI resolved a harness, the createChat has no config:
+    // the host writes one on the harness the run falls back to.
+    host_ui
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "no-config", "deviceId": &core.device_id,
+                "cwd": "/tmp", "fullAccess": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let config = core.workspace.chat("no-config").unwrap().unwrap().config;
+    assert_eq!(
+        config.map(|c| (c.harness, c.sandbox)),
+        Some((HarnessId::Mock, SandboxLevel::DangerFullAccess))
+    );
+    let ran = first_turn(&host_ui, "no-config", 5).await;
+    assert_eq!(ran.sandbox, SandboxLevel::DangerFullAccess);
+    assert!(ran.auto_approve);
+
     // A fork follows the same rule as a new chat.
     let source = core.doc_host.open("theirs").unwrap();
     source

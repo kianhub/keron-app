@@ -278,6 +278,22 @@ impl EngineBackend for RemoteEngine {
     }
 }
 
+/// A test client that reads as an engine in this process.
+#[cfg(test)]
+struct InProcessTestEngine(RpcClient);
+
+#[cfg(test)]
+#[async_trait]
+impl EngineBackend for InProcessTestEngine {
+    fn client(&self) -> &RpcClient {
+        &self.0
+    }
+    fn mode(&self) -> EngineMode {
+        EngineMode::InProcess
+    }
+    async fn shutdown(&self) {}
+}
+
 /// Cheaply clonable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -577,13 +593,25 @@ impl EngineHandle {
 
     #[cfg(test)]
     pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_backend(Arc::new(RemoteEngine {
+            client: Arc::new(client),
+            url: "memory://test".into(),
+            secret: None,
+            lifecycle_task: tokio::sync::Mutex::new(None),
+        }))
+    }
+
+    /// [`Self::from_test_client`] as an engine in this process, whose window
+    /// is its host UI ([`Self::is_host_ui`]).
+    #[cfg(test)]
+    pub(crate) fn from_test_client_in_process(client: RpcClient) -> Self {
+        Self::from_test_backend(Arc::new(InProcessTestEngine(client)))
+    }
+
+    #[cfg(test)]
+    fn from_test_backend(inner: Arc<dyn EngineBackend>) -> Self {
         Self {
-            inner: Arc::new(RemoteEngine {
-                client: Arc::new(client),
-                url: "memory://test".into(),
-                secret: None,
-                lifecycle_task: tokio::sync::Mutex::new(None),
-            }),
+            inner,
             engine_info: EngineInfo {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
@@ -600,6 +628,14 @@ impl EngineHandle {
 
     pub fn mode(&self) -> EngineMode {
         self.inner.mode()
+    }
+
+    /// Whether this window is its engine's own UI: the engine runs in this
+    /// process and serves the window `EngineCore::host_ui_rpc_service`, the
+    /// one service whose new chats may start with full access. A daemon
+    /// serves an attached window over IPC, where they start asking.
+    pub fn is_host_ui(&self) -> bool {
+        matches!(self.inner.mode(), EngineMode::InProcess)
     }
 
     pub async fn media_client(&self) -> Result<RpcClient, RpcError> {
@@ -2313,10 +2349,20 @@ impl AppState {
                 .is_some_and(|chat| chat.id == chat_id)
     }
 
+    /// Whether a chat this window starts asks its host for full access: the
+    /// owner's "New chats start with full access" setting, honoured only by
+    /// an engine in this process ([`EngineHandle::is_host_ui`]). A window
+    /// attached to a daemon reaches it over the IPC port, where chats start
+    /// asking, so it neither requests full access nor shows it.
+    pub(crate) fn new_chats_full_access(&self, cx: &App) -> bool {
+        self.engine.as_ref().is_some_and(EngineHandle::is_host_ui)
+            && crate::settings::new_chats_full_access(cx)
+    }
+
     /// The `Mutate createChat` params that mint the unsaved side chat
     /// `chat_id` on its first send; `None` once it exists. `full_access`:
-    /// the "New chats start with full access" setting. The chat asks the host
-    /// for it while its own access chip still shows it.
+    /// [`Self::new_chats_full_access`]. The chat asks the host for it while
+    /// its own access chip still shows it.
     pub(crate) fn unsaved_side_chat_create(
         &self,
         chat_id: &str,

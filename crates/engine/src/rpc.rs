@@ -1175,8 +1175,11 @@ impl EngineRpc {
                     crate::run_access::start_asking(&mut config);
                     config
                 });
+                // A chat sent before the UI resolved a harness has no config:
+                // the host writes one on the harness its runs fall back to.
                 let full_access =
-                    crate::run_access::host_ui_full_access(self.host_ui, full_access, &chat_id);
+                    crate::run_access::host_ui_full_access(self.host_ui, full_access, &chat_id)
+                        .then(|| self.doc_host.harness_for(&chat_id));
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -2033,7 +2036,8 @@ impl RpcService for EngineRpc {
                     crate::run_access::start_asking(config);
                 }
                 let full_access =
-                    crate::run_access::host_ui_full_access(self.host_ui, p.full_access, &chat.id);
+                    crate::run_access::host_ui_full_access(self.host_ui, p.full_access, &chat.id)
+                        .then(|| self.doc_host.harness_for(&chat.id));
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();

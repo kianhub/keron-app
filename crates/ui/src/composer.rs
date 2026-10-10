@@ -8765,9 +8765,9 @@ impl Composer {
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
         // "New chats start with full access": a chat this send mints asks the
-        // host for it. Only this device's own engine honours the ask, for a
+        // host for it. Only an engine in this process honours the ask, for a
         // chat it hosts (`run_access`); everywhere else the chat asks.
-        let full_access = crate::settings::new_chats_full_access(cx);
+        let full_access = self.state.read(cx).new_chats_full_access(cx);
         let existing_cwd = self
             .state
             .read(cx)

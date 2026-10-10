@@ -16,11 +16,13 @@
 //! device hosts. The host writes the choice itself, as a config write right
 //! after the mint in the same registry write
 //! (`WorkspaceHost::mint_chat_row`), so it counts below from the first run
-//! and no device ever sees the row asking first. Everything else still
-//! starts asking: sessions from another client or device (a viewport
-//! attached over IPC included), an agent's through the Zeron MCP tools, the
-//! voice orchestrator and the sessions it creates, and imported, claimed or
-//! re-homed rows.
+//! and no device ever sees the row asking first. A chat sent before the UI
+//! resolved a harness carries no config; the host writes one on the harness
+//! its runs fall back to. Everything else still starts asking: sessions
+//! from another client or device (a window attached to a daemon over IPC
+//! included, whose UI therefore doesn't request it), an agent's through the
+//! Zeron MCP tools, the voice orchestrator and the sessions it creates, and
+//! imported, claimed or re-homed rows.
 //!
 //! The host can't see who wrote a row, only the registry's per-field clocks,
 //! so "chose it" means the row's `config` was written after the row was

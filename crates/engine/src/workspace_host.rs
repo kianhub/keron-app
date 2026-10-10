@@ -28,7 +28,7 @@ use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::{
-    Chat, ChatConfig, Device, SandboxLevel, Session, SidebarPreferencesState, Space,
+    Chat, ChatConfig, Device, HarnessId, SandboxLevel, Session, SidebarPreferencesState, Space,
 };
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -937,7 +937,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None, false)
+        self.create_chat_with_parent(chat_id, space_id, device_id, config, cwd, None, None)
     }
 
     /// [`create_chat`](Self::create_chat) recording the creating chat
@@ -953,7 +953,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
         parent_chat_id: Option<String>,
-        full_access: bool,
+        full_access: Option<HarnessId>,
     ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
@@ -1013,16 +1013,26 @@ impl WorkspaceHost {
     /// write then sets the row's config to full access: a config write
     /// after the mint, the host's own choice, which `run_access` counts from
     /// the first run. Both land under one lock, so no reader ever sees the
-    /// row asking first. A row another device hosts, or one without a
-    /// config, starts asking regardless.
-    pub fn mint_chat_row(&self, chat: &Chat, full_access: bool) -> Result<(), EngineError> {
-        let chosen = chat
-            .config
-            .clone()
-            .filter(|_| full_access && chat.device_id == self.device_id())
-            .map(|mut config| {
-                config.sandbox = SandboxLevel::DangerFullAccess;
-                config
+    /// row asking first. A row minted without a config (the UI sent no
+    /// harness yet) gets one on the harness `full_access` names, the one its
+    /// runs fall back to. A row another device hosts starts asking
+    /// regardless: its host decides.
+    pub fn mint_chat_row(
+        &self,
+        chat: &Chat,
+        full_access: Option<HarnessId>,
+    ) -> Result<(), EngineError> {
+        let chosen = full_access
+            .filter(|_| chat.device_id == self.device_id())
+            .map(|harness| ChatConfig {
+                sandbox: SandboxLevel::DangerFullAccess,
+                ..chat.config.clone().unwrap_or(ChatConfig {
+                    harness,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                })
             });
         self.mutate(|doc| -> Result<(), zeron_doc::DocError> {
             doc.upsert_chat(chat)?;

@@ -1,10 +1,10 @@
 //! The session's permission mode, in the session footer. A session asks
 //! before its agent acts unless it has full access (no approval prompts, no
 //! sandbox): chosen from this menu, or from the start for a chat started in
-//! this device's own UI while Settings → General's "New chats start with
-//! full access" is on. Either way it applies to this session only and shows
-//! as a warning-tinted badge for as long as it is on. The host enforces it
-//! from the session's config row.
+//! a window whose engine runs in it, while Settings → General's "New chats
+//! start with full access" is on. Either way it applies to this session
+//! only and shows as a warning-tinted badge for as long as it is on. The
+//! host enforces it from the session's config row.
 //!
 //! Only Claude Code and Codex enforce it today. The other harnesses (the ACP
 //! agents, OpenCode, Pi, Cursor) still act without asking, so their sessions

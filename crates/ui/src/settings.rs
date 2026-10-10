@@ -904,7 +904,8 @@ pub struct UiSettings {
     /// Chats started from this device's own UI (new chats, forks and side
     /// chats it hosts) start with full access instead of asking. Device-local
     /// and on by default (the owner's decision, 9 Oct); the engine honours it
-    /// only from its in-process UI (`run_access`).
+    /// only from its in-process UI (`run_access`), so a window attached to a
+    /// daemon doesn't send it (`AppState::new_chats_full_access`).
     pub new_chats_full_access: bool,
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
     /// palette reopen it; links naming a section replace it. Files without
