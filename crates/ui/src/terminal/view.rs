@@ -442,8 +442,10 @@ impl gpui::Element for TerminalElement {
             ("calt".into(), 0),
             ("dlig".into(), 0),
         ]));
-        // Prompt icons (Nerd Font glyphs in the private-use area) aren't in
-        // text fonts; without this they render as the system's "?" boxes.
+        // Prompt icons (Nerd Font glyphs in the private-use areas) aren't in
+        // text fonts; the bundled symbols font, registered with Core Text at
+        // startup (`typography::register_with_core_text`), draws them instead
+        // of macOS's "?" boxes.
         mono.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
             crate::typography::TERMINAL_SYMBOLS_FAMILY.into(),
         ]));

@@ -13354,6 +13354,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "core-text",
  "fontdb",
  "foreign-types 0.5.0",
  "futures",

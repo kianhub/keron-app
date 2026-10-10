@@ -308,6 +308,47 @@ const TERMINAL_SYMBOLS: [&[u8]; 1] = [include_bytes!(
 /// The family name of [`TERMINAL_SYMBOLS`], for a font's fallback list.
 pub const TERMINAL_SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 
+/// Makes a bundled face visible to Core Text for this process, so a font's
+/// fallback list can name it. gpui itself never loads a face without an `m`
+/// glyph (it measures with `m`), and on macOS its fallback lists resolve
+/// through Core Text, which doesn't see the faces gpui loaded from memory;
+/// a face registered here is picked up during layout like any system
+/// fallback (emoji, CJK). Returns whether Core Text took it.
+#[cfg(target_os = "macos")]
+fn register_with_core_text(face: &'static [u8]) -> bool {
+    use core_graphics::{data_provider::CGDataProvider, font::CGFont};
+    use foreign_types::ForeignType as _;
+
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontManagerRegisterGraphicsFont(
+            font: *mut std::ffi::c_void,
+            error: *mut *mut std::ffi::c_void,
+        ) -> bool;
+    }
+    // SAFETY: the bytes are 'static, so the provider may borrow them.
+    let provider = unsafe { CGDataProvider::from_slice(face) };
+    let Ok(font) = CGFont::from_data_provider(provider) else {
+        return false;
+    };
+    let mut error = std::ptr::null_mut();
+    // SAFETY: a valid CGFont; on failure Core Text hands back a CFError we own.
+    let registered = unsafe { CTFontManagerRegisterGraphicsFont(font.as_ptr().cast(), &mut error) };
+    if !error.is_null() {
+        // SAFETY: the error follows the Create Rule.
+        unsafe { core_foundation::base::CFRelease(error.cast_const()) };
+    }
+    if !registered {
+        tracing::warn!("Core Text didn't register the terminal symbols font");
+    }
+    registered
+}
+
+#[cfg(not(target_os = "macos"))]
+fn register_with_core_text(_face: &'static [u8]) -> bool {
+    false
+}
+
 /// Font faces shared by the interface and SVG text-to-path conversion.
 pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
@@ -410,6 +451,7 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
     let jetbrains_mono = register_family(cx, &UiFontFamily::JetBrainsMono, &JETBRAINS_MONO);
     let symbols = UiFontFamily::Installed(TERMINAL_SYMBOLS_FAMILY.into());
     register_family(cx, &symbols, &TERMINAL_SYMBOLS);
+    register_with_core_text(TERMINAL_SYMBOLS[0]);
     let mut choices = vec![
         UiFontFamily::Geist,
         UiFontFamily::GeistMono,
@@ -866,6 +908,47 @@ mod tests {
                 UiFontFamily::System
             ]
         );
+    }
+
+    /// Against the native text system: with the symbols font registered with
+    /// Core Text and named as the terminal font's fallback, a prompt icon that
+    /// JetBrains Mono lacks is drawn from a different font than without the
+    /// fallback (which lands on macOS's "?" placeholder font).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prompt_icons_fall_back_to_the_bundled_symbols_font() {
+        let platform = crate::test_platform::current_platform(true);
+        let text = platform.text_system();
+        let faces = JETBRAINS_MONO
+            .iter()
+            .map(|face| std::borrow::Cow::Borrowed(*face));
+        text.add_fonts(faces.collect()).unwrap();
+        assert!(register_with_core_text(TERMINAL_SYMBOLS[0]));
+        let found = core_text::font::new_from_name(TERMINAL_SYMBOLS_FAMILY, 12.0).unwrap();
+        assert_eq!(found.family_name(), TERMINAL_SYMBOLS_FAMILY);
+
+        let plain = gpui::font("JetBrains Mono");
+        let mut with_symbols = plain.clone();
+        with_symbols.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
+            TERMINAL_SYMBOLS_FAMILY.into(),
+        ]));
+        let drawn_in = |font: &gpui::Font, icon: char| {
+            let font_id = text.font_id(font).unwrap();
+            let line = icon.to_string();
+            let run = gpui::FontRun {
+                len: line.len(),
+                font_id,
+            };
+            let layout = text.layout_line(&line, gpui::px(12.0), &[run]);
+            layout.runs[0].font_id
+        };
+        let mono = text.font_id(&plain).unwrap();
+        // The Apple logo, a folder and a git branch, as in a starship prompt.
+        for icon in ['\u{F179}', '\u{F07B}', '\u{E725}'] {
+            let fallback = drawn_in(&with_symbols, icon);
+            assert_ne!(fallback, mono, "{icon:?}");
+            assert_ne!(fallback, drawn_in(&plain, icon), "{icon:?}");
+        }
     }
 
     #[test]
