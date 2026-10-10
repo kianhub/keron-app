@@ -256,6 +256,20 @@ struct SwitchRefParams {
     ref_name: String,
 }
 
+/// `ListChatBranches` / `SwitchChatBranch`: the checkout is the chat's own
+/// folder, resolved on the chat's host.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatBranchParams {
+    chat_id: String,
+    /// `SwitchChatBranch`: the local branch to switch to, or to create.
+    #[serde(default)]
+    branch: String,
+    /// `SwitchChatBranch`: make `branch` at HEAD, then switch to it.
+    #[serde(default)]
+    create: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorktreeParams {
@@ -842,6 +856,87 @@ impl EngineRpc {
         Err(RpcError::BadParams(
             "cwd is not a known checkout on this device".into(),
         ))
+    }
+
+    /// A chat this device hosts and the folder it works in. Chat-scoped git
+    /// RPCs resolve it from the chat's row, never from a path the client sends.
+    fn hosted_chat(
+        &self,
+        chat_id: &str,
+    ) -> Result<(zeron_proto::Chat, std::path::PathBuf), RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(RpcError::Failed("chat is not hosted by this device".into()));
+        }
+        let cwd = chat
+            .cwd
+            .as_deref()
+            .ok_or_else(|| RpcError::Failed("chat has no checkout".into()))?;
+        let cwd = crate::repos::expand_home(cwd)
+            .map(std::path::PathBuf::from)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        Ok((chat, cwd))
+    }
+
+    /// Whether `cwd` is a linked worktree of the chat's own, not its
+    /// project's folder, which every Local-checkout chat in the project
+    /// shares.
+    fn chat_owns_checkout(&self, chat: &zeron_proto::Chat, cwd: &std::path::Path) -> bool {
+        let trim = |path: &str| path.trim_end_matches('/').to_owned();
+        let Some(space_path) = chat
+            .space_id
+            .as_deref()
+            .and_then(|id| self.workspace.space(id).ok().flatten())
+            .and_then(|space| crate::repos::expand_home(&space.path).ok())
+        else {
+            return false;
+        };
+        crate::workspace_host::linked_worktree_root(cwd).is_some()
+            && trim(&cwd.to_string_lossy()) != trim(&space_path)
+    }
+
+    /// A local chat with a run in flight in the checkout `identity` names.
+    /// Changing that checkout's files or branch would pull them out from
+    /// under its agent.
+    async fn running_chat_on_checkout(
+        &self,
+        identity: &crate::repos::CheckoutIdentity,
+    ) -> Option<String> {
+        let chats = self.workspace.watch_chats().borrow().clone();
+        for candidate in chats {
+            if candidate.device_id != self.doc_host.device_id()
+                || !self
+                    .sessions
+                    .session_status(&candidate.id)
+                    .is_some_and(|session| {
+                        matches!(
+                            session.status,
+                            zeron_proto::SessionStatus::Working
+                                | zeron_proto::SessionStatus::AwaitingInput
+                        )
+                    })
+            {
+                continue;
+            }
+            let same_checkout = if candidate.checkout_id.as_deref() == Some(identity.id.as_str()) {
+                true
+            } else if let Some(candidate_cwd) = candidate.cwd.as_deref() {
+                self.repos
+                    .checkout_identity(std::path::Path::new(candidate_cwd))
+                    .await
+                    .is_ok_and(|candidate_identity| candidate_identity.id == identity.id)
+            } else {
+                false
+            };
+            if same_checkout {
+                return Some(candidate.id);
+            }
+        }
+        None
     }
 
     /// Most-recent-first paths the current chat actually touched, followed by
@@ -1441,6 +1536,9 @@ fn forwardable(method: &str) -> bool {
             | methods::RESOLVE_GIT_AVATARS
             | methods::FETCH_ALL
             | methods::SWITCH_REF
+            // A chat's checkout lives on its host device.
+            | methods::LIST_CHAT_BRANCHES
+            | methods::SWITCH_CHAT_BRANCH
             | methods::LIST_FOLDERS
             | methods::LIST_DRIVES
             | methods::SEARCH_FILES
@@ -2650,40 +2748,10 @@ impl RpcService for EngineRpc {
                     // Refuse the mutation when any local chat on this exact
                     // checkout has a live run. We never interrupt an agent as a
                     // side effect of discarding files.
-                    let chats = self.workspace.watch_chats().borrow().clone();
-                    for candidate in chats {
-                        if candidate.device_id != self.doc_host.device_id() {
-                            continue;
-                        }
-                        let same_checkout =
-                            if candidate.checkout_id.as_deref() == Some(identity.id.as_str()) {
-                                true
-                            } else if let Some(candidate_cwd) = candidate.cwd.as_deref() {
-                                self.repos
-                                    .checkout_identity(std::path::Path::new(candidate_cwd))
-                                    .await
-                                    .is_ok_and(|candidate_identity| {
-                                        candidate_identity.id == identity.id
-                                    })
-                            } else {
-                                false
-                            };
-                        if same_checkout
-                            && self
-                                .sessions
-                                .session_status(&candidate.id)
-                                .is_some_and(|session| {
-                                    matches!(
-                                        session.status,
-                                        zeron_proto::SessionStatus::Working
-                                            | zeron_proto::SessionStatus::AwaitingInput
-                                    )
-                                })
-                        {
-                            return Err(RpcError::Failed(
-                                "an agent is active in this working tree".into(),
-                            ));
-                        }
+                    if self.running_chat_on_checkout(&identity).await.is_some() {
+                        return Err(RpcError::Failed(
+                            "an agent is active in this working tree".into(),
+                        ));
                     }
 
                     let snapshot = self
@@ -3015,6 +3083,70 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
+            }
+            methods::LIST_CHAT_BRANCHES => {
+                let p: ChatBranchParams = parse_params(params)?;
+                let (chat, cwd) = self.hosted_chat(&p.chat_id)?;
+                let branches = self
+                    .repos
+                    .checkout_branches(&cwd)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // A worktree belongs to its chat, so the recorded branch (the
+                // sidebar's tooltip, the PR badge) follows whatever its agent
+                // or a terminal checked out there. Chats sharing the project's
+                // folder keep the branch they were recorded on.
+                if let Some(current) = branches.current.as_deref()
+                    && chat.branch.as_deref() != Some(current)
+                    && self.chat_owns_checkout(&chat, &cwd)
+                    && let Err(err) = self.workspace.set_chat_branch(&chat.id, current)
+                {
+                    tracing::warn!(chat = %chat.id, error = %err, "chat branch follow failed");
+                }
+                RpcReply::value(&branches)
+            }
+            methods::SWITCH_CHAT_BRANCH => {
+                // Several nested git futures: keep them off the dispatcher's
+                // stack frame, like the other checkout mutations.
+                Box::pin(async move {
+                    let p: ChatBranchParams = parse_params(params)?;
+                    let (_, cwd) = self.hosted_chat(&p.chat_id)?;
+                    let identity = self
+                        .repos
+                        .checkout_identity(&cwd)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    // Never switch under a working agent: its edits and its
+                    // next command would land on the other branch.
+                    match self.running_chat_on_checkout(&identity).await {
+                        Some(chat) if chat == p.chat_id => {
+                            return Err(RpcError::Failed(
+                                "Stop the agent before switching branches".into(),
+                            ));
+                        }
+                        Some(_) => {
+                            return Err(RpcError::Failed(
+                                "Another chat's agent is running in this folder".into(),
+                            ));
+                        }
+                        None => {}
+                    }
+                    let branches = self
+                        .repos
+                        .switch_branch(&cwd, &p.branch, p.create)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    // The chat picked this branch, so the conversation now
+                    // belongs to it (its PR badge follows). Other chats sharing
+                    // the folder keep the branch they were recorded on.
+                    if let Some(branch) = branches.current.as_deref() {
+                        self.workspace
+                            .set_chat_branch(&p.chat_id, branch)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    }
+                    RpcReply::value(&branches)
+                })
+                .await
             }
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;
@@ -4010,6 +4142,8 @@ mod tests {
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
+        assert!(forwardable(methods::LIST_CHAT_BRANCHES));
+        assert!(forwardable(methods::SWITCH_CHAT_BRANCH));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));

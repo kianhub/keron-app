@@ -7476,6 +7476,23 @@ impl Shell {
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
+        // A chat in a worktree wears the worktree glyph beside its title;
+        // the project's own folder (a Local checkout) gets nothing.
+        let worktree_tooltip = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == id)
+                .and_then(|chat| {
+                    let path = crate::pickers::chat_worktree(chat, state.space_for_chat(chat)?)?;
+                    let name = crate::pickers::folder_name(path);
+                    Some(match chat.branch.as_deref() {
+                        Some(branch) => format!("Worktree: {name} · {branch}"),
+                        None => format!("Worktree: {name}"),
+                    })
+                })
+        };
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -7981,6 +7998,20 @@ impl Shell {
                                 .child(popover::search_highlight(title, search_query, theme)),
                         )
                         .into_any_element(),
+                    })
+                    .when_some(worktree_tooltip, |el, tooltip| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-worktree")))
+                                .flex_none()
+                                .opacity(if archived_muted { 0.4 } else { 1.0 })
+                                .child(
+                                    icon(icons::WORKTREE)
+                                        .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                        .text_color(subline),
+                                )
+                                .tooltip(crate::settings::widgets::text_tooltip_above(tooltip)),
+                        )
                     })
                     .when(!compact && !show_label && remote, |el| {
                         el.child(

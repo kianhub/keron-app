@@ -20,9 +20,9 @@ use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
-    DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit,
-    GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo, RepoRef,
-    Worktree,
+    CheckoutBranch, CheckoutBranches, DriveEntry, FileSearchMatch, FolderEntry, FolderListing,
+    GitHistoryCommit, GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo,
+    RepoRef, Worktree,
 };
 
 use crate::EngineError;
@@ -1246,6 +1246,122 @@ impl Repos {
         Ok(out.trim().to_string())
     }
 
+    /// The checkout at `cwd` as git reports it now: the branch it has checked
+    /// out (or its short commit when detached) and the local branches it can
+    /// switch between, each with where else it is checked out. Feeds the
+    /// in-chat branch dropdown.
+    pub async fn checkout_branches(&self, cwd: &Path) -> Result<CheckoutBranches, EngineError> {
+        let current = self.git(&["branch", "--show-current"], Some(cwd)).await?;
+        let head = self
+            .git_probe(
+                &["rev-parse", "--verify", "--quiet", "--short", "HEAD"],
+                Some(cwd),
+            )
+            .await?
+            .filter(|sha| !sha.is_empty());
+        let refs = self
+            .git(
+                &[
+                    "for-each-ref",
+                    "--sort=-committerdate",
+                    "--format=%(refname)",
+                    "refs/heads",
+                ],
+                Some(cwd),
+            )
+            .await?;
+        let elsewhere = self.branches_checked_out_elsewhere(cwd).await?;
+        Ok(CheckoutBranches {
+            current: (!current.is_empty()).then_some(current),
+            head,
+            branches: refs
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("refs/heads/"))
+                .map(|name| CheckoutBranch {
+                    name: name.to_string(),
+                    checked_out_at: elsewhere.get(name).cloned(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Branch → path for every OTHER checkout of the repository than the one
+    /// at `cwd`: the main folder and each linked worktree
+    /// (`git worktree list --porcelain`).
+    async fn branches_checked_out_elsewhere(
+        &self,
+        cwd: &Path,
+    ) -> Result<HashMap<String, String>, EngineError> {
+        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        let here = canonical(
+            &self
+                .git(&["rev-parse", "--show-toplevel"], Some(cwd))
+                .await?,
+        );
+        let out = self
+            .git(&["worktree", "list", "--porcelain"], Some(cwd))
+            .await?;
+        let mut elsewhere = HashMap::new();
+        let mut path: Option<String> = None;
+        for line in out.lines().map(str::trim) {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(p.to_string());
+            } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
+                && let Some(path) = path.take()
+                && canonical(&path) != here
+            {
+                elsewhere.insert(branch.to_string(), path);
+            }
+        }
+        Ok(elsewhere)
+    }
+
+    /// Switch the checkout at `cwd` to the local branch `name`, or with
+    /// `create` make `name` at HEAD and switch to it. A branch another
+    /// checkout holds is refused up front, naming that checkout; whatever
+    /// else git refuses (local changes it would overwrite, a name it won't
+    /// take) comes back as git's own reason, on one line. Returns the
+    /// checkout's listing after the switch.
+    pub async fn switch_branch(
+        &self,
+        cwd: &Path,
+        name: &str,
+        create: bool,
+    ) -> Result<CheckoutBranches, EngineError> {
+        let name = name.trim();
+        // Never let a name reach git as an option.
+        if name.is_empty() || name.starts_with('-') {
+            return Err(EngineError::Other(format!(
+                "'{name}' is not a valid branch name"
+            )));
+        }
+        if create {
+            self.git(&["check-ref-format", "--branch", name], Some(cwd))
+                .await
+                .map_err(git_reason)?;
+            self.git(&["switch", "--no-guess", "-c", name], Some(cwd))
+                .await
+                .map_err(git_reason)?;
+        } else {
+            if !self.branch_exists(cwd, name).await {
+                return Err(EngineError::Other(format!("No local branch named {name}")));
+            }
+            if let Some(path) = self.branches_checked_out_elsewhere(cwd).await?.get(name) {
+                let folder = Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                return Err(EngineError::Other(format!(
+                    "{name} is checked out in {folder}"
+                )));
+            }
+            self.git(&["switch", "--no-guess", name], Some(cwd))
+                .await
+                .map_err(git_reason)?;
+        }
+        self.checkout_branches(cwd).await
+    }
+
     // ── worktrees ───────────────────────────────────────────────────────────
 
     /// `git worktree add` an isolated checkout under
@@ -1533,6 +1649,43 @@ impl Repos {
             )),
         }
     }
+}
+
+/// A git refusal as one plain line for the UI: the `git:` wrapper and git's
+/// `error:`/`fatal:` prefixes and closing "Aborting" go, an indented file
+/// list joins with commas, sentences with spaces.
+fn git_reason(err: EngineError) -> EngineError {
+    let EngineError::Other(message) = err else {
+        return err;
+    };
+    let message = message.strip_prefix("git: ").unwrap_or(&message);
+    let mut reason = String::new();
+    let mut listing = false;
+    for raw in message.lines() {
+        let indented = raw.starts_with('\t') || raw.starts_with("  ");
+        let line = raw.trim();
+        if line.is_empty() || line == "Aborting" {
+            continue;
+        }
+        let line = line
+            .strip_prefix("error: ")
+            .or_else(|| line.strip_prefix("fatal: "))
+            .unwrap_or(line);
+        if indented {
+            reason.push_str(if listing { ", " } else { " " });
+            listing = true;
+        } else {
+            if listing {
+                reason.push('.');
+                listing = false;
+            }
+            if !reason.is_empty() {
+                reason.push(' ');
+            }
+        }
+        reason.push_str(line);
+    }
+    EngineError::Other(reason)
 }
 
 struct CancelOnDrop(std::sync::Arc<AtomicBool>);
@@ -2708,5 +2861,124 @@ tmpfs /run tmpfs rw 0 0
 
         assert_eq!(alpha.unwrap()[0].path, "alpha.rs");
         assert_eq!(beta.unwrap()[0].path, "beta.rs");
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git fixture command starts");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// `main` with one commit, plus a `held` branch checked out in a linked
+    /// worktree folder named `held-tree`.
+    fn branch_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, Repos) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let tree = temp.path().join("held-tree");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "base"]);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "held",
+                &tree.to_string_lossy(),
+            ],
+        );
+        let repos =
+            Repos::with_worktrees_root(temp.path(), "device", temp.path().join("worktrees"));
+        (temp, repo, tree, repos)
+    }
+
+    fn checked_out_at<'a>(listing: &'a CheckoutBranches, name: &str) -> Option<&'a str> {
+        listing
+            .branches
+            .iter()
+            .find(|branch| branch.name == name)
+            .expect("branch listed")
+            .checked_out_at
+            .as_deref()
+    }
+
+    #[tokio::test]
+    async fn chat_branch_switch_skips_branches_another_checkout_holds() {
+        let (_temp, repo, tree, repos) = branch_fixture();
+        run_git(&repo, &["branch", "feature"]);
+
+        let listing = repos.checkout_branches(&repo).await.unwrap();
+        assert_eq!(listing.current.as_deref(), Some("main"));
+        assert!(checked_out_at(&listing, "held").is_some_and(|p| p.ends_with("held-tree")));
+        assert_eq!(checked_out_at(&listing, "main"), None);
+
+        let switched = repos.switch_branch(&repo, "feature", false).await.unwrap();
+        assert_eq!(switched.current.as_deref(), Some("feature"));
+
+        let err = repos
+            .switch_branch(&repo, "held", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "held is checked out in held-tree");
+        assert_eq!(repos.current_branch(&repo).await.unwrap(), "feature");
+
+        // Seen from the worktree, the main folder is the other checkout.
+        let from_tree = repos.checkout_branches(&tree).await.unwrap();
+        assert_eq!(from_tree.current.as_deref(), Some("held"));
+        assert!(checked_out_at(&from_tree, "feature").is_some_and(|p| p.ends_with("repo")));
+        assert_eq!(checked_out_at(&from_tree, "held"), None);
+
+        // A new branch starts at HEAD and becomes current; git vets the name.
+        let created = repos
+            .switch_branch(&repo, "topic/next", true)
+            .await
+            .unwrap();
+        assert_eq!(created.current.as_deref(), Some("topic/next"));
+        assert_eq!(created.head, switched.head);
+        let err = repos
+            .switch_branch(&repo, "bad..name", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a valid branch name"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn chat_branch_switch_reports_why_git_refuses() {
+        let (_temp, repo, _tree, repos) = branch_fixture();
+        run_git(&repo, &["branch", "feature"]);
+        std::fs::write(repo.join("file.txt"), "main\n").unwrap();
+        run_git(&repo, &["commit", "-q", "-am", "main moves on"]);
+        std::fs::write(repo.join("file.txt"), "uncommitted\n").unwrap();
+
+        let err = repos
+            .switch_branch(&repo, "feature", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("Your local changes to the following files would be overwritten"),
+            "{err}"
+        );
+        assert!(err.contains("file.txt. Please commit"), "{err}");
+        assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "uncommitted\n"
+        );
     }
 }

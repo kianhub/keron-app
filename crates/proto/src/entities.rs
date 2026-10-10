@@ -342,6 +342,35 @@ pub struct RepoRef {
     pub worktree_path: Option<String>,
 }
 
+/// `ListChatBranches` / `SwitchChatBranch`: a chat's checkout as git reports
+/// it now. Unlike [`Chat::branch`] (the branch the conversation was recorded
+/// on), this follows every checkout switch, the agent's own included.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutBranches {
+    /// The branch checked out in the chat's folder; `None` on a detached HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// HEAD's abbreviated commit (what a detached HEAD shows); `None` before
+    /// the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Local branches, most recently committed first.
+    #[serde(default)]
+    pub branches: Vec<CheckoutBranch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutBranch {
+    pub name: String,
+    /// Another checkout of the repository (the main folder or a linked
+    /// worktree) that has this branch checked out. Git checks a branch out
+    /// in one place at a time, so this checkout can't switch to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_out_at: Option<String>,
+}
+
 /// Public Git reference attached to a commit in the history graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
