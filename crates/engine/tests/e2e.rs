@@ -616,11 +616,13 @@ async fn queued_run_command_executes_end_to_end() {
         other => panic!("unexpected second part {other:?}"),
     }
 
-    // Command outcome written by the host (sole outcome writer).
-    assert_eq!(
-        command_status(&core, "cmd-run-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // Command outcome written by the host (sole outcome writer), after the
+    // dispatch it stamps; the mock can finish the turn first.
+    wait_for(
+        || command_status(&core, "cmd-run-1") == Some((SessionCommandStatus::Applied, None)),
+        "run command applied",
+    )
+    .await;
 
     // Journal replay: the full script in order, terminal Done last.
     let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
@@ -754,10 +756,12 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
-    assert_eq!(
-        command_status(&core, "cmd-int-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The interrupt lands on the run before its command row is stamped.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt applied",
+    )
+    .await;
     // Journal closed with a Done — nothing left to recover.
     let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
     assert!(journal.stale_sessions().unwrap().is_empty());
@@ -1674,10 +1678,13 @@ async fn respond_input_resolves_pending_question() {
         "answered turn to complete",
     )
     .await;
-    assert_eq!(
-        command_status(&core, "cmd-answer-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The answer reaches the live run before its command row is stamped, and
+    // the mock finishes the turn instantly: wait for the stamp.
+    wait_for(
+        || command_status(&core, "cmd-answer-1") == Some((SessionCommandStatus::Applied, None)),
+        "answer applied",
+    )
+    .await;
     // The input part is marked resolved in the doc.
     assert!(entries(&core).iter().any(|e| {
         e.parts
@@ -2198,10 +2205,13 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
         "answered turn to complete",
     )
     .await;
-    assert_eq!(
-        command_status(&core, "cmd-answer-twin"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The answer reaches the live run before its command row is stamped, and
+    // the mock finishes the turn instantly: wait for the stamp.
+    wait_for(
+        || command_status(&core, "cmd-answer-twin") == Some((SessionCommandStatus::Applied, None)),
+        "answer applied",
+    )
+    .await;
     assert!(entries(&core).iter().any(|e| {
         e.parts
             .iter()
