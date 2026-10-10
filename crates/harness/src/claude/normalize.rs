@@ -206,6 +206,12 @@ pub(crate) struct Normalizer {
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
+    /// The text block streaming on the main feed: what its deltas carried,
+    /// and whether the stream announced it. The CLI follows every block with
+    /// an `assistant` frame holding that block's complete text, which
+    /// supplies whatever the deltas lost — see [`Self::complete_block`].
+    streamed_text: String,
+    text_block_started: bool,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
 }
@@ -219,7 +225,29 @@ impl Normalizer {
             agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
+            streamed_text: String::new(),
+            text_block_started: false,
             session_id: None,
+        }
+    }
+
+    /// Close the streaming text block against its complete text: the part
+    /// its deltas never carried, emitted once. A missing end follows as a
+    /// plain delta; words lost anywhere else make the complete text replace
+    /// what streamed. Only a longer text has words the stream lost: a shorter
+    /// or equal one (the CLI trimming what streamed) adds nothing.
+    fn complete_block(&mut self, complete: &str) -> Option<AgentEvent> {
+        let streamed = std::mem::take(&mut self.streamed_text);
+        match complete.strip_prefix(streamed.as_str()) {
+            Some("") => None,
+            Some(missing) => Some(AgentEvent::TextDelta {
+                text: missing.to_owned(),
+            }),
+            None if complete.len() > streamed.len() => Some(AgentEvent::TextReplaced {
+                streamed,
+                text: complete.to_owned(),
+            }),
+            None => None,
         }
     }
 
@@ -426,6 +454,10 @@ impl Normalizer {
             // `AgentEvent::Subagent` instead — the engine routes them to the
             // subagent's own doc.
             Frame::StreamEvent(f) => {
+                if f.event.kind == "content_block_start" && f.parent_tool_use_id.is_none() {
+                    self.streamed_text.clear();
+                    self.text_block_started = f.event.content_block.kind == "text";
+                }
                 if f.event.kind != "content_block_delta" {
                     return Vec::new();
                 }
@@ -450,9 +482,12 @@ impl Normalizer {
                     };
                 }
                 match f.event.delta.kind.as_str() {
-                    "text_delta" => vec![AgentEvent::TextDelta {
-                        text: f.event.delta.text,
-                    }],
+                    "text_delta" => {
+                        self.streamed_text.push_str(&f.event.delta.text);
+                        vec![AgentEvent::TextDelta {
+                            text: f.event.delta.text,
+                        }]
+                    }
                     "thinking_delta" => vec![AgentEvent::ReasoningDelta {
                         text: f.event.delta.thinking,
                     }],
@@ -513,6 +548,20 @@ impl Normalizer {
                         self.agent_spawn_tools.insert(b.id.clone());
                     }
                 }
+                // A text block's frame carries its complete text: whatever
+                // the deltas lost arrives here, ahead of the block's close.
+                // Only for a block the stream carried: a synthetic CLI
+                // message (an API error's text, `<synthetic>`) never
+                // streamed and is not the reply.
+                let streamed = self.text_block_started || !self.streamed_text.is_empty();
+                let completion = (streamed
+                    && f.error.is_none()
+                    && f.message.model.as_deref() != Some("<synthetic>"))
+                .then(|| f.message.blocks().filter(|b| b.kind == "text").last())
+                .flatten()
+                .and_then(|b| self.complete_block(&b.text));
+                self.streamed_text.clear();
+                self.text_block_started = false;
                 let mut out: Vec<AgentEvent> = f
                     .message
                     .blocks()
@@ -566,6 +615,9 @@ impl Normalizer {
                         std::iter::once(call).chain(opening).chain(steer)
                     })
                     .collect();
+                if let Some(completion) = completion {
+                    out.insert(0, completion);
+                }
                 self.last_model = f.message.model.clone().or(self.last_model.take());
                 if let Some(usage) = &f.message.usage {
                     let fields = [
@@ -693,6 +745,20 @@ impl Normalizer {
                 if let Some(id) = &f.session_id {
                     self.session_id = Some(id.clone());
                 }
+                // A block that streamed but never got its frame: the result's
+                // text is the turn's final reply, so it can supply a missing
+                // end. Nothing more — a result can't place words that never
+                // streamed at all (a wake turn's result repeats earlier text).
+                let streamed = std::mem::take(&mut self.streamed_text);
+                self.text_block_started = false;
+                let missing_end = (f.subtype == "success" && !streamed.is_empty())
+                    .then_some(f.result.as_deref())
+                    .flatten()
+                    .and_then(|result| result.strip_prefix(streamed.as_str()))
+                    .filter(|missing| !missing.is_empty())
+                    .map(|missing| AgentEvent::TextDelta {
+                        text: missing.to_owned(),
+                    });
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
@@ -758,7 +824,7 @@ impl Normalizer {
                         session_id: f.session_id,
                     }
                 };
-                let mut out = Vec::new();
+                let mut out: Vec<AgentEvent> = missing_end.into_iter().collect();
                 if let Some(window) = window {
                     out.push(AgentEvent::ContextUsage {
                         tokens: None,
@@ -888,6 +954,92 @@ mod tests {
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
         );
         assert!(ev.is_empty());
+    }
+
+    /// Text the deltas lost comes from the block's complete `assistant`
+    /// frame (or, for a block whose frame never came, the result), and text
+    /// that did stream is never sent twice.
+    #[test]
+    fn a_blocks_complete_text_supplies_what_its_deltas_lost() {
+        const FULL: &str = "How it starts, and how it ends.";
+        let run = |frames: &[String]| {
+            let mut norm = Normalizer::new();
+            frames
+                .iter()
+                .flat_map(|raw| {
+                    let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
+                    norm.normalize(frame, false)
+                })
+                .filter(|e| {
+                    matches!(
+                        e,
+                        AgentEvent::TextDelta { .. } | AgentEvent::TextReplaced { .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#.to_owned();
+        let delta = |text: &str| {
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":1,
+                "delta":{"type":"text_delta","text":text}}})
+            .to_string()
+        };
+        let frame = |text: &str| {
+            json!({"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1",
+                "content":[{"type":"text","text":text}]}})
+            .to_string()
+        };
+        let streamed = |text: &str| AgentEvent::TextDelta { text: text.into() };
+
+        // Lost start: the complete text replaces what streamed.
+        assert_eq!(
+            run(&[start.clone(), delta("and how it ends."), frame(FULL)]),
+            [
+                streamed("and how it ends."),
+                AgentEvent::TextReplaced {
+                    streamed: "and how it ends.".into(),
+                    text: FULL.into(),
+                },
+            ]
+        );
+        // Lost end: only the rest follows.
+        assert_eq!(
+            run(&[start.clone(), delta("How it starts,"), frame(FULL)]),
+            [streamed("How it starts,"), streamed(" and how it ends.")]
+        );
+        // Nothing lost, even split across many deltas: nothing added.
+        assert_eq!(
+            run(&[
+                start.clone(),
+                delta("How it starts, "),
+                delta("and how it ends."),
+                frame(FULL)
+            ]),
+            [streamed("How it starts, "), streamed("and how it ends.")]
+        );
+        // Every delta lost: the block arrives whole.
+        assert_eq!(run(&[start.clone(), frame(FULL)]), [streamed(FULL)]);
+        // A stream cut off by an API error: the CLI's synthetic error message
+        // is not the rest of the reply.
+        assert_eq!(
+            run(&[
+                start.clone(),
+                delta("How it starts,"),
+                json!({"type":"assistant","error":"server_error","message":{"model":"<synthetic>",
+                    "content":[{"type":"text","text":"API Error: 500 the server had an error"}]}})
+                .to_string(),
+            ]),
+            [streamed("How it starts,")]
+        );
+        // No frame came: the turn's result supplies the missing end.
+        assert_eq!(
+            run(&[
+                start,
+                delta("How it starts,"),
+                json!({"type":"result","subtype":"success","result":FULL}).to_string(),
+            ]),
+            [streamed("How it starts,"), streamed(" and how it ends.")]
+        );
     }
 
     #[test]

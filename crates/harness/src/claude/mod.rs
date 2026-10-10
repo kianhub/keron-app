@@ -858,6 +858,14 @@ async fn run_session(session: Session) {
                                     assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                                 })).await.is_err() { break 'main; }
                             }
+                            // The replay settles the held turn end: it was the
+                            // steer boundary, and the turn the steer joined ends
+                            // with its own result. Left armed, the next quiet
+                            // stretch (a tool running, the model thinking)
+                            // released it as a Done in the middle of the reply,
+                            // and the engine parked the chat and dropped the
+                            // text streaming just after it (2026-10-09).
+                            held_done = None;
                         }
                     }
                     for ev in norm.normalize(frame, interrupted) {

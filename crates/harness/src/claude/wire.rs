@@ -64,6 +64,15 @@ pub(crate) struct StreamEventBody {
     pub kind: String,
     #[serde(default)]
     pub delta: Delta,
+    /// `content_block_start`: the kind of block starting.
+    #[serde(default)]
+    pub content_block: BlockStart,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct BlockStart {
+    #[serde(rename = "type", default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

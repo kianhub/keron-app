@@ -892,6 +892,133 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Frames captured from claude 2.1.296 (2026-10-09; the init frame's home
+/// path is renamed and the plan-usage `rate_limit_event` dropped): a `now`
+/// steer lands while the first reply streams. The CLI ends that turn with a
+/// `success` result (`aborted_streaming`), replays the steer, re-runs the
+/// tool (`sleep 8`, five quiet seconds on stdout), and answers. The replay
+/// pauses at that quiet stretch for longer than the harness's held turn end
+/// waits: the result held for the steer must not surface there as a Done in
+/// the middle of the turn, where the engine parks the chat and drops the
+/// reply streaming right after it.
+#[tokio::test]
+async fn captured_live_mid_turn_steer_keeps_the_whole_reply() {
+    const STEER_UUID: &str = "00000000-0000-4000-8000-000000000001";
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("claude")
+        .join("live-2.1.296-steer-mid-turn.jsonl");
+    let capture = std::fs::read_to_string(&fixture).expect("fixture readable");
+    let lines: Vec<&str> = capture.lines().collect();
+    let quiet = lines
+        .iter()
+        .position(|l| l.contains(r#""subtype":"task_notification""#))
+        .expect("the tool's quiet stretch ends with its task_notification");
+    let frame = |l: &str| serde_json::from_str::<serde_json::Value>(l).unwrap();
+    let text_blocks: Vec<String> = lines
+        .iter()
+        .map(|l| frame(l))
+        .filter(|f| f["type"] == "assistant")
+        .flat_map(|f| {
+            f["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|b| b["type"] == "text")
+        .map(|b| b["text"].as_str().unwrap().to_owned())
+        .collect();
+    let [before_steer, reply] = &text_blocks[..] else {
+        panic!("one text block on each side of the steer: {text_blocks:?}");
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("before.jsonl"),
+        lines[..quiet].join("\n") + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("after.jsonl"),
+        lines[quiet..].join("\n") + "\n",
+    )
+    .unwrap();
+    // Reads the prompt and the steer, then plays the capture with the
+    // steer's real id in place of the captured one.
+    let cli = dir.path().join("replay.sh");
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/sh\nread -r _first || exit 1\nread -r steer || exit 1\n\
+             id=$(printf '%s\\n' \"$steer\" | sed 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/')\n\
+             sed \"s/{STEER_UUID}/$id/g\" '{dir}/before.jsonl'\nsleep 6\n\
+             sed \"s/{STEER_UUID}/$id/g\" '{dir}/after.jsonl'\n",
+            dir = dir.path().display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let (controls, steer, _token) = controls("A");
+    steer
+        .send(SteerMessage {
+            prompt: "Also say which directory you are in.".into(),
+            message_id: None,
+        })
+        .await
+        .unwrap();
+    let stream = ClaudeHarness::new()
+        .with_executable(&cli)
+        .run(request("replay"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(
+        Duration::from_secs(20),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+
+    let dones: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, AgentEvent::Done { .. }).then_some(i))
+        .collect();
+    assert_eq!(
+        dones,
+        [events.len() - 1],
+        "one Done, at the end: {events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: Some(result),
+            ..
+        }) if result == reply
+    ));
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("the replay confirms the steer");
+    let text = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    // Every word, once, on the right side of the steer boundary.
+    assert_eq!(&text(&events[..steered]), before_steer);
+    assert_eq!(&text(&events[steered..]), reply);
+}
+
 /// Live smoke against the REAL claude CLI (2.1.x, must be installed + authed):
 /// one trivial turn through the stdio permission channel, ending on the
 /// result frame. `cargo test -p zeron-harness --test claude -- --ignored`.
