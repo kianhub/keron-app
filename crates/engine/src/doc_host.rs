@@ -4890,21 +4890,38 @@ impl DocHost {
             // 2026-08-19); terminalize it so the truth lands in the doc and
             // a user retry can mint a fresh attempt.
             for c in &commands {
-                if c.status == SessionCommandStatus::Pending
-                    && !skipped.contains(&c.id)
-                    && is_processed(&c.id)
-                    && !lock(&self.inner.executing).contains(&c.id)
+                if c.status != SessionCommandStatus::Pending
+                    || skipped.contains(&c.id)
+                    || !is_processed(&c.id)
                 {
-                    tracing::warn!(chat = %handle.chat_id, command = %c.id,
-                        "command consumed but never resolved (crash mid-execute?); rejecting");
-                    self.resolve_command(
-                        handle,
-                        &c.id,
-                        SessionCommandStatus::Rejected,
-                        Some("interrupted before completion — retry to send again"),
-                    );
-                    skipped.insert(c.id.clone());
+                    continue;
                 }
+                // Controls drain alongside a prompt drain, so this snapshot
+                // can predate the other drain's outcome write and show a
+                // command it has since applied as still Pending. The executor
+                // stamps the outcome before releasing its claim: checking the
+                // claim set and then the live status under that lock is what
+                // tells a crash from a command that just finished.
+                let crashed = {
+                    let executing = lock(&self.inner.executing);
+                    !executing.contains(&c.id)
+                        && handle.doc.read_commands().is_ok_and(|live| {
+                            live.iter()
+                                .any(|l| l.id == c.id && l.status == SessionCommandStatus::Pending)
+                        })
+                };
+                if !crashed {
+                    continue;
+                }
+                tracing::warn!(chat = %handle.chat_id, command = %c.id,
+                    "command consumed but never resolved (crash mid-execute?); rejecting");
+                self.resolve_command(
+                    handle,
+                    &c.id,
+                    SessionCommandStatus::Rejected,
+                    Some("interrupted before completion — retry to send again"),
+                );
+                skipped.insert(c.id.clone());
             }
             let Some(entry) = commands
                 .iter()
