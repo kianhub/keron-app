@@ -7,7 +7,9 @@ use gpui::{
     point, px, size,
 };
 use keron_home::catalog::Catalog;
-use keron_home::{Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec};
+use keron_home::{
+    Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec, TimelineItem,
+};
 
 use super::*;
 
@@ -980,6 +982,58 @@ fn loose_ends_draw_every_row_in_a_card_that_stops_growing(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn the_memory_timeline_scrolls_through_every_note_too(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(0, cx);
+    let set_notes = |home: &Entity<Home>, count: usize, cx: &mut VisualTestContext| {
+        home.update(cx, |home, cx| {
+            home.widgets.get_mut("mem").unwrap().payload = Some(Payload {
+                updated: None,
+                errors: Vec::new(),
+                body: Body::Timeline(
+                    (0..count)
+                        .map(|ix| TimelineItem {
+                            time: Some(format!("10:{ix:02}")),
+                            kind: Some("did".to_string()),
+                            text: format!("Note {ix}"),
+                            ..TimelineItem::default()
+                        })
+                        .collect(),
+                ),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    home.update(cx, |home, cx| {
+        let mut mem = manifest("mem", "Memory · today");
+        mem.kind = Kind::Timeline;
+        mem.source = SourceSpec::Memory("today".to_string());
+        // Added signed out, as the loose ends card is, so nothing fetches.
+        let signed_in = std::mem::replace(&mut home.sign_in, SignIn::NoDoor);
+        home.apply_catalog(catalog(vec![mem]), cx);
+        home.widgets.entry("mem".to_string()).or_default();
+        home.sign_in = signed_in;
+    });
+    set_notes(&home, 20, cx);
+    let (rows, height) = home.read_with(cx, |home, _| {
+        let rows = home.list_scrolls.borrow()["mem"]
+            .page
+            .scroll
+            .children_count();
+        (
+            rows,
+            f32::from(home.card_bounds.borrow()["mem"].size.height),
+        )
+    });
+    assert_eq!(rows, 20); // every note, none left to "+N more"
+    set_notes(&home, 40, cx);
+    let taller = home.read_with(cx, |home, _| {
+        f32::from(home.card_bounds.borrow()["mem"].size.height)
+    });
+    assert!((taller - height).abs() < 0.5, "the card stops growing");
+}
+
+#[gpui::test]
 fn the_wheel_scrolls_loose_ends_to_their_end_and_the_page_from_the_next_gesture(
     cx: &mut TestAppContext,
 ) {
@@ -1036,6 +1090,18 @@ fn tabbing_to_a_loose_end_out_of_view_scrolls_it_in(cx: &mut TestAppContext) {
     }
     assert_eq!(focus(&home, cx), (None, row("e0")));
     assert_eq!(list.offset().y, px(0.0));
+    // Scrolled away from it, each Tab on within the row brings it back:
+    // to its Snooze, then its Done.
+    let over_list = list.bounds().origin + point(px(40.0), px(40.0));
+    for _ in 0..2 {
+        wheel(over_list, -60.0, TouchPhase::Started, cx);
+        wheel(over_list, -10_000.0, TouchPhase::Moved, cx);
+        assert!(list.offset().y < px(0.0));
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        assert_eq!(focus(&home, cx), (row("e0"), row("e0")));
+        assert_eq!(list.offset().y, px(0.0));
+    }
 }
 
 #[test]

@@ -42,7 +42,7 @@ empty  = "Nobody's waiting"
 | `every` | no | `1m` | How often to refresh: `30s`, `5m`, `1h`. A bare number is seconds. The fastest is `5s`, the slowest `24h`. |
 | `icon` | no | none | One of `flag`, `chat`, `check`, `calendar`, `tree`, `pulse`, `devices`, `pr`, `mail`, `mic`, `bars`, `widget`, `bell`, `star`, `list`, `globe`, `slack`. |
 | `wide` | no | `false` | Take two columns instead of one, until you resize it in Customize. |
-| `limit` | no | all | The most rows shown, from 1 to 50. |
+| `limit` | no | `6` | The most rows shown, from 1 to 50. Loose ends show every open item in a list that scrolls, and `limit` is how many rows tall it is. |
 | `empty` | no | | The text shown when there are no rows (on the card, or in the tooltip of its icon once it's collapsed). |
 
 Any other key is an error, so a typo shows up instead of being ignored. A

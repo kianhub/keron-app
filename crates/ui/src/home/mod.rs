@@ -207,25 +207,27 @@ impl RowUi {
 
 /// A list that scrolls inside its card ([`scrolls`]), between frames: its
 /// scroll and floating scrollbar, where it was before the wheel event being
-/// handled moved it, and the keyboard-focused row it last brought into view.
+/// handled moved it, and what keyboard focus was on (a row's link, Snooze
+/// or Done) when it last brought a row into view.
 #[derive(Default)]
 struct ListScroll {
     page: PageScroll,
     before: Rc<Cell<Pixels>>,
-    revealed: Option<String>,
+    revealed: Option<WeakFocusHandle>,
 }
 
 impl ListScroll {
-    /// Bring the row keyboard focus is in (its place among the rows, and its
-    /// id) into view when focus has just moved there; the owner can still
+    /// Bring the row keyboard focus is in (its place among the rows, and
+    /// what in it has focus: its link, Snooze or Done) into view each time
+    /// focus moves, within the row too; between moves the owner can still
     /// scroll away from it.
-    fn reveal(&mut self, focused: Option<(usize, &str)>) {
-        let Some((ix, row)) = focused else {
+    fn reveal(&mut self, focused: Option<(usize, &WeakFocusHandle)>) {
+        let Some((ix, handle)) = focused else {
             self.revealed = None;
             return;
         };
-        if self.revealed.as_deref() != Some(row) {
-            self.revealed = Some(row.to_string());
+        if self.revealed.as_ref() != Some(handle) {
+            self.revealed = Some(handle.clone());
             self.page.scroll.scroll_to_item(ix);
         }
     }
@@ -1661,11 +1663,13 @@ fn limit(manifest: &Manifest) -> usize {
     manifest.limit.unwrap_or(DEFAULT_LIMIT).max(1)
 }
 
-/// Whether a list card scrolls through every row rather than stopping at
-/// its limit with "+N more". Loose ends do, so nothing open is out of
-/// reach; the limit then sets how many rows tall the card is.
+/// Whether a card scrolls through every row rather than stopping at its
+/// limit with "+N more". Loose ends do, so nothing open is out of reach, and
+/// so does the memory's timeline of today; the limit then sets how many rows
+/// tall the card is.
 fn scrolls(manifest: &Manifest) -> bool {
     manifest.source == loose_ends::loose_ends()
+        || manifest.source == SourceSpec::Memory("today".to_string())
 }
 
 /// The most rows a list card draws: all of them when it scrolls.

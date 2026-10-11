@@ -11,8 +11,8 @@ use chrono::{Local, NaiveDate, Utc};
 use gpui::{
     AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, DispatchPhase,
     Div, ElementId, EntityId, FontWeight, HitboxBehavior, Hsla, MouseButton, MouseMoveEvent,
-    Pixels, Role, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Toggled, Window, div,
-    prelude::*, px, relative,
+    Pixels, Role, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Toggled, WeakFocusHandle,
+    Window, div, prelude::*, px, relative,
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
 use keron_home::loose_ends::{Action, snooze_choices};
@@ -53,6 +53,8 @@ const MORE_LINE_HEIGHT: f32 = 15.0;
 /// A list row with its sub line, in pixels at the default text size. A
 /// list that scrolls in its card is its limit of these tall at most.
 const LIST_ROW_HEIGHT: f32 = 39.0;
+/// A timeline row at its tallest (two lines), for a scrolling timeline's height.
+const TIMELINE_ROW_HEIGHT: f32 = 34.0;
 /// How far a row's hover wash reaches past the text column on each side.
 const ROW_INSET: f32 = 6.0;
 /// A row action button's square side, and its glyph.
@@ -1023,6 +1025,19 @@ impl Home {
     ) -> AnyElement {
         match &payload.body {
             Body::List(items) => self.render_list(theme, manifest, state, items, view, cx),
+            Body::Timeline(items) if scrolls(manifest) && !items.is_empty() => {
+                let rows = items
+                    .iter()
+                    .map(|item| timeline_row(theme, item).into_any_element());
+                self.scrolling_list(
+                    theme,
+                    manifest,
+                    rows.collect(),
+                    None,
+                    TIMELINE_ROW_HEIGHT,
+                    cx,
+                )
+            }
             Body::Timeline(items) => render_timeline(theme, manifest, items),
             Body::Agenda(items) => self.render_agenda(theme, manifest, items, cx),
             Body::Devices(items) => render_devices(theme, manifest, items),
@@ -1052,17 +1067,18 @@ impl Home {
         }
         let scrolls = scrolls(manifest);
         // The row keyboard focus is in, for a card that scrolls to bring
-        // into view: its place among the rows, and its id.
+        // into view: its place among the rows, and what in it has focus.
         let focused = self
             .keyboard_in
             .as_ref()
             .filter(|(widget, _)| scrolls && *widget == manifest.id)
-            .and_then(|(_, row)| {
+            .zip(self.focus_seen.as_ref())
+            .and_then(|((_, row), (handle, _))| {
                 let ix = drawn
                     .rows
                     .iter()
                     .position(|(item, _)| item.id.as_deref() == Some(row.as_str()))?;
-                Some((ix, row.as_str()))
+                Some((ix, handle))
             });
         let rows: Vec<AnyElement> = drawn
             .rows
@@ -1095,7 +1111,7 @@ impl Home {
             })
             .collect();
         if scrolls {
-            return self.scrolling_list(theme, manifest, rows, focused, cx);
+            return self.scrolling_list(theme, manifest, rows, focused, LIST_ROW_HEIGHT, cx);
         }
         // The line goes with the last row past the limit, closing as it opens.
         let more = match drawn.more_closing {
@@ -1126,15 +1142,17 @@ impl Home {
             .into_any_element()
     }
 
-    /// Rows that scroll inside their card, at most its limit of rows tall,
-    /// with Home's edge fade and the app's floating scrollbar. The wheel
-    /// scrolls them while they can move that way, and the page otherwise.
+    /// Rows that scroll inside their card, at most its limit of rows (each
+    /// `row_height` tall) tall, with Home's edge fade and the app's floating
+    /// scrollbar. The wheel scrolls them while they can move that way, and
+    /// the page otherwise.
     fn scrolling_list(
         &self,
         theme: &Theme,
         manifest: &Manifest,
         rows: Vec<AnyElement>,
-        focused: Option<(usize, &str)>,
+        focused: Option<(usize, &WeakFocusHandle)>,
+        row_height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = manifest.id.clone();
@@ -1153,7 +1171,7 @@ impl Home {
             (list.page.scroll.clone(), list.before.clone(), rail)
         };
         let rows_tall = limit(manifest) as f32;
-        let height = rows_tall * LIST_ROW_HEIGHT + (rows_tall - 1.0) * LIST_GAP;
+        let height = rows_tall * row_height + (rows_tall - 1.0) * LIST_GAP;
         let list = div()
             .id("home-list-rows")
             .max_h(ui_rems(height))
@@ -1723,52 +1741,54 @@ fn render_timeline(theme: &Theme, manifest: &Manifest, items: &[TimelineItem]) -
         return empty(theme, manifest);
     }
     let (rows, more) = cap(items, limit(manifest));
-    let rows = rows.iter().map(|item| {
-        let time = item
-            .time
-            .clone()
-            .or_else(|| {
-                item.at
-                    .as_deref()
-                    .and_then(parse_time)
-                    .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
-            })
-            .unwrap_or_default();
-        let kind = item.kind.clone().unwrap_or_default();
-        div()
-            .flex()
-            .items_start()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(40.0))
-                    .text_size(ui_rems(11.0))
-                    .line_height(ui_rems(17.0))
-                    .font_family(theme.font_mono.clone())
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(time)),
-            )
-            .child(kind_chip(theme, &kind))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(ui_rems(13.0))
-                    .line_height(ui_rems(17.0))
-                    .text_color(theme.text)
-                    .line_clamp(2)
-                    .text_ellipsis()
-                    .child(SharedString::from(item.text.clone())),
-            )
-    });
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .children(rows)
+        .children(rows.iter().map(|item| timeline_row(theme, item)))
         .children(more_line(theme, more))
         .into_any_element()
+}
+
+/// One timeline row: its time, its kind and two lines of text.
+fn timeline_row(theme: &Theme, item: &TimelineItem) -> Div {
+    let time = item
+        .time
+        .clone()
+        .or_else(|| {
+            item.at
+                .as_deref()
+                .and_then(parse_time)
+                .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
+        })
+        .unwrap_or_default();
+    let kind = item.kind.clone().unwrap_or_default();
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .w(px(40.0))
+                .text_size(ui_rems(11.0))
+                .line_height(ui_rems(17.0))
+                .font_family(theme.font_mono.clone())
+                .text_color(theme.text_muted)
+                .child(SharedString::from(time)),
+        )
+        .child(kind_chip(theme, &kind))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(ui_rems(13.0))
+                .line_height(ui_rems(17.0))
+                .text_color(theme.text)
+                .line_clamp(2)
+                .text_ellipsis()
+                .child(SharedString::from(item.text.clone())),
+        )
 }
 
 fn render_devices(theme: &Theme, manifest: &Manifest, items: &[DeviceItem]) -> AnyElement {
