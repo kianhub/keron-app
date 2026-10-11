@@ -2,9 +2,10 @@
 //! the widget's own source, `<door path>/<action>` with `{"ids": [...]}`.
 //!
 //! - Loose ends: `POST /memory/loose-ends/{snooze|done|dismiss|shown|notified}`,
-//!   plus `"until"` for a snooze or `"level"` for notified. The server
-//!   changes heat and writes the notes (`[mini/loose-ends] Snoozed: ...
-//!   until 14:00`, `Done: ...`); notified writes none.
+//!   plus `"until"` for a snooze, `"level"` for notified, or the owner's
+//!   `"comment"` on done and dismiss. The server changes heat and writes the
+//!   notes (`[mini/loose-ends] Snoozed: ... until 14:00`, `Done: ...`, with
+//!   the comment after a dash); notified writes none.
 //! - keron-sources: `POST /sources/<name>/done` (gmail-needs-reply,
 //!   slack-waiting) marks rows as needing no reply; the door leaves them out
 //!   until a newer message comes. No note is written.
@@ -21,24 +22,26 @@ pub fn loose_ends() -> SourceSpec {
     SourceSpec::Memory("loose-ends".to_string())
 }
 
+/// The longest comment the door takes on Done or "Not a thing", in
+/// characters once cleaned ([`clean_comment`]).
+pub const COMMENT_LIMIT: usize = 300;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Until a time the server's `parse_until` reads: `+2h`, `18:00`,
     /// `tomorrow`, or ISO 8601.
-    Snooze {
-        until: String,
-    },
-    Done,
-    /// "Not a thing".
-    Dismiss,
+    Snooze { until: String },
+    /// With how it was handled, if the owner said; the door puts it in the
+    /// note. Loose ends only.
+    Done { comment: Option<String> },
+    /// "Not a thing", with why, if the owner said.
+    Dismiss { comment: Option<String> },
     /// The items were on screen; the server counts it at most once per item
     /// every few hours.
     Shown,
     /// A notification for heat `level` (3 hot, 4 burning) went out for the
     /// items; the server records it so it isn't due again.
-    Notified {
-        level: u8,
-    },
+    Notified { level: u8 },
 }
 
 impl Action {
@@ -46,8 +49,8 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::Snooze { .. } => "snooze",
-            Action::Done => "done",
-            Action::Dismiss => "dismiss",
+            Action::Done { .. } => "done",
+            Action::Dismiss { .. } => "dismiss",
             Action::Shown => "shown",
             Action::Notified { .. } => "notified",
         }
@@ -116,15 +119,37 @@ pub async fn send(door: &DoorClient, request: &Request) -> Result<Vec<ListItem>,
     }
 }
 
-/// `{"ids": [...]}`, plus `"until"` for a snooze and `"level"` for notified.
+/// `{"ids": [...]}`, plus `"until"` for a snooze, `"level"` for notified,
+/// and a comment that isn't blank for done and dismiss.
 fn body(action: &Action, ids: &[String]) -> Value {
     let mut body = json!({ "ids": ids });
     match action {
         Action::Snooze { until } => body["until"] = Value::String(until.clone()),
         Action::Notified { level } => body["level"] = json!(level),
-        Action::Done | Action::Dismiss | Action::Shown => {}
+        Action::Done { comment } | Action::Dismiss { comment } => {
+            if let Some(comment) = comment.as_deref().and_then(clean_comment) {
+                body["comment"] = Value::String(comment);
+            }
+        }
+        Action::Shown => {}
     }
     body
+}
+
+/// A comment as the door keeps it: one line (newlines and tabs as spaces),
+/// other control characters dropped, runs of spaces as one, trimmed.
+/// `None` when nothing is left.
+pub fn clean_comment(text: &str) -> Option<String> {
+    let line: String = text
+        .chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// Snooze choices for a menu at `now`, as `(label, until)`: "1 hour"
@@ -149,9 +174,13 @@ mod tests {
     #[test]
     fn done_on_a_source_row_carries_the_time_the_owner_saw() {
         let source = SourceSpec::parse("keron-sources:gmail-needs-reply").unwrap();
-        let request = request(&source, &Action::Done, &["t1".to_string()])
-            .unwrap()
-            .seen([("t1", "2026-10-08T09:00:00Z")]);
+        let request = request(
+            &source,
+            &Action::Done { comment: None },
+            &["t1".to_string()],
+        )
+        .unwrap()
+        .seen([("t1", "2026-10-08T09:00:00Z")]);
         assert_eq!(request.path, "/sources/gmail-needs-reply/done");
         assert_eq!(
             request.body,
@@ -185,7 +214,7 @@ mod tests {
         let ids = ["C024BE91L:1728300000.000100".to_string()];
         let slack = SourceSpec::KeronSources("slack-waiting".to_string());
         assert_eq!(
-            request(&slack, &Action::Done, &ids).unwrap(),
+            request(&slack, &Action::Done { comment: None }, &ids).unwrap(),
             Request {
                 path: "/sources/slack-waiting/done".to_string(),
                 body: json!({"ids": ["C024BE91L:1728300000.000100"]}),
@@ -196,7 +225,7 @@ mod tests {
         assert_eq!(notified.path, "/memory/loose-ends/notified");
         assert_eq!(notified.body, json!({"ids": ["a1"], "level": 3}));
         let script = SourceSpec::Script("mine.sh".into());
-        assert!(request(&script, &Action::Done, &ids).is_err());
+        assert!(request(&script, &Action::Done { comment: None }, &ids).is_err());
     }
 
     #[test]
@@ -209,7 +238,8 @@ mod tests {
             body(&snooze, &ids),
             json!({"ids": ["a1b2c3"], "until": "+1h"})
         );
-        assert_eq!(body(&Action::Done, &ids), json!({"ids": ["a1b2c3"]}));
+        let done = Action::Done { comment: None };
+        assert_eq!(body(&done, &ids), json!({"ids": ["a1b2c3"]}));
         let notified = Action::Notified { level: 4 };
         assert_eq!(notified.name(), "notified");
         let two = ["a1".to_string(), "b2".to_string()];
@@ -217,5 +247,31 @@ mod tests {
             body(&notified, &two),
             json!({"ids": ["a1", "b2"], "level": 4})
         );
+    }
+
+    #[test]
+    fn done_and_not_a_thing_carry_the_owners_comment_in_one_clean_line() {
+        let ids = ["a1b2c3".to_string()];
+        let done = Action::Done {
+            comment: Some("called her,\n  all lines reach the\tanswering service now ".into()),
+        };
+        let done = request(&loose_ends(), &done, &ids).unwrap();
+        assert_eq!(done.path, "/memory/loose-ends/done");
+        assert_eq!(
+            done.body,
+            json!({"ids": ["a1b2c3"], "comment": "called her, all lines reach the answering service now"})
+        );
+        let dismiss = Action::Dismiss {
+            comment: Some("a newsletter\u{7}".into()),
+        };
+        assert_eq!(
+            body(&dismiss, &ids),
+            json!({"ids": ["a1b2c3"], "comment": "a newsletter"})
+        );
+        // An empty field sends none: the door does what it does without one.
+        let blank = Action::Dismiss {
+            comment: Some(" \n ".into()),
+        };
+        assert_eq!(body(&blank, &ids), json!({"ids": ["a1b2c3"]}));
     }
 }

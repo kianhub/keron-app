@@ -31,8 +31,9 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, EventEmitter, FocusHandle, Pixels, Point, ScrollHandle,
-    ScrollWheelEvent, Task, TouchPhase, WeakFocusHandle, Window, point,
+    App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable as _,
+    Pixels, Point, Role, ScrollHandle, ScrollWheelEvent, Subscription, Task, TouchPhase,
+    WeakFocusHandle, Window, point,
 };
 use gpui_tokio::Tokio;
 use keron_door::{DoorClient, DoorError};
@@ -45,6 +46,7 @@ use keron_home::{
     ZeronSnapshot,
 };
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::Popup;
 use crate::settings::widgets::PageScroll;
 
@@ -271,6 +273,47 @@ impl Wheel {
     }
 }
 
+/// Which way a loose end closes with the owner's note.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NoteKind {
+    Done,
+    /// "Not a thing".
+    Dismiss,
+}
+
+impl NoteKind {
+    fn action(self, comment: Option<String>) -> Action {
+        match self {
+            NoteKind::Done => Action::Done { comment },
+            NoteKind::Dismiss => Action::Dismiss { comment },
+        }
+    }
+
+    /// The field's placeholder, which is also its label.
+    fn placeholder(self) -> &'static str {
+        match self {
+            NoteKind::Done => "How it was handled",
+            NoteKind::Dismiss => "Why it's not a thing",
+        }
+    }
+}
+
+/// The one-line field open under a loose end after "Done with a note…" or
+/// "Not a thing, because…". Enter closes the row with what was typed, the
+/// door adding it to the memory's note; Escape or focus leaving drops it.
+struct RowNote {
+    widget: String,
+    row: String,
+    kind: NoteKind,
+    input: Entity<ComposerInput>,
+    /// Focus the field on the next frame, which has the window.
+    focus_pending: bool,
+    /// A card that scrolls brings the row and its field into view once.
+    reveal_pending: Cell<bool>,
+    _events: Subscription,
+    _blur: Option<Subscription>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RowChange {
     /// Done or "not a thing": the row leaves.
@@ -321,6 +364,14 @@ struct CardDrag {
     scroll_y: Pixels,
 }
 
+/// A cleaned note's length in characters, when it's longer than the door
+/// takes.
+fn comment_too_long(comment: Option<&str>) -> Option<usize> {
+    comment
+        .map(|comment| comment.chars().count())
+        .filter(|count| *count > loose_ends::COMMENT_LIMIT)
+}
+
 /// Home spreads past the composer, up to this wide.
 const MAX_WIDTH: f32 = 1320.0;
 /// Kept free on each side of Home in the conversation column.
@@ -358,6 +409,8 @@ pub struct Home {
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
+    /// The note being written under a loose end, if one is open.
+    note: Option<RowNote>,
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
@@ -498,6 +551,7 @@ impl Home {
             drag: None,
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
+            note: None,
             keyboard_row: None,
             keyboard_in: None,
             focus_seen: None,
@@ -1166,7 +1220,7 @@ impl Home {
             return;
         };
         let change = match action {
-            Action::Done | Action::Dismiss => RowChange::Hidden,
+            Action::Done { .. } | Action::Dismiss { .. } => RowChange::Hidden,
             Action::Snooze { .. } => RowChange::Snoozed,
             Action::Shown | Action::Notified { .. } => return,
         };
@@ -1370,6 +1424,91 @@ impl Home {
     pub(crate) fn close_snooze_menu(&mut self, cx: &mut Context<Self>) {
         if self.snooze_menu.begin_close() {
             crate::popover::reap_popup(cx, |home: &mut Self| &mut home.snooze_menu);
+        }
+        cx.notify();
+    }
+
+    /// Open the note field under a loose end, focused from the next frame.
+    fn open_note(&mut self, widget: &str, row: &str, kind: NoteKind, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            ComposerInput::new(kind.placeholder(), cx)
+                .with_single_line()
+                .with_text_metrics(12.5, 16.0)
+                .with_accessibility_role(Role::TextInput)
+        });
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
+            ComposerInputEvent::Submitted => this.send_note(cx),
+            // Its length shows once it's past what the door takes.
+            ComposerInputEvent::Edited => cx.notify(),
+            _ => {}
+        });
+        self.note = Some(RowNote {
+            widget: widget.to_string(),
+            row: row.to_string(),
+            kind,
+            input,
+            focus_pending: true,
+            reveal_pending: Cell::new(true),
+            _events: events,
+            _blur: None,
+        });
+        cx.notify();
+    }
+
+    /// Focus a just-opened note field, and drop it once focus leaves: a
+    /// click away, or Tab. Switching to another app keeps it, so the owner
+    /// can look something up and come back to finish it.
+    fn focus_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.note.as_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut note.focus_pending) {
+            return;
+        }
+        let focus = note.input.focus_handle(cx);
+        window.focus(&focus, cx);
+        note._blur = Some(cx.on_blur(&focus, window, |this, window, cx| {
+            if window.is_window_active() {
+                this.cancel_note(cx);
+            }
+        }));
+    }
+
+    /// Enter in the note field: the row closes as Done or "not a thing",
+    /// with the note, or without one when the field is empty. A note longer
+    /// than the door takes stays open, saying how long it is.
+    fn send_note(&mut self, cx: &mut Context<Self>) {
+        let Some(note) = self.note.as_ref() else {
+            return;
+        };
+        let comment = loose_ends::clean_comment(note.input.read(cx).text());
+        if comment_too_long(comment.as_deref()).is_some() {
+            return;
+        }
+        let Some(note) = self.note.take() else {
+            return;
+        };
+        self.act(&note.widget, &note.row, note.kind.action(comment), cx);
+    }
+
+    fn cancel_note(&mut self, cx: &mut Context<Self>) {
+        if self.note.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Escape in the note field: drop it, and give focus back to the row's
+    /// actions, where Tab reaches its Snooze again.
+    fn escape_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(note) = self.note.take() else {
+            return;
+        };
+        let actions = self.widgets.get(&note.widget).and_then(|state| {
+            let rows = state.row_ui.borrow();
+            rows.get(&note.row).map(|ui| ui.focus.clone())
+        });
+        if let Some(actions) = actions {
+            window.focus(&actions, cx);
         }
         cx.notify();
     }

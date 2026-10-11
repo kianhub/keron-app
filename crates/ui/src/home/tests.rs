@@ -554,7 +554,12 @@ fn done_on_a_slack_row_posts_to_its_source_and_hides_the_row(cx: &mut TestAppCon
                 slack_row("D2:1728300100.000200", "Ben"),
             ]),
         });
-        home.act("slack", "C1:1728300000.000100", Action::Done, cx);
+        home.act(
+            "slack",
+            "C1:1728300000.000100",
+            Action::Done { comment: None },
+            cx,
+        );
     });
     cx.run_until_parked();
 
@@ -610,7 +615,7 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
                 errors: Vec::new(),
                 body: Body::List(vec![row("gone")]),
             });
-            home.act(widget, "gone", Action::Done, cx);
+            home.act(widget, "gone", Action::Done { comment: None }, cx);
         }
     });
     cx.run_until_parked();
@@ -715,7 +720,7 @@ fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut 
                 },
             );
         }
-        home.act("ends", "a", Action::Done, cx);
+        home.act("ends", "a", Action::Done { comment: None }, cx);
         assert_eq!(
             drawn(home),
             rows(&[("a", true), ("b", false), ("c", false)])
@@ -726,7 +731,7 @@ fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut 
     home.update(cx, |home, cx| {
         assert_eq!(drawn(home), rows(&[("b", false), ("c", false)]));
         cx.set_reduce_motion(true);
-        home.act("ends", "b", Action::Done, cx);
+        home.act("ends", "b", Action::Done { comment: None }, cx);
         assert_eq!(drawn(home), rows(&[("c", false)]));
     });
 }
@@ -1120,4 +1125,68 @@ fn a_wheel_that_rests_lets_the_next_turn_scroll_past_a_list_at_its_end() {
     assert!(!wheel.takes(list(), false, false, at(600)));
     assert!(wheel.takes(WheelTarget::Page, true, false, at(600)));
     assert!(!wheel.takes(list(), true, false, at(650)));
+}
+
+#[gpui::test]
+fn a_note_typed_under_a_loose_end_goes_with_it_and_escape_drops_it(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(3, cx);
+    cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+    let posted = Rc::new(RefCell::new(Vec::new()));
+    home.update(cx, |home, _| {
+        home.poster = Some({
+            let posted = posted.clone();
+            // Never answered, so the card doesn't fetch again.
+            Rc::new(move |request: loose_ends::Request, cx: &App| {
+                posted.borrow_mut().push((request.path, request.body));
+                cx.background_spawn(std::future::pending())
+            })
+        });
+    });
+    let open = |row: &str, kind: NoteKind, cx: &mut VisualTestContext| {
+        home.update(cx, |home, cx| home.open_note("ends", row, kind, cx));
+        cx.run_until_parked();
+    };
+    let field_open = |cx: &mut VisualTestContext| home.read_with(cx, |home, _| home.note.is_some());
+
+    // Escape drops what was typed, and nothing goes to the door.
+    open("e0", NoteKind::Done, cx);
+    assert!(cx.debug_bounds("home-note-ends-e0").is_some());
+    cx.simulate_input("never mind");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!field_open(cx));
+    assert!(posted.borrow().is_empty());
+
+    // Enter sends it with Done, and the field goes as the row closes.
+    open("e0", NoteKind::Done, cx);
+    cx.simulate_input("called her, all lines work now");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!field_open(cx));
+    assert!(cx.debug_bounds("home-note-ends-e0").is_none());
+    home.read_with(cx, |home, _| {
+        assert_eq!(
+            home.widgets["ends"].overrides["e0"].change,
+            RowChange::Hidden
+        );
+    });
+
+    // "Not a thing" with the field left empty sends no comment.
+    open("e1", NoteKind::Dismiss, cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!field_open(cx));
+    assert_eq!(
+        *posted.borrow(),
+        [
+            (
+                "/memory/loose-ends/done".to_string(),
+                serde_json::json!({"ids": ["e0"], "comment": "called her, all lines work now"})
+            ),
+            (
+                "/memory/loose-ends/dismiss".to_string(),
+                serde_json::json!({"ids": ["e1"]})
+            ),
+        ]
+    );
 }
