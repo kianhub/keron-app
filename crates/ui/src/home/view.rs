@@ -2,7 +2,7 @@
 //! tray, and the grid of cards with one body per widget kind. Colors come
 //! from the theme, so light and dark both follow it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -10,8 +10,9 @@ use std::time::Duration;
 use chrono::{Local, NaiveDate, Utc};
 use gpui::{
     AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, DispatchPhase,
-    Div, ElementId, EntityId, FontWeight, HitboxBehavior, Hsla, MouseButton, MouseMoveEvent, Role,
-    SharedString, Stateful, Toggled, Window, div, prelude::*, px, relative,
+    Div, ElementId, EntityId, FontWeight, HitboxBehavior, Hsla, MouseButton, MouseMoveEvent,
+    Pixels, Role, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Toggled, WeakFocusHandle,
+    Window, div, prelude::*, px, relative,
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
 use keron_home::loose_ends::{Action, snooze_choices};
@@ -20,8 +21,8 @@ use zeron_theme::AccentPreset;
 
 use super::{
     Body, CardDragPayload, Drawn, Home, Leaving, ListItem, Manifest, Mode, Payload, RowChange,
-    RowUi, SignIn, Slot, SourceSpec, WidgetState, drawn_list_rows, is_door, limit, masonry,
-    visible_list_rows,
+    RowUi, SignIn, Slot, SourceSpec, WheelTarget, WidgetState, drawn_limit, drawn_list_rows,
+    is_door, limit, masonry, scrolls, visible_list_rows,
 };
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec};
@@ -31,6 +32,8 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 const CARD_RADIUS: f32 = 12.0;
+/// A card's inner side margin.
+const CARD_PAD_X: f32 = 12.0;
 /// One more column each time every card can get at least this much.
 const CARD_MIN_WIDTH: f32 = 280.0;
 /// Most columns Home lays out, however wide the window.
@@ -38,12 +41,20 @@ const MAX_COLUMNS: u16 = 4;
 const GRID_GAP: f32 = 10.0;
 /// Room left under Home for the update notice at the window's bottom.
 const BOTTOM_CLEARANCE: f32 = 64.0;
+/// How far Home's page, and a list scrolling in its card, fade at an edge
+/// with more past it.
+const FADE_BAND: f32 = 16.0;
 /// Burning heat breathes this slowly.
 const HEAT_PULSE: MotionSpec = MotionSpec::new(1800, motion::EASE_IN_OUT);
 /// Space between a list card's rows.
 const LIST_GAP: f32 = 6.0;
 /// The "+N more" line under a list, in pixels at the default text size.
 const MORE_LINE_HEIGHT: f32 = 15.0;
+/// A list row with its sub line, in pixels at the default text size. A
+/// list that scrolls in its card is its limit of these tall at most.
+const LIST_ROW_HEIGHT: f32 = 39.0;
+/// A timeline row at its tallest (two lines), for a scrolling timeline's height.
+const TIMELINE_ROW_HEIGHT: f32 = 34.0;
 /// How far a row's hover wash reaches past the text column on each side.
 const ROW_INSET: f32 = 6.0;
 /// A row action button's square side, and its glyph.
@@ -82,7 +93,7 @@ impl Render for Home {
         if !self.loaded || width <= 0.0 {
             return div().into_any_element();
         }
-        self.keyboard_row = self.keyboard_focused_row(window, cx);
+        self.note_keyboard_focus(window, cx);
         self.sync_quiet(cx);
         // Rows closing up after Done, and chips and cards fading in where
         // they moved, are drawn from the clock, frame by frame.
@@ -125,7 +136,7 @@ impl Render for Home {
                     .bottom(px(BOTTOM_CLEARANCE))
                     .child(
                         crate::edge_fade::edge_faded(
-                            16.0,
+                            FADE_BAND,
                             true,
                             true,
                             div()
@@ -133,10 +144,16 @@ impl Render for Home {
                                 .size_full()
                                 .overflow_y_scroll()
                                 .track_scroll(&self.scroll)
+                                .on_scroll_wheel(cx.listener(
+                                    |this, event: &ScrollWheelEvent, _, _| {
+                                        this.settle_wheel(WheelTarget::Page, event);
+                                    },
+                                ))
                                 .child(content),
                         )
                         .fade_overflow_y(&self.scroll),
-                    ),
+                    )
+                    .child(wheel_start(self.scroll.clone(), self.page_before.clone())),
             )
             .into_any_element()
     }
@@ -806,7 +823,7 @@ impl Home {
         let mut card = card_surface(theme)
             .id(SharedString::from(format!("home-card-{id}")))
             .min_w_0()
-            .px(px(12.0))
+            .px(px(CARD_PAD_X))
             .pt(px(10.0))
             .pb(px(12.0))
             .gap(px(8.0))
@@ -1008,6 +1025,19 @@ impl Home {
     ) -> AnyElement {
         match &payload.body {
             Body::List(items) => self.render_list(theme, manifest, state, items, view, cx),
+            Body::Timeline(items) if scrolls(manifest) && !items.is_empty() => {
+                let rows = items
+                    .iter()
+                    .map(|item| timeline_row(theme, item).into_any_element());
+                self.scrolling_list(
+                    theme,
+                    manifest,
+                    rows.collect(),
+                    None,
+                    TIMELINE_ROW_HEIGHT,
+                    cx,
+                )
+            }
             Body::Timeline(items) => render_timeline(theme, manifest, items),
             Body::Agenda(items) => self.render_agenda(theme, manifest, items, cx),
             Body::Devices(items) => render_devices(theme, manifest, items),
@@ -1030,11 +1060,26 @@ impl Home {
             items,
             &state.overrides,
             |id| state.leaving.contains_key(id),
-            limit(manifest),
+            drawn_limit(manifest),
         );
         if drawn.rows.is_empty() {
             return empty(theme, manifest);
         }
+        let scrolls = scrolls(manifest);
+        // The row keyboard focus is in, for a card that scrolls to bring
+        // into view: its place among the rows, and what in it has focus.
+        let focused = self
+            .keyboard_in
+            .as_ref()
+            .filter(|(widget, _)| scrolls && *widget == manifest.id)
+            .zip(self.focus_seen.as_ref())
+            .and_then(|((_, row), (handle, _))| {
+                let ix = drawn
+                    .rows
+                    .iter()
+                    .position(|(item, _)| item.id.as_deref() == Some(row.as_str()))?;
+                Some((ix, handle))
+            });
         let rows: Vec<AnyElement> = drawn
             .rows
             .into_iter()
@@ -1065,6 +1110,9 @@ impl Home {
                 }
             })
             .collect();
+        if scrolls {
+            return self.scrolling_list(theme, manifest, rows, focused, LIST_ROW_HEIGHT, cx);
+        }
         // The line goes with the last row past the limit, closing as it opens.
         let more = match drawn.more_closing {
             Some(count) => {
@@ -1091,6 +1139,84 @@ impl Home {
             .gap(px(LIST_GAP))
             .children(rows)
             .children(more)
+            .into_any_element()
+    }
+
+    /// Rows that scroll inside their card, at most its limit of rows (each
+    /// `row_height` tall) tall, with Home's edge fade and the app's floating
+    /// scrollbar. The wheel scrolls them while they can move that way, and
+    /// the page otherwise.
+    fn scrolling_list(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        rows: Vec<AnyElement>,
+        focused: Option<(usize, &WeakFocusHandle)>,
+        row_height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = manifest.id.clone();
+        let (scroll, before, rail) = {
+            let mut lists = self.list_scrolls.borrow_mut();
+            let list = lists.entry(id.clone()).or_default();
+            list.reveal(focused);
+            let reach = id.clone();
+            let rail = widgets::rail(
+                &mut list.page,
+                "home-list-scrollbar",
+                theme,
+                cx,
+                move |home: &mut Home| &mut home.list_scroll(&reach).page,
+            );
+            (list.page.scroll.clone(), list.before.clone(), rail)
+        };
+        let rows_tall = limit(manifest) as f32;
+        let height = rows_tall * row_height + (rows_tall - 1.0) * LIST_GAP;
+        let list = div()
+            .id("home-list-rows")
+            .max_h(ui_rems(height))
+            .px(px(CARD_PAD_X))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .on_scroll_wheel(cx.listener({
+                let id = id.clone();
+                move |this, event: &ScrollWheelEvent, _, cx| {
+                    if !this.settle_wheel(WheelTarget::List(id.clone()), event) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    // A snooze menu doesn't stay behind as its row scrolls away.
+                    if this
+                        .snooze_menu
+                        .as_open()
+                        .is_some_and(|(widget, _)| *widget == id)
+                    {
+                        this.close_snooze_menu(cx);
+                    }
+                }
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(LIST_GAP))
+            .children(rows);
+        div()
+            .id(SharedString::from(format!("home-list-{id}")))
+            .relative()
+            // Out to the card's edges, where the scrollbar runs; the rows
+            // pad back in, their hover washes unclipped.
+            .mx(px(-CARD_PAD_X))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if this.list_scroll(&id).page.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                crate::edge_fade::edge_faded(FADE_BAND, true, true, list)
+                    .fade_overflow_y(&scroll)
+                    .within_parent_fade(),
+            )
+            .child(wheel_start(scroll, before))
+            .children(rail)
             .into_any_element()
     }
 
@@ -1262,9 +1388,14 @@ impl Home {
             .children(probe);
         if let Some(link) = link {
             let accent = theme.accent;
+            // In a card that scrolls, its focus lasts between frames by id, so
+            // Home can tell the keyboard is on it and bring it into view.
+            row = match item.id.as_deref().filter(|_| scrolls(manifest)) {
+                Some(id) => row.track_focus(&state.row_ui(id, cx).link),
+                None => row.tab_index(0),
+            };
             row = row
                 .cursor_pointer()
-                .tab_index(0)
                 .role(Role::Link)
                 .aria_label(item.title.clone())
                 .focus_visible(move |s| s.border_1().border_color(accent))
@@ -1293,16 +1424,7 @@ impl Home {
         let widget = manifest.id.as_str();
         let offers = |name: &str| item.actions.iter().any(|action| action == name);
         let pair = (widget.to_string(), row.to_string());
-        let focus = state
-            .row_ui
-            .borrow_mut()
-            .entry(row.to_string())
-            .or_insert_with(|| RowUi {
-                focus: cx.focus_handle(),
-                bounds: None,
-            })
-            .focus
-            .clone();
+        let focus = state.row_ui(row, cx).focus.clone();
         let tip = |text: &'static str| row_tooltip(text, state.row_ui.clone(), row.to_string());
         let mut buttons: Vec<AnyElement> = Vec::new();
         if offers("snooze") {
@@ -1619,52 +1741,54 @@ fn render_timeline(theme: &Theme, manifest: &Manifest, items: &[TimelineItem]) -
         return empty(theme, manifest);
     }
     let (rows, more) = cap(items, limit(manifest));
-    let rows = rows.iter().map(|item| {
-        let time = item
-            .time
-            .clone()
-            .or_else(|| {
-                item.at
-                    .as_deref()
-                    .and_then(parse_time)
-                    .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
-            })
-            .unwrap_or_default();
-        let kind = item.kind.clone().unwrap_or_default();
-        div()
-            .flex()
-            .items_start()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(40.0))
-                    .text_size(ui_rems(11.0))
-                    .line_height(ui_rems(17.0))
-                    .font_family(theme.font_mono.clone())
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(time)),
-            )
-            .child(kind_chip(theme, &kind))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(ui_rems(13.0))
-                    .line_height(ui_rems(17.0))
-                    .text_color(theme.text)
-                    .line_clamp(2)
-                    .text_ellipsis()
-                    .child(SharedString::from(item.text.clone())),
-            )
-    });
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .children(rows)
+        .children(rows.iter().map(|item| timeline_row(theme, item)))
         .children(more_line(theme, more))
         .into_any_element()
+}
+
+/// One timeline row: its time, its kind and two lines of text.
+fn timeline_row(theme: &Theme, item: &TimelineItem) -> Div {
+    let time = item
+        .time
+        .clone()
+        .or_else(|| {
+            item.at
+                .as_deref()
+                .and_then(parse_time)
+                .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
+        })
+        .unwrap_or_default();
+    let kind = item.kind.clone().unwrap_or_default();
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .w(px(40.0))
+                .text_size(ui_rems(11.0))
+                .line_height(ui_rems(17.0))
+                .font_family(theme.font_mono.clone())
+                .text_color(theme.text_muted)
+                .child(SharedString::from(time)),
+        )
+        .child(kind_chip(theme, &kind))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(ui_rems(13.0))
+                .line_height(ui_rems(17.0))
+                .text_color(theme.text)
+                .line_clamp(2)
+                .text_ellipsis()
+                .child(SharedString::from(item.text.clone())),
+        )
 }
 
 fn render_devices(theme: &Theme, manifest: &Manifest, items: &[DeviceItem]) -> AnyElement {
@@ -2065,6 +2189,23 @@ fn row_probe(
     )
     .absolute()
     .inset_0()
+}
+
+/// Notes where `scroll` is before each wheel event moves it, so the event's
+/// routing ([`Home::settle_wheel`]) can tell whether it moved, and undo it.
+fn wheel_start(scroll: ScrollHandle, before: Rc<Cell<Pixels>>) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, _| {
+                if phase == DispatchPhase::Capture {
+                    before.set(scroll.offset().y);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 /// The slot a row's actions need: buttons and the gaps between them.

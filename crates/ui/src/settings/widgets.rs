@@ -240,29 +240,32 @@ impl PageScroll {
 /// page carrying a second, menu-local scroll host (the appearance page's
 /// interface-font dropdown) cannot route that impl at both. The wiring
 /// mirrors [`popover::rail`]; `reach` re-borrows the state from the view
-/// inside the strip's pointer listeners, which fire with a `&mut V`.
+/// inside the strip's pointer listeners, which fire with a `&mut V`. It may
+/// carry a key (Home's scrolling cards pass their widget id).
 pub fn rail<V: 'static>(
     scroll: &mut PageScroll,
     id: &'static str,
     theme: &Theme,
     cx: &mut Context<V>,
-    reach: impl Fn(&mut V) -> &mut PageScroll + Copy + 'static,
+    reach: impl Fn(&mut V) -> &mut PageScroll + Clone + 'static,
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
     popover::schedule_scrollbar_hide(&mut scroll.bar, cx);
     let strip = scroll.bar.render_rail(theme, metrics)?;
+    let (on_hover, on_press, on_drag, on_up_out) =
+        (reach.clone(), reach.clone(), reach.clone(), reach.clone());
     Some(
         strip
             .id(id)
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                if reach(view).set_bar_hovered(*hovered) {
+                if on_hover(view).set_bar_hovered(*hovered) {
                     cx.notify();
                 }
             }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
-                    if reach(view).begin_press(event.position.y) {
+                    if on_press(view).begin_press(event.position.y) {
                         cx.stop_propagation();
                         cx.notify();
                     }
@@ -274,7 +277,7 @@ pub fn rail<V: 'static>(
             })
             .on_drag_move(cx.listener(
                 move |view, event: &gpui::DragMoveEvent<popover::MenuScrollbarDrag>, _, cx| {
-                    if reach(view).drag_to(event.event.position.y) {
+                    if on_drag(view).drag_to(event.event.position.y) {
                         cx.notify();
                     }
                 },
@@ -282,7 +285,7 @@ pub fn rail<V: 'static>(
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
                 cx.listener(move |view, _: &gpui::MouseUpEvent, _, cx| {
-                    reach(view).end_press();
+                    on_up_out(view).end_press();
                     cx.notify();
                 }),
             )

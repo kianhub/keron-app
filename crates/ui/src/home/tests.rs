@@ -2,9 +2,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, Task, TestAppContext, px, size};
+use gpui::{
+    AppContext as _, Entity, ScrollDelta, Task, TestAppContext, TouchPhase, VisualTestContext,
+    point, px, size,
+};
 use keron_home::catalog::Catalog;
-use keron_home::{Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec};
+use keron_home::{
+    Body, HomePaths, Kind, Layout, ListItem, Manifest, Payload, SourceSpec, TimelineItem,
+};
 
 use super::*;
 
@@ -702,11 +707,11 @@ fn a_done_row_closes_up_before_it_goes_and_at_once_under_reduce_motion(cx: &mut 
             state.row_ui.borrow_mut().insert(
                 id.to_string(),
                 RowUi {
-                    focus: cx.focus_handle(),
                     bounds: Some(Bounds::new(
                         point(px(0.0), px(0.0)),
                         size(px(240.0), px(23.0)),
                     )),
+                    ..RowUi::new(cx)
                 },
             );
         }
@@ -873,4 +878,246 @@ fn only_cards_lift_the_composer(cx: &mut TestAppContext) {
         home.toggle_customize(cx);
         assert!(home.has_shown_widget());
     });
+}
+
+/// A loose end as the door sends it: a sub line, a link, and Snooze and
+/// Done.
+fn loose_end(ix: usize) -> ListItem {
+    ListItem {
+        id: Some(format!("e{ix}")),
+        title: format!("Loose end {ix}"),
+        sub: Some("promise · someone waiting".to_string()),
+        link: Some(format!("https://example.com/{ix}")),
+        actions: vec!["snooze".to_string(), "done".to_string()],
+        ..ListItem::default()
+    }
+}
+
+fn set_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext) {
+    home.update(cx, |home, cx| {
+        home.widgets.get_mut("ends").unwrap().payload = Some(Payload {
+            updated: None,
+            errors: Vec::new(),
+            body: Body::List((0..count).map(loose_end).collect()),
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+/// Home drawn in a short window, signed in, with a Loose ends card of
+/// `count` rows whose actions go nowhere. The page itself can scroll a
+/// little.
+fn loose_ends_home(
+    count: usize,
+    cx: &mut TestAppContext,
+) -> (Entity<Home>, &mut VisualTestContext, tempfile::TempDir) {
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(crate::theme::Theme::default());
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HomePaths::under_home(dir.path());
+    let (home, cx) = cx.add_window_view(|_, cx| Home::with_parts(paths, None, cx));
+    cx.simulate_resize(size(px(800.0), px(360.0)));
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        home.poster = Some(Rc::new(|_: loose_ends::Request, _: &App| {
+            Task::ready(Ok(()))
+        }));
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        home.apply_catalog(catalog(vec![ends]), cx);
+        home.widgets.entry("ends".to_string()).or_default();
+        home.sign_in = SignIn::SignedIn;
+        home.set_frame(0.0, 600.0, 600.0, 1.0, cx);
+    });
+    set_loose_ends(&home, count, cx);
+    (home, cx, dir)
+}
+
+fn list_scroll(home: &Entity<Home>, cx: &mut VisualTestContext) -> ScrollHandle {
+    home.read_with(cx, |home, _| {
+        home.list_scrolls.borrow()["ends"].page.scroll.clone()
+    })
+}
+
+fn wheel(at: Point<Pixels>, dy: f32, touch_phase: TouchPhase, cx: &mut VisualTestContext) {
+    cx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+        touch_phase,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn loose_ends_draw_every_row_in_a_card_that_stops_growing(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(13, cx);
+    let card_height = |home: &Entity<Home>, cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| {
+            f32::from(home.card_bounds.borrow()["ends"].size.height)
+        })
+    };
+    // Every row is in the list, none left to a "+N more" line.
+    assert_eq!(list_scroll(&home, cx).children_count(), 13);
+    let tall = card_height(&home, cx);
+    set_loose_ends(&home, 30, cx);
+    assert_eq!(list_scroll(&home, cx).children_count(), 30);
+    assert!((card_height(&home, cx) - tall).abs() < 0.5);
+    // A short list keeps its own height.
+    set_loose_ends(&home, 2, cx);
+    assert!(card_height(&home, cx) < tall - 100.0);
+
+    // Other lists still stop at their limit.
+    let rows: Vec<ListItem> = (0..13).map(loose_end).collect();
+    let mut slack = manifest("slack", "Slack · waiting on you");
+    slack.source = SourceSpec::KeronSources("slack-waiting".to_string());
+    let drawn = drawn_list_rows(&rows, &HashMap::new(), |_| false, drawn_limit(&slack));
+    assert_eq!(
+        (drawn.rows.len(), drawn.more),
+        (DEFAULT_LIMIT, 13 - DEFAULT_LIMIT)
+    );
+}
+
+#[gpui::test]
+fn the_memory_timeline_scrolls_through_every_note_too(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(0, cx);
+    let set_notes = |home: &Entity<Home>, count: usize, cx: &mut VisualTestContext| {
+        home.update(cx, |home, cx| {
+            home.widgets.get_mut("mem").unwrap().payload = Some(Payload {
+                updated: None,
+                errors: Vec::new(),
+                body: Body::Timeline(
+                    (0..count)
+                        .map(|ix| TimelineItem {
+                            time: Some(format!("10:{ix:02}")),
+                            kind: Some("did".to_string()),
+                            text: format!("Note {ix}"),
+                            ..TimelineItem::default()
+                        })
+                        .collect(),
+                ),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    home.update(cx, |home, cx| {
+        let mut mem = manifest("mem", "Memory · today");
+        mem.kind = Kind::Timeline;
+        mem.source = SourceSpec::Memory("today".to_string());
+        // Added signed out, as the loose ends card is, so nothing fetches.
+        let signed_in = std::mem::replace(&mut home.sign_in, SignIn::NoDoor);
+        home.apply_catalog(catalog(vec![mem]), cx);
+        home.widgets.entry("mem".to_string()).or_default();
+        home.sign_in = signed_in;
+    });
+    set_notes(&home, 20, cx);
+    let (rows, height) = home.read_with(cx, |home, _| {
+        let rows = home.list_scrolls.borrow()["mem"]
+            .page
+            .scroll
+            .children_count();
+        (
+            rows,
+            f32::from(home.card_bounds.borrow()["mem"].size.height),
+        )
+    });
+    assert_eq!(rows, 20); // every note, none left to "+N more"
+    set_notes(&home, 40, cx);
+    let taller = home.read_with(cx, |home, _| {
+        f32::from(home.card_bounds.borrow()["mem"].size.height)
+    });
+    assert!((taller - height).abs() < 0.5, "the card stops growing");
+}
+
+#[gpui::test]
+fn the_wheel_scrolls_loose_ends_to_their_end_and_the_page_from_the_next_gesture(
+    cx: &mut TestAppContext,
+) {
+    let (home, cx, _dir) = loose_ends_home(13, cx);
+    let list = list_scroll(&home, cx);
+    let page = home.read_with(cx, |home, _| home.scroll.clone());
+    let over_list = list.bounds().origin + point(px(40.0), px(40.0));
+    let y = |scroll: &ScrollHandle| f32::from(scroll.offset().y);
+
+    wheel(over_list, -60.0, TouchPhase::Started, cx);
+    assert!(y(&list) < 0.0);
+    assert_eq!(y(&page), 0.0);
+    // The flick runs the list to its end, and what's left of it stays there.
+    wheel(over_list, -10_000.0, TouchPhase::Moved, cx);
+    wheel(over_list, -80.0, TouchPhase::Moved, cx);
+    let end = -f32::from(list.max_offset().y);
+    assert!(end < 0.0);
+    assert_eq!((y(&list), y(&page)), (end, 0.0));
+
+    // A new gesture there scrolls the page, and keeps scrolling it even back
+    // up, though the list could move that way now.
+    wheel(over_list, -40.0, TouchPhase::Started, cx);
+    let scrolled = y(&page);
+    assert!(scrolled < 0.0);
+    wheel(over_list, 20.0, TouchPhase::Moved, cx);
+    assert!(y(&page) > scrolled);
+    assert_eq!(y(&list), end);
+}
+
+#[gpui::test]
+fn tabbing_to_a_loose_end_out_of_view_scrolls_it_in(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(13, cx);
+    let list = list_scroll(&home, cx);
+    let focus = |home: &Entity<Home>, cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| {
+            (home.keyboard_row.clone(), home.keyboard_in.clone())
+        })
+    };
+    let row = |id: &str| Some(("ends".to_string(), id.to_string()));
+    assert_eq!(list.offset().y, px(0.0));
+    cx.simulate_keystrokes("a");
+    // Shift-Tab from nowhere: the last row's Done, below the card's fold.
+    cx.update(|window, cx| window.focus_prev(cx));
+    cx.run_until_parked();
+    assert_eq!(focus(&home, cx), (row("e12"), row("e12")));
+    let last = list.bounds_for_item(12).unwrap();
+    let offset = list.offset().y;
+    assert!(offset < px(0.0));
+    assert!(last.bottom() + offset <= list.bounds().bottom() + px(0.5));
+    // Tab round past Customize to the first row, by its link: back to the top.
+    for _ in 0..2 {
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(focus(&home, cx), (None, row("e0")));
+    assert_eq!(list.offset().y, px(0.0));
+    // Scrolled away from it, each Tab on within the row brings it back:
+    // to its Snooze, then its Done.
+    let over_list = list.bounds().origin + point(px(40.0), px(40.0));
+    for _ in 0..2 {
+        wheel(over_list, -60.0, TouchPhase::Started, cx);
+        wheel(over_list, -10_000.0, TouchPhase::Moved, cx);
+        assert!(list.offset().y < px(0.0));
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        assert_eq!(focus(&home, cx), (row("e0"), row("e0")));
+        assert_eq!(list.offset().y, px(0.0));
+    }
+}
+
+#[test]
+fn a_wheel_that_rests_lets_the_next_turn_scroll_past_a_list_at_its_end() {
+    let list = || WheelTarget::List("ends".to_string());
+    let mut wheel = Wheel::default();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    assert!(wheel.takes(list(), true, false, at(0)));
+    // A mouse wheel has no gestures: turns close together stay with the list
+    // at its end.
+    assert!(wheel.takes(list(), false, false, at(150)));
+    assert!(wheel.takes(list(), false, false, at(300)));
+    assert!(!wheel.takes(WheelTarget::Page, true, false, at(310)));
+    // After a rest, the page takes them; and holds on to them.
+    assert!(!wheel.takes(list(), false, false, at(600)));
+    assert!(wheel.takes(WheelTarget::Page, true, false, at(600)));
+    assert!(!wheel.takes(list(), true, false, at(650)));
 }

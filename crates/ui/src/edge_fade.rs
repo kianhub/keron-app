@@ -44,6 +44,34 @@ fn inherit_vertical_fade(mut label: EdgeFade, parent: EdgeFade) -> EdgeFade {
     label
 }
 
+/// A scroll's vertical fade inside an enclosing one's (a card's list on
+/// Home's page): at each edge, whichever ramp fades its content more. gpui
+/// keeps only the innermost scope, so on its own the inner one would drop
+/// the page's fade where the list crosses the page's edge.
+fn nest_vertical_fade(mut inner: EdgeFade, parent: EdgeFade) -> EdgeFade {
+    let band_top = |fade: &EdgeFade| fade.band_top.unwrap_or(fade.band);
+    let band_bottom = |fade: &EdgeFade| fade.band_bottom.unwrap_or(fade.band);
+    // Each ramp is opaque from its edge plus its band in; the one that gets
+    // there later fades more.
+    let (mut top, mut top_band) = (inner.bounds.top(), band_top(&inner));
+    if parent.top && (!inner.top || parent.bounds.top() + band_top(&parent) > top + top_band) {
+        (top, top_band) = (parent.bounds.top(), band_top(&parent));
+        inner.top = true;
+    }
+    let (mut bottom, mut bottom_band) = (inner.bounds.bottom(), band_bottom(&inner));
+    if parent.bottom
+        && (!inner.bottom || parent.bounds.bottom() - band_bottom(&parent) < bottom - bottom_band)
+    {
+        (bottom, bottom_band) = (parent.bounds.bottom(), band_bottom(&parent));
+        inner.bottom = true;
+    }
+    inner.bounds.origin.y = top;
+    inner.bounds.size.height = (bottom - top).max(px(0.0));
+    inner.band_top = Some(top_band);
+    inner.band_bottom = Some(bottom_band);
+    inner
+}
+
 /// Fade the child's content at its own edges: `top`/`bottom` select which
 /// edges (pass the "is there hidden overflow" flags), `band` is the ramp
 /// height in px. Horizontal edges via [`EdgeFaded::fade_left`] /
@@ -64,6 +92,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         scroll_x: None,
         smooth_overflow_x: false,
         grow_x: false,
+        nest: false,
         child: child.into_any_element(),
     }
 }
@@ -83,6 +112,7 @@ pub struct EdgeFaded {
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
+    nest: bool,
     child: AnyElement,
 }
 
@@ -171,6 +201,14 @@ impl EdgeFaded {
 
     pub fn outset_bottom(mut self, px: f32) -> Self {
         self.outset_bottom = px;
+        self
+    }
+
+    /// Keep an enclosing scroll's vertical fade too, the stronger of the two
+    /// at each edge: for a scroll inside a scroll, like a card's list on
+    /// Home's page.
+    pub fn within_parent_fade(mut self) -> Self {
+        self.nest = true;
         self
     }
 }
@@ -284,6 +322,11 @@ impl Element for EdgeFaded {
             && let Some(parent) = active_fade(window, cx)
         {
             fade = inherit_vertical_fade(fade, parent);
+        }
+        if self.nest
+            && let Some(parent) = active_fade(window, cx)
+        {
+            fade = nest_vertical_fade(fade, parent);
         }
         if !cx.has_global::<PaintFades>() {
             cx.set_global(PaintFades::default());
@@ -439,6 +482,44 @@ mod tests {
             assert!(previous - edge_alpha < 0.02);
             previous = edge_alpha;
         }
+    }
+
+    #[test]
+    fn a_list_crossing_its_pages_edge_fades_with_the_page() {
+        let fade = |top: f32, bottom: f32, (fade_top, fade_bottom): (bool, bool)| EdgeFade {
+            bounds: Bounds::new(
+                gpui::point(px(0.0), px(top)),
+                gpui::size(px(300.0), px(bottom - top)),
+            ),
+            band: px(16.0),
+            band_top: None,
+            band_bottom: None,
+            band_left: None,
+            band_right: None,
+            top: fade_top,
+            bottom: fade_bottom,
+            left: false,
+            right: false,
+        };
+        let page = fade(0.0, 296.0, (true, true));
+        // A list at its top running past the page's bottom: the page's
+        // edges fade it, at the top too.
+        let nested = nest_vertical_fade(fade(76.0, 340.0, (false, true)), page);
+        assert!(nested.top && nested.bottom);
+        assert_eq!(
+            (nested.bounds.top(), nested.bounds.bottom()),
+            (px(0.0), px(296.0))
+        );
+        // Well inside the page, it keeps its own.
+        let nested = nest_vertical_fade(fade(76.0, 200.0, (true, true)), page);
+        assert_eq!(
+            (nested.bounds.top(), nested.bounds.bottom()),
+            (px(76.0), px(200.0))
+        );
+        assert_eq!(
+            (nested.band_top, nested.band_bottom),
+            (Some(px(16.0)), Some(px(16.0)))
+        );
     }
 }
 
