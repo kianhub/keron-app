@@ -22,7 +22,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -32,7 +32,7 @@ use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, EventEmitter, FocusHandle, Pixels, Point, ScrollHandle,
-    Task, WeakFocusHandle, Window, point,
+    ScrollWheelEvent, Task, TouchPhase, WeakFocusHandle, Window, point,
 };
 use gpui_tokio::Tokio;
 use keron_door::{DoorClient, DoorError};
@@ -46,6 +46,7 @@ use keron_home::{
 };
 
 use crate::popover::Popup;
+use crate::settings::widgets::PageScroll;
 
 pub(crate) use bridge::snapshot;
 pub(crate) use usage::{cached_accounts, load_once as load_usage};
@@ -63,6 +64,9 @@ const SHOWN_EVERY: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_LIMIT: usize = 6;
 /// A widget moving between its chip and its card fades in on this.
 const SWAP: crate::motion::MotionSpec = crate::motion::DIALOG_IN;
+/// A wheel gesture stays with the list or page it started scrolling,
+/// momentum included, until the wheel rests this long.
+const WHEEL_HOLD: Duration = Duration::from_millis(200);
 
 /// Sends one row action to the door and says whether it took it. Tests use
 /// a fake.
@@ -143,8 +147,19 @@ struct WidgetState {
     /// Rows done or "not a thing" a moment ago, still collapsing out of the
     /// card, by row id.
     leaving: HashMap<String, Leaving>,
-    /// What each row with actions keeps between frames, by row id.
+    /// What each row with actions, or with a link in a card that scrolls,
+    /// keeps between frames, by row id.
     row_ui: Rc<RefCell<HashMap<String, RowUi>>>,
+}
+
+impl WidgetState {
+    /// What `row` keeps between frames, made the first time it's drawn.
+    fn row_ui(&self, row: &str, cx: &mut App) -> RefMut<'_, RowUi> {
+        RefMut::map(self.row_ui.borrow_mut(), |rows| {
+            rows.entry(row.to_string())
+                .or_insert_with(|| RowUi::new(cx))
+        })
+    }
 }
 
 /// A hidden row on its way out: it fades and its height closes over
@@ -170,12 +185,88 @@ fn leave_duration() -> Duration {
         .mul_f32(crate::motion::speed_scale())
 }
 
-/// A row with actions, between frames: the focus around its buttons (keyboard
-/// focus shows them, like hover does) and where it was last drawn, in window
+/// A row between frames: the focus around its action buttons (keyboard
+/// focus there shows them, like hover does), the row's own focus when it
+/// opens a link, and where a row with actions was last drawn, in window
 /// coordinates (a collapse starts from its height; tooltips sit above it).
 struct RowUi {
     focus: FocusHandle,
+    link: FocusHandle,
     bounds: Option<Bounds<Pixels>>,
+}
+
+impl RowUi {
+    fn new(cx: &mut App) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+            link: cx.focus_handle().tab_stop(true),
+            bounds: None,
+        }
+    }
+}
+
+/// A list that scrolls inside its card ([`scrolls`]), between frames: its
+/// scroll and floating scrollbar, where it was before the wheel event being
+/// handled moved it, and the keyboard-focused row it last brought into view.
+#[derive(Default)]
+struct ListScroll {
+    page: PageScroll,
+    before: Rc<Cell<Pixels>>,
+    revealed: Option<String>,
+}
+
+impl ListScroll {
+    /// Bring the row keyboard focus is in (its place among the rows, and its
+    /// id) into view when focus has just moved there; the owner can still
+    /// scroll away from it.
+    fn reveal(&mut self, focused: Option<(usize, &str)>) {
+        let Some((ix, row)) = focused else {
+            self.revealed = None;
+            return;
+        };
+        if self.revealed.as_deref() != Some(row) {
+            self.revealed = Some(row.to_string());
+            self.page.scroll.scroll_to_item(ix);
+        }
+    }
+}
+
+/// What a wheel gesture scrolls.
+#[derive(Clone, Debug, PartialEq)]
+enum WheelTarget {
+    /// A card's list, by widget id.
+    List(String),
+    Page,
+}
+
+/// Who has the wheel. What a gesture started scrolling keeps it, momentum
+/// included, so a flick that runs a card's list to its end doesn't carry on
+/// into the page, and a page scroll doesn't catch on a card that comes under
+/// the pointer.
+#[derive(Default)]
+struct Wheel {
+    held: Option<(WheelTarget, Instant)>,
+}
+
+impl Wheel {
+    /// Whether `target` takes a wheel event that it `can_move` with, or
+    /// not; `starts` marks a new trackpad gesture. With nothing held (a new
+    /// gesture, or the wheel rested for [`WHEEL_HOLD`]) it takes the event
+    /// if it can move, and holds the gesture from then on.
+    fn takes(&mut self, target: WheelTarget, can_move: bool, starts: bool, now: Instant) -> bool {
+        let held = self
+            .held
+            .take()
+            .filter(|(_, at)| !starts && now.saturating_duration_since(*at) < WHEEL_HOLD)
+            .map(|(held, _)| held);
+        let takes = held.as_ref().map_or(can_move, |held| *held == target);
+        // Every event of the gesture keeps it held, taken here or not.
+        self.held = match held {
+            Some(held) => Some((held, now)),
+            None => takes.then_some((target, now)),
+        };
+        takes
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -268,6 +359,9 @@ pub struct Home {
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
+    /// The row keyboard focus is in, by its link or its action buttons; a
+    /// card that scrolls brings it into view.
+    keyboard_in: Option<(String, String)>,
     /// What had focus when Home last drew, and whether the keyboard put it
     /// there. A click leaves focus on a button; a later key doesn't make
     /// that keyboard focus.
@@ -280,6 +374,11 @@ pub struct Home {
     poster: Option<Poster>,
     frame: Frame,
     scroll: ScrollHandle,
+    /// Where Home's page was before the wheel event being handled moved it.
+    page_before: Rc<Cell<Pixels>>,
+    /// Lists that scroll inside their cards, by widget id.
+    list_scrolls: RefCell<HashMap<String, ListScroll>>,
+    wheel: Wheel,
     save_pending: bool,
     _save: Option<Task<()>>,
     _load: Option<Task<()>>,
@@ -398,12 +497,16 @@ impl Home {
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
             keyboard_row: None,
+            keyboard_in: None,
             focus_seen: None,
             zeron: None,
             notices: None,
             poster,
             frame: Frame::default(),
             scroll: ScrollHandle::new(),
+            page_before: Rc::default(),
+            list_scrolls: RefCell::default(),
+            wheel: Wheel::default(),
             save_pending: false,
             _save: None,
             _load: None,
@@ -1231,6 +1334,7 @@ impl Home {
         else {
             return;
         };
+        // The rows in view before the card scrolls, if it does.
         let (rows, _) = visible_list_rows(items, &state.overrides, limit(&slot.manifest));
         let ids: Vec<String> = rows
             .iter()
@@ -1268,10 +1372,12 @@ impl Home {
         cx.notify();
     }
 
-    /// The row whose action buttons have focus from the keyboard: (widget id,
-    /// row id). Focus a click left on a button doesn't count, even after a
-    /// key is pressed somewhere else.
-    fn keyboard_focused_row(&mut self, window: &Window, cx: &App) -> Option<(String, String)> {
+    /// Which rows have focus from the keyboard: the one whose action buttons
+    /// have it ([`Home::keyboard_row`]: they show, as on hover), and the one
+    /// it's in at all, by its link or its buttons ([`Home::keyboard_in`]).
+    /// Focus a click left doesn't count, even after a key is pressed
+    /// somewhere else.
+    fn note_keyboard_focus(&mut self, window: &Window, cx: &App) {
         let focused = window.focused(cx);
         let by_keyboard = match (&focused, &self.focus_seen) {
             (Some(handle), Some((seen, by_keyboard))) if seen == handle => *by_keyboard,
@@ -1279,17 +1385,56 @@ impl Home {
             (None, _) => false,
         };
         self.focus_seen = focused.map(|handle| (handle.downgrade(), by_keyboard));
-        if !by_keyboard || !window.last_input_was_keyboard() {
-            return None;
+        let keyboard = by_keyboard && window.last_input_was_keyboard();
+        let find = |has_focus: &dyn Fn(&RowUi) -> bool| {
+            if !keyboard {
+                return None;
+            }
+            self.widgets.iter().find_map(|(widget, state)| {
+                state
+                    .row_ui
+                    .borrow()
+                    .iter()
+                    .find(|(_, ui)| has_focus(ui))
+                    .map(|(row, _)| (widget.clone(), row.clone()))
+            })
+        };
+        let actions = find(&|ui| ui.focus.contains_focused(window, cx));
+        let link = find(&|ui| ui.link.is_focused(window));
+        self.keyboard_in = actions.clone().or(link);
+        self.keyboard_row = actions;
+    }
+
+    // ---- scrolling ----
+
+    fn list_scroll(&mut self, widget: &str) -> &mut ListScroll {
+        self.list_scrolls
+            .get_mut()
+            .entry(widget.to_string())
+            .or_default()
+    }
+
+    /// Route a wheel event that `target`'s own scroll listener has just
+    /// moved it by: it keeps the move when it takes the event ([`Wheel`]),
+    /// and undoes it otherwise. Returns whether it took it.
+    fn settle_wheel(&mut self, target: WheelTarget, event: &ScrollWheelEvent) -> bool {
+        let (scroll, before) = match &target {
+            WheelTarget::Page => (self.scroll.clone(), self.page_before.get()),
+            WheelTarget::List(widget) => {
+                let list = self.list_scroll(widget);
+                (list.page.scroll.clone(), list.before.get())
+            }
+        };
+        let offset = scroll.offset();
+        let max = f32::from(scroll.max_offset().y).max(0.0);
+        let after = f32::from(offset.y).clamp(-max, 0.0);
+        let can_move = (after - f32::from(before)).abs() > 0.01;
+        let starts = event.touch_phase == TouchPhase::Started;
+        let takes = self.wheel.takes(target, can_move, starts, Instant::now());
+        if !takes {
+            scroll.set_offset(point(offset.x, before));
         }
-        self.widgets.iter().find_map(|(widget, state)| {
-            state
-                .row_ui
-                .borrow()
-                .iter()
-                .find(|(_, ui)| ui.focus.contains_focused(window, cx))
-                .map(|(row, _)| (widget.clone(), row.clone()))
-        })
+        takes
     }
 
     // ---- links ----
@@ -1514,6 +1659,22 @@ fn shows_nothing(body: &Body) -> bool {
 
 fn limit(manifest: &Manifest) -> usize {
     manifest.limit.unwrap_or(DEFAULT_LIMIT).max(1)
+}
+
+/// Whether a list card scrolls through every row rather than stopping at
+/// its limit with "+N more". Loose ends do, so nothing open is out of
+/// reach; the limit then sets how many rows tall the card is.
+fn scrolls(manifest: &Manifest) -> bool {
+    manifest.source == loose_ends::loose_ends()
+}
+
+/// The most rows a list card draws: all of them when it scrolls.
+fn drawn_limit(manifest: &Manifest) -> usize {
+    if scrolls(manifest) {
+        usize::MAX
+    } else {
+        limit(manifest)
+    }
 }
 
 /// The rows a list card draws: rows just marked done or "not a thing" are
