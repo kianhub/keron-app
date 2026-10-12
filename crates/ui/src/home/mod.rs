@@ -72,6 +72,9 @@ const WHEEL_HOLD: Duration = Duration::from_millis(200);
 /// A row action waits this long in the app, where ⌘Z takes it back, before
 /// it goes to the door.
 const UNDO_WINDOW: Duration = Duration::from_secs(10);
+/// Quitting, or closing Home's window, waits this long at most on the
+/// door's answers to row actions still on their way.
+const EXIT_WAIT: Duration = Duration::from_secs(3);
 
 /// Sends one row action to the door and says whether it took it. Tests use
 /// a fake.
@@ -354,6 +357,13 @@ struct HeldAction {
     _send: Task<()>,
 }
 
+impl HeldAction {
+    /// What its card says of it: "Done: <title>".
+    fn line(&self) -> String {
+        format!("{}: {}", self.verb, self.title)
+    }
+}
+
 /// One widget in Home's order.
 #[derive(Clone, Debug)]
 struct Slot {
@@ -440,6 +450,12 @@ pub struct Home {
     /// Row actions in their undo window, oldest first.
     held: Vec<HeldAction>,
     next_held: u64,
+    /// Row actions held when the door refused the sign-in, past undoing:
+    /// they go once the owner connects again.
+    unsent: Vec<HeldAction>,
+    /// While the app waits to quit on row actions on their way to the door;
+    /// at [`EXIT_WAIT`] it stops waiting.
+    exit_wait: Option<Task<()>>,
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
@@ -600,6 +616,8 @@ impl Home {
             sent_notes: HashMap::new(),
             held: Vec::new(),
             next_held: 0,
+            unsent: Vec::new(),
+            exit_wait: None,
             keyboard_row: None,
             keyboard_in: None,
             focus_seen: None,
@@ -654,9 +672,12 @@ impl Home {
         if same {
             return;
         }
-        let appeared = self.frame.opacity < 0.5 && opacity >= 0.5;
+        let was_on_screen = self.on_screen();
         self.frame = next;
-        if appeared {
+        if was_on_screen != self.on_screen() {
+            self.sync_undo_elsewhere(cx);
+        }
+        if !was_on_screen && self.on_screen() {
             let ids: Vec<String> = self.widgets.keys().cloned().collect();
             for id in ids {
                 self.maybe_post_shown(&id, cx);
@@ -665,10 +686,19 @@ impl Home {
         cx.notify();
     }
 
-    /// Home is off screen (a chat, Settings): nothing on it counts as seen
-    /// until it fades in again.
-    pub fn hide(&mut self) {
+    /// Home is off screen (a chat, Settings): nothing on it counts as seen,
+    /// and ⌘Z leaves its held row actions be, until it fades in again.
+    pub fn hide(&mut self, cx: &mut App) {
+        let was_on_screen = self.on_screen();
         self.frame.opacity = 0.0;
+        if was_on_screen {
+            self.sync_undo_elsewhere(cx);
+        }
+    }
+
+    /// Whether Home is in view, past halfway through its fade.
+    fn on_screen(&self) -> bool {
+        self.frame.opacity >= 0.5
     }
 
     /// The app's own data, for `zeron:` widgets.
@@ -1216,11 +1246,7 @@ impl Home {
             let finish = Tokio::spawn(cx, async move { door.finish_sign_in(pending).await });
             let result = finish.await;
             this.update(cx, |this, cx| match result {
-                Ok(Ok(())) => {
-                    this.sign_in = SignIn::SignedIn;
-                    this.sync_refreshes(cx);
-                    cx.notify();
-                }
+                Ok(Ok(())) => this.signed_in(cx),
                 Ok(Err(error)) => this.sign_in_failed(error.to_string(), cx),
                 Err(_) => this.sign_in_failed("the sign-in stopped".to_string(), cx),
             })
@@ -1231,6 +1257,17 @@ impl Home {
     pub(crate) fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
         self._sign_in = None;
         self.sign_in = SignIn::SignedOut;
+        cx.notify();
+    }
+
+    /// The door took a new sign-in: row actions held when it refused the
+    /// last one go now, and door widgets fetch again.
+    fn signed_in(&mut self, cx: &mut Context<Self>) {
+        self.sign_in = SignIn::SignedIn;
+        for held in std::mem::take(&mut self.unsent) {
+            self.send(held, cx);
+        }
+        self.sync_refreshes(cx);
         cx.notify();
     }
 
@@ -1253,9 +1290,21 @@ impl Home {
                 *state = WidgetState::default();
             }
         }
-        // Held row actions go now, rather than wait on cards that are gone.
-        for held in std::mem::take(&mut self.held) {
-            self.send(held, cx);
+        // Held row actions wait for the next sign-in, as the door would turn
+        // them down now; their rows stay as the owner left them.
+        self.unsent.append(&mut self.held);
+        for held in &self.unsent {
+            self.widgets
+                .entry(held.widget.clone())
+                .or_default()
+                .overrides
+                .insert(
+                    held.row.clone(),
+                    RowOverride {
+                        change: held.change,
+                        settled: false,
+                    },
+                );
         }
         self.sync_undo_elsewhere(cx);
         self.sync_quiet(cx);
@@ -1390,14 +1439,23 @@ impl Home {
         }
     }
 
-    /// ⌘Z: take back the newest row action still in its undo window.
-    /// Returns whether there was one.
+    /// ⌘Z: take back the newest row action still in its undo window, if
+    /// Home is on screen. Returns whether there was one.
     fn undo(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.on_screen() {
+            return false;
+        }
         let Some(id) = self.held.last().map(|held| held.id) else {
             return false;
         };
         self.undo_held(id, cx);
         true
+    }
+
+    /// The newest row action on a card still in its undo window, for the
+    /// line at the card's foot.
+    fn newest_held(&self, widget: &str) -> Option<&HeldAction> {
+        self.held.iter().rev().find(|held| held.widget == widget)
     }
 
     /// Take back a held row action: it's never sent, and its row is as it
@@ -1482,6 +1540,41 @@ impl Home {
         }
     }
 
+    /// Whether a row action is sent and not yet answered by the door.
+    pub fn sending(&self) -> bool {
+        self.widgets.values().any(|state| !state.actions.is_empty())
+    }
+
+    /// The app is about to quit, or Home's window to close: every held row
+    /// action goes now. Returns whether it can go, with no row action still
+    /// waiting on the door's answer. If not, Home notifies once the answers
+    /// are in, or at [`EXIT_WAIT`], when it stops waiting on the rest.
+    pub fn ready_to_exit(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(newest) = self.held.last().map(|held| held.id) {
+            self.send_held(newest, cx);
+        }
+        if !self.sending() {
+            return true;
+        }
+        if self.exit_wait.is_none() {
+            self.exit_wait = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(EXIT_WAIT).await;
+                this.update(cx, |this, cx| {
+                    // Answers still to come land with no one waiting on them.
+                    for state in this.widgets.values_mut() {
+                        for (_, action) in state.actions.drain() {
+                            action.detach();
+                        }
+                    }
+                    this.exit_wait = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        false
+    }
+
     /// Every held row action, sent at once as the app quits or Home goes;
     /// the answers come back to no one.
     fn post_held(&mut self, cx: &mut App) -> Vec<Task<Result<(), FetchError>>> {
@@ -1495,10 +1588,12 @@ impl Home {
             .collect()
     }
 
-    /// Tell text inputs when the newest held row action was taken, so Undo
-    /// in one with no newer edit comes on to Home ([`UndoElsewhere`]).
+    /// Tell text inputs when the newest held row action was taken, while
+    /// Home is on screen, so Undo in one with no newer edit comes on to Home
+    /// ([`UndoElsewhere`]).
     fn sync_undo_elsewhere(&self, cx: &mut App) {
-        cx.set_global(UndoElsewhere(self.held.last().map(|held| held.at)));
+        let newest = self.held.last().filter(|_| self.on_screen());
+        cx.set_global(UndoElsewhere(newest.map(|held| held.at)));
     }
 
     fn finish_action(
@@ -1557,7 +1652,7 @@ impl Home {
     /// Tell the door which loose ends are on screen: when they first show,
     /// then at most once an hour.
     fn maybe_post_shown(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.frame.opacity < 0.5 || self.frame.width <= 0.0 || self.sign_in != SignIn::SignedIn {
+        if !self.on_screen() || self.frame.width <= 0.0 || self.sign_in != SignIn::SignedIn {
             return;
         }
         let Some(post) = self.poster.clone() else {

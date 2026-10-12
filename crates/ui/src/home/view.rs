@@ -822,7 +822,10 @@ impl Home {
         let dragging = self.drag.as_ref().is_some_and(|drag| drag.id == id);
         let header = self.render_header(theme, manifest, state);
         let body = self.render_body(theme, manifest, state, cx);
-        let footer = render_footer(theme, manifest, state);
+        // A held row action takes the footer's place while it can be undone.
+        let footer = self
+            .render_held(theme, manifest, cx)
+            .or_else(|| render_footer(theme, manifest, state));
         let mut card = card_surface(theme)
             .id(SharedString::from(format!("home-card-{id}")))
             .min_w_0()
@@ -967,24 +970,19 @@ impl Home {
             .children(error)
             .children(content)
             .children(action_error)
-            .children(self.render_held(theme, manifest, cx))
             .into_any_element()
     }
 
-    /// The newest row action on the card still in its undo window, as
-    /// "Done: <title>", with Undo beside it.
+    /// The card's foot while a row action on it is in its undo window: the
+    /// newest, as "Done: <title>", with Undo beside it.
     fn render_held(
         &self,
         theme: &Theme,
         manifest: &Manifest,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let held = self
-            .held
-            .iter()
-            .rev()
-            .find(|held| held.widget == manifest.id)?;
-        let label = format!("{}: {}", held.verb, held.title);
+        let held = self.newest_held(&manifest.id)?;
+        let label = held.line();
         let id = held.id;
         let key = format!("home-undo-{}", manifest.id);
         Some(
@@ -993,6 +991,9 @@ impl Home {
                 .items_center()
                 .gap(px(6.0))
                 .min_w_0()
+                .pt(px(8.0))
+                .border_t_1()
+                .border_color(widgets::row_divider(theme))
                 .text_size(ui_rems(12.0))
                 .line_height(ui_rems(16.0))
                 .child(

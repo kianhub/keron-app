@@ -4473,13 +4473,16 @@ impl Shell {
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
+        // Home's held row actions go now, and leaving waits on the door's
+        // answers; render asks again once Home has them.
+        let home_ready = self.home.update(cx, |home, cx| home.ready_to_exit(cx));
         let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
             .all(|surface| !surface.read(cx).has_unsaved_changes())
         {
-            self.pending_exit = None;
-            return true;
+            self.pending_exit = (!home_ready).then_some(action);
+            return home_ready;
         }
         self.pending_exit = Some(action);
         let mut all_ready = true;
@@ -4487,13 +4490,13 @@ impl Shell {
             let disposition = surface.update(cx, |surface, cx| surface.prepare_close(cx));
             all_ready &= disposition == FilesCloseDisposition::Allow;
         }
-        if all_ready {
-            self.pending_exit = None;
-        } else {
+        if !all_ready {
             self.reveal_unsaved_file(cx);
+        } else if home_ready {
+            self.pending_exit = None;
         }
         cx.notify();
-        all_ready
+        all_ready && home_ready
     }
 
     fn reveal_unsaved_file(&mut self, cx: &mut Context<Self>) {
@@ -10703,7 +10706,7 @@ impl Shell {
                 home.set_frame(top + footer + 12.0, width, composer_width, home_opacity, cx)
             });
         } else {
-            self.home.update(cx, |home, _| home.hide());
+            self.home.update(cx, |home, cx| home.hide(cx));
         }
         let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
@@ -12859,6 +12862,7 @@ impl Render for Shell {
 
         self.render_time = Some(std::time::Instant::now());
         if self.all_file_edits_flushed(cx)
+            && !self.home.read(cx).sending()
             && let Some(action) = self.pending_exit.take()
         {
             let shell = cx.weak_entity();
@@ -13269,7 +13273,7 @@ impl Render for Shell {
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
                 if let Route::Settings(section) = self.route {
-                    self.home.update(cx, |home, _| home.hide());
+                    self.home.update(cx, |home, cx| home.hide(cx));
                     let settings_page = self.render_settings_page(section, window, cx);
                     // A call started from Settings opens its stage here too.
                     let voice_stage = self.render_voice_stage(window, cx);
