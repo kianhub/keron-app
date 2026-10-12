@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, Entity, KeyUpEvent, Keystroke, ScrollDelta, Task, TestAppContext, TouchPhase,
-    VisualTestContext, point, px, size,
+    AppContext as _, Entity, InteractiveElement as _, IntoElement, KeyUpEvent, Keystroke,
+    Modifiers, ParentElement as _, Render, ScrollDelta, Styled as _, Task, TestAppContext,
+    TouchPhase, VisualTestContext, div, point, px, size,
 };
 use keron_home::catalog::Catalog;
 use keron_home::{
@@ -604,6 +605,7 @@ fn done_on_a_slack_row_posts_to_its_source_and_hides_the_row(cx: &mut TestAppCon
             cx,
         );
     });
+    cx.executor().advance_clock(UNDO_WINDOW);
     cx.run_until_parked();
 
     assert_eq!(
@@ -661,6 +663,7 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
             home.act(widget, "gone", Action::Done { comment: None }, cx);
         }
     });
+    cx.executor().advance_clock(UNDO_WINDOW);
     cx.run_until_parked();
 
     home.read_with(cx, |home, _| {
@@ -938,6 +941,30 @@ fn loose_end(ix: usize) -> ListItem {
         link: Some(format!("https://example.com/{ix}")),
         actions: vec!["snooze".to_string(), "done".to_string()],
         ..ListItem::default()
+    }
+}
+
+/// What went to the door, as `(path, body)`.
+type Posted = Rc<RefCell<Vec<(String, serde_json::Value)>>>;
+
+/// A poster that notes each request and never answers, so the card doesn't
+/// fetch again.
+fn unanswered(posted: &Posted) -> Poster {
+    let posted = posted.clone();
+    Rc::new(move |request: loose_ends::Request, cx: &App| {
+        posted.borrow_mut().push((request.path, request.body));
+        cx.background_spawn(std::future::pending())
+    })
+}
+
+/// A key down and up: a button clicks on the up.
+fn press(keys: &str, cx: &mut VisualTestContext) {
+    for key in keys.split(' ') {
+        cx.simulate_keystrokes(key);
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse(key).unwrap(),
+        });
+        cx.run_until_parked();
     }
 }
 
@@ -1240,16 +1267,7 @@ fn a_note_typed_under_a_loose_end_goes_with_it_and_escape_drops_it(cx: &mut Test
     let (home, cx, _dir) = loose_ends_home(3, cx);
     cx.update(|_, cx| crate::composer::init(cx, Default::default()));
     let posted = Rc::new(RefCell::new(Vec::new()));
-    home.update(cx, |home, _| {
-        home.poster = Some({
-            let posted = posted.clone();
-            // Never answered, so the card doesn't fetch again.
-            Rc::new(move |request: loose_ends::Request, cx: &App| {
-                posted.borrow_mut().push((request.path, request.body));
-                cx.background_spawn(std::future::pending())
-            })
-        });
-    });
+    home.update(cx, |home, _| home.poster = Some(unanswered(&posted)));
     let open = |row: &str, kind: NoteKind, cx: &mut VisualTestContext| {
         home.update(cx, |home, cx| home.open_note("ends", row, kind, cx));
         cx.run_until_parked();
@@ -1291,6 +1309,8 @@ fn a_note_typed_under_a_loose_end_goes_with_it_and_escape_drops_it(cx: &mut Test
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(!field_open(cx));
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
     assert_eq!(
         *posted.borrow(),
         [
@@ -1315,15 +1335,7 @@ fn a_loose_end_closes_with_a_note_from_the_keyboard(cx: &mut TestAppContext) {
     let (home, cx, _dir) = loose_ends_home(3, cx);
     cx.update(|_, cx| crate::composer::init(cx, Default::default()));
     let posted = Rc::new(RefCell::new(Vec::new()));
-    home.update(cx, |home, _| {
-        home.poster = Some({
-            let posted = posted.clone();
-            Rc::new(move |request: loose_ends::Request, cx: &App| {
-                posted.borrow_mut().push((request.path, request.body));
-                cx.background_spawn(std::future::pending())
-            })
-        });
-    });
+    home.update(cx, |home, _| home.poster = Some(unanswered(&posted)));
     let (snooze, menu) = home.read_with(cx, |home, _| {
         let rows = home.widgets["ends"].row_ui.borrow();
         (rows["e0"].snooze.clone(), home.menu_focus.clone())
@@ -1333,16 +1345,6 @@ fn a_loose_end_closes_with_a_note_from_the_keyboard(cx: &mut TestAppContext) {
     };
     let menu_open =
         |cx: &mut VisualTestContext| home.read_with(cx, |home, _| home.snooze_menu.is_open());
-    // A key down and up: a button clicks on the up.
-    let press = |keys: &str, cx: &mut VisualTestContext| {
-        for key in keys.split(' ') {
-            cx.simulate_keystrokes(key);
-            cx.simulate_event(KeyUpEvent {
-                keystroke: Keystroke::parse(key).unwrap(),
-            });
-            cx.run_until_parked();
-        }
-    };
 
     // Tab past Customize and the first row's link to its Snooze.
     cx.simulate_keystrokes("a");
@@ -1367,6 +1369,8 @@ fn a_loose_end_closes_with_a_note_from_the_keyboard(cx: &mut TestAppContext) {
     cx.simulate_input("called her back");
     press("enter", cx);
     assert!(home.read_with(cx, |home, _| home.note.is_none()));
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
     assert_eq!(
         *posted.borrow(),
         [(
@@ -1394,6 +1398,7 @@ fn a_note_the_door_turned_down_is_back_in_its_field(cx: &mut TestAppContext) {
     open(cx);
     cx.simulate_input("called her back");
     cx.simulate_keystrokes("enter");
+    cx.executor().advance_clock(UNDO_WINDOW);
     cx.run_until_parked();
     home.read_with(cx, |home, _| {
         assert!(home.note.is_none());
@@ -1412,4 +1417,476 @@ fn a_note_the_door_turned_down_is_back_in_its_field(cx: &mut TestAppContext) {
             .to_string()
     });
     assert_eq!(typed, "called her back");
+}
+
+/// The ids of a list card's rows as drawn, rows done or "not a thing" left
+/// out.
+fn shown(home: &Home, widget: &str) -> Vec<String> {
+    let state = &home.widgets[widget];
+    let Some(Payload {
+        body: Body::List(items),
+        ..
+    }) = &state.payload
+    else {
+        panic!("{widget} has no rows");
+    };
+    let (rows, _) = visible_list_rows(items, &state.overrides, usize::MAX);
+    rows.iter().filter_map(|row| row.id.clone()).collect()
+}
+
+/// Home on screen with a Loose ends card (e0 to e2) and a Slack card (s1,
+/// s2), every action noted and answered yes. It has no door, so nothing
+/// fetches.
+fn held_home(cx: &mut TestAppContext) -> (Entity<Home>, Posted, tempfile::TempDir) {
+    let (home, _paths, dir) = home(cx);
+    let posted = Posted::default();
+    home.update(cx, |home, cx| {
+        home.poster = Some({
+            let posted = posted.clone();
+            Rc::new(move |request: loose_ends::Request, _: &App| {
+                posted.borrow_mut().push((request.path, request.body));
+                Task::ready(Ok(()))
+            })
+        });
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        let mut slack = manifest("slack", "Slack · waiting on you");
+        slack.source = SourceSpec::KeronSources("slack-waiting".to_string());
+        home.apply_catalog(catalog(vec![ends, slack]), cx);
+        let slack_row = |id: &str| ListItem {
+            id: Some(id.to_string()),
+            title: format!("Ana in #{id}"),
+            actions: vec!["done".to_string()],
+            ..ListItem::default()
+        };
+        home.widgets.entry("ends".to_string()).or_default().payload =
+            Some(list((0..3).map(loose_end).collect()));
+        home.widgets.entry("slack".to_string()).or_default().payload =
+            Some(list(vec![slack_row("s1"), slack_row("s2")]));
+        home.set_frame(0.0, 600.0, 600.0, 1.0, cx);
+    });
+    (home, posted, dir)
+}
+
+/// A list payload of these rows.
+fn list(items: Vec<ListItem>) -> Payload {
+    Payload {
+        updated: None,
+        errors: Vec::new(),
+        body: Body::List(items),
+    }
+}
+
+fn snooze() -> Action {
+    Action::Snooze {
+        until: "+2h".to_string(),
+    }
+}
+
+fn done() -> Action {
+    Action::Done { comment: None }
+}
+
+fn paths(posted: &Posted) -> Vec<String> {
+    posted
+        .borrow()
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+#[gpui::test]
+fn row_actions_wait_out_their_undo_window_before_they_go(cx: &mut TestAppContext) {
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| {
+        home.act("ends", "e0", done(), cx);
+        home.act("ends", "e1", snooze(), cx);
+        home.act("slack", "s1", done(), cx);
+    });
+    cx.executor()
+        .advance_clock(UNDO_WINDOW - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(posted.borrow().is_empty());
+
+    // A refetch meanwhile keeps the rows as the owner left them.
+    home.update(cx, |home, cx| {
+        let rows = list((0..3).map(loose_end).collect());
+        home.apply_fetch("ends", Instant::now(), Ok(rows), cx);
+        assert_eq!(shown(home, "ends"), ["e1", "e2"]);
+        assert_eq!(
+            home.widgets["ends"].overrides["e1"].change,
+            RowChange::Snoozed
+        );
+    });
+
+    // Then they go, in the order taken.
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert_eq!(
+        paths(&posted),
+        [
+            "/memory/loose-ends/done",
+            "/memory/loose-ends/snooze",
+            "/sources/slack-waiting/done"
+        ]
+    );
+    home.read_with(cx, |home, _| {
+        assert!(home.held.is_empty());
+        assert!(home.widgets["ends"].overrides["e0"].settled);
+    });
+}
+
+#[gpui::test]
+fn undo_takes_back_held_actions_newest_first_and_nothing_goes(cx: &mut TestAppContext) {
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| {
+        let note = Action::Done {
+            comment: Some("called her back".to_string()),
+        };
+        home.act("ends", "e0", note, cx);
+        home.act("ends", "e1", snooze(), cx);
+        home.act("slack", "s1", done(), cx);
+        // Snoozed, then done: undone once, it's snoozed again.
+        home.act("ends", "e2", snooze(), cx);
+        home.act("ends", "e2", done(), cx);
+        assert_eq!(shown(home, "ends"), ["e1"]);
+
+        assert!(home.undo(cx));
+        assert_eq!(
+            home.widgets["ends"].overrides["e2"].change,
+            RowChange::Snoozed
+        );
+        assert!(home.undo(cx));
+        assert!(!home.widgets["ends"].overrides.contains_key("e2"));
+        assert!(home.undo(cx));
+        assert_eq!(shown(home, "slack"), ["s1", "s2"]);
+        assert!(home.undo(cx));
+        assert!(!home.widgets["ends"].overrides.contains_key("e1"));
+        assert!(!home.sent_notes.is_empty());
+        assert!(home.undo(cx));
+        assert_eq!(shown(home, "ends"), ["e0", "e1", "e2"]);
+        assert!(home.sent_notes.is_empty(), "no note waits on e0");
+        assert!(!home.undo(cx));
+    });
+    cx.executor().advance_clock(UNDO_WINDOW * 2);
+    cx.run_until_parked();
+    assert!(posted.borrow().is_empty());
+}
+
+#[gpui::test]
+fn a_row_done_while_its_snooze_goes_stays_hidden_until_the_done_does(cx: &mut TestAppContext) {
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| home.act("ends", "e2", snooze(), cx));
+    cx.executor().advance_clock(UNDO_WINDOW / 2);
+    home.update(cx, |home, cx| home.act("ends", "e2", done(), cx));
+    cx.executor().advance_clock(UNDO_WINDOW / 2);
+    cx.run_until_parked();
+    assert_eq!(paths(&posted), ["/memory/loose-ends/snooze"]);
+
+    // The door took the snooze and the card fetches again: the Done, still
+    // held, keeps e2 hidden. Taken back, e2 is there, snoozed.
+    home.update(cx, |home, cx| {
+        let mut rows: Vec<ListItem> = (0..3).map(loose_end).collect();
+        rows[2].snoozed_until = Some("2026-10-12T20:00:00Z".to_string());
+        home.apply_fetch("ends", Instant::now(), Ok(list(rows)), cx);
+        assert_eq!(shown(home, "ends"), ["e0", "e1"]);
+        assert!(home.undo(cx));
+        assert_eq!(shown(home, "ends"), ["e0", "e1", "e2"]);
+    });
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    assert_eq!(paths(&posted), ["/memory/loose-ends/snooze"]);
+}
+
+#[gpui::test]
+fn held_actions_go_at_once_when_home_goes_or_the_app_quits(cx: &mut TestAppContext) {
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| home.act("ends", "e0", done(), cx));
+    cx.update(|_| drop(home));
+    cx.run_until_parked();
+    assert_eq!(paths(&posted), ["/memory/loose-ends/done"]);
+
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| home.act("slack", "s1", done(), cx));
+    cx.quit();
+    assert_eq!(paths(&posted), ["/sources/slack-waiting/done"]);
+}
+
+#[gpui::test]
+fn quitting_sends_held_actions_and_waits_a_little_on_the_doors_answers(cx: &mut TestAppContext) {
+    // Answered: the app can go once the answer is in.
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| {
+        home.act("ends", "e0", done(), cx);
+        assert!(!home.ready_to_exit(cx));
+    });
+    assert_eq!(paths(&posted), ["/memory/loose-ends/done"]);
+    cx.run_until_parked();
+    assert!(home.update(cx, |home, cx| home.ready_to_exit(cx)));
+
+    // Never answered: it goes anyway once the wait is up.
+    let (home, _, _dir) = held_home(cx);
+    let posted = Posted::default();
+    home.update(cx, |home, cx| {
+        home.poster = Some(unanswered(&posted));
+        home.act("ends", "e0", done(), cx);
+        assert!(!home.ready_to_exit(cx));
+    });
+    assert_eq!(paths(&posted), ["/memory/loose-ends/done"]);
+    cx.executor()
+        .advance_clock(EXIT_WAIT - Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(home.read_with(cx, |home, _| home.sending()));
+    cx.executor().advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(home.update(cx, |home, cx| home.ready_to_exit(cx)));
+}
+
+#[gpui::test]
+fn held_actions_wait_out_a_refused_sign_in_and_go_once_connected(cx: &mut TestAppContext) {
+    // Signed in, the cards fetch on Tokio (and find no door).
+    cx.update(gpui_tokio::init);
+    let (home, posted, _dir) = held_home(cx);
+    home.update(cx, |home, cx| {
+        home.act("ends", "e0", done(), cx);
+        home.act("ends", "e1", snooze(), cx);
+        home.signed_out(cx);
+        // Past undoing now, and off the card.
+        assert!(!home.undo(cx));
+        assert!(home.newest_held("ends").is_none());
+    });
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    assert!(posted.borrow().is_empty());
+
+    home.update(cx, |home, cx| home.signed_in(cx));
+    assert_eq!(
+        paths(&posted),
+        ["/memory/loose-ends/done", "/memory/loose-ends/snooze"]
+    );
+    home.update(cx, |home, cx| {
+        // Back before the door has answered, the rows are as they were left.
+        home.apply_fetch(
+            "ends",
+            Instant::now(),
+            Ok(list((0..3).map(loose_end).collect())),
+            cx,
+        );
+        assert_eq!(shown(home, "ends"), ["e1", "e2"]);
+        assert_eq!(
+            home.widgets["ends"].overrides["e1"].change,
+            RowChange::Snoozed
+        );
+    });
+}
+
+/// The new-chat screen in small: a composer, Home under it, and Undo routed
+/// to Home as the shell routes it.
+struct UndoHost {
+    composer: Entity<ComposerInput>,
+    home: Entity<Home>,
+}
+
+impl Render for UndoHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .on_action(undo_listener(self.home.clone()))
+            .child(div().h(px(40.0)).child(self.composer.clone()))
+            .child(div().flex_1().child(self.home.clone()))
+    }
+}
+
+/// [`UndoHost`] with the app's key bindings and three loose ends whose
+/// actions are noted and never answered.
+fn undo_host(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Home>,
+    Entity<ComposerInput>,
+    Posted,
+    &mut VisualTestContext,
+    tempfile::TempDir,
+) {
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(crate::theme::Theme::default());
+        crate::composer::init(cx, Default::default());
+        crate::app_menus::bind_keys(cx);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HomePaths::under_home(dir.path());
+    let (host, cx) = cx.add_window_view(|_, cx| UndoHost {
+        composer: cx.new(|cx| ComposerInput::new("Do anything…", cx)),
+        home: cx.new(|cx| Home::with_parts(paths, None, cx)),
+    });
+    cx.simulate_resize(size(px(800.0), px(480.0)));
+    cx.run_until_parked();
+    let (home, composer) = host.read_with(cx, |host, _| (host.home.clone(), host.composer.clone()));
+    let posted = Posted::default();
+    home.update(cx, |home, cx| {
+        home.poster = Some(unanswered(&posted));
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        home.apply_catalog(catalog(vec![ends]), cx);
+        home.widgets.entry("ends".to_string()).or_default();
+        home.sign_in = SignIn::SignedIn;
+        home.set_frame(0.0, 600.0, 600.0, 1.0, cx);
+    });
+    set_loose_ends(&home, 3, cx);
+    (home, composer, posted, cx, dir)
+}
+
+#[gpui::test]
+fn cmd_z_takes_back_a_row_action_unless_the_composer_was_typed_in_since(cx: &mut TestAppContext) {
+    let (home, composer, posted, cx, _dir) = undo_host(cx);
+    let text =
+        |cx: &mut VisualTestContext| composer.read_with(cx, |input, _| input.text().to_string());
+    let rows = |cx: &mut VisualTestContext| home.read_with(cx, |home, _| shown(home, "ends"));
+    cx.update(|window, cx| window.focus(&composer.focus_handle(cx), cx));
+    cx.simulate_input("draft");
+
+    // Done clicked, focus still in the composer: ⌘Z brings the row back,
+    // and the line saying it was done goes.
+    home.update(cx, |home, cx| home.act("ends", "e0", done(), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("home-undo-ends").is_some());
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(rows(cx), ["e0", "e1", "e2"]);
+    assert_eq!(text(cx), "draft");
+    assert!(cx.debug_bounds("home-undo-ends").is_none());
+
+    // Typed after the action: ⌘Z takes back the typing, then the action.
+    home.update(cx, |home, cx| home.act("ends", "e1", done(), cx));
+    cx.simulate_input(" more");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(cx), "draft");
+    assert_eq!(rows(cx), ["e0", "e2"]);
+    // Edit › Undo does as ⌘Z.
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert_eq!(rows(cx), ["e0", "e1", "e2"]);
+    assert_eq!(text(cx), "draft");
+    // With nothing held, ⌘Z is the composer's again.
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(cx), "");
+
+    // A word begun before a row action and finished after it is newer.
+    cx.simulate_input("o");
+    home.update(cx, |home, cx| home.act("ends", "e2", done(), cx));
+    cx.simulate_input("k");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(cx), "");
+    assert_eq!(rows(cx), ["e0", "e1"]);
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(rows(cx), ["e0", "e1", "e2"]);
+
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    assert!(posted.borrow().is_empty());
+}
+
+#[gpui::test]
+fn cmd_z_or_the_cards_undo_takes_back_a_row_action_off_the_keyboard(cx: &mut TestAppContext) {
+    let (home, _composer, posted, cx, _dir) = undo_host(cx);
+    let snooze = home.read_with(cx, |home, _| {
+        home.widgets["ends"].row_ui.borrow()["e0"].snooze.clone()
+    });
+    let change = |cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| {
+            home.widgets["ends"]
+                .overrides
+                .get("e0")
+                .map(|change| change.change)
+        })
+    };
+    cx.simulate_keystrokes("a");
+    cx.update(|window, cx| window.focus(&snooze, cx));
+    // The menu opens on Enter, and Enter picks its first snooze; focus is
+    // back on Snooze, where ⌘Z takes it back.
+    press("enter enter", cx);
+    assert_eq!(change(cx), Some(RowChange::Snoozed));
+    assert!(cx.update(|window, _| snooze.is_focused(window)));
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(change(cx), None);
+
+    // The card's own Undo does too.
+    home.update(cx, |home, cx| home.act("ends", "e0", done(), cx));
+    cx.executor().advance_clock(leave_duration());
+    cx.run_until_parked();
+    let undo = cx.debug_bounds("home-undo-ends").unwrap();
+    cx.simulate_click(undo.center(), Modifiers::none());
+    assert_eq!(change(cx), None);
+
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    assert!(posted.borrow().is_empty());
+}
+
+#[gpui::test]
+fn the_card_says_its_newest_held_action_and_its_undo_takes_that_one_back(cx: &mut TestAppContext) {
+    let (home, _composer, posted, cx, _dir) = undo_host(cx);
+    let line = |cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| home.newest_held("ends").map(HeldAction::line))
+    };
+    home.update(cx, |home, cx| {
+        home.act("ends", "e0", Action::Dismiss { comment: None }, cx);
+        home.act("ends", "e1", snooze(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(line(cx).as_deref(), Some("Snoozed: Loose end 1"));
+
+    let undo = cx.debug_bounds("home-undo-ends").unwrap();
+    cx.simulate_click(undo.center(), Modifiers::none());
+    assert_eq!(line(cx).as_deref(), Some("Not a thing: Loose end 0"));
+    home.read_with(cx, |home, _| {
+        assert_eq!(shown(home, "ends"), ["e1", "e2"]);
+        assert!(!home.widgets["ends"].overrides.contains_key("e1"));
+    });
+
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    assert_eq!(paths(&posted), ["/memory/loose-ends/dismiss"]);
+}
+
+#[gpui::test]
+fn cmd_z_leaves_held_row_actions_be_while_home_is_off_screen(cx: &mut TestAppContext) {
+    let (home, composer, posted, cx, _dir) = undo_host(cx);
+    let text =
+        |cx: &mut VisualTestContext| composer.read_with(cx, |input, _| input.text().to_string());
+    let rows = |cx: &mut VisualTestContext| home.read_with(cx, |home, _| shown(home, "ends"));
+    cx.update(|window, cx| window.focus(&composer.focus_handle(cx), cx));
+    cx.simulate_input("draft");
+    home.update(cx, |home, cx| home.act("ends", "e0", done(), cx));
+
+    // A chat opens over Home: ⌘Z there is the composer's, and Undo that no
+    // text input takes leaves the Done be too.
+    home.update(cx, |home, cx| home.hide(cx));
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(cx), "");
+    assert!(!home.update(cx, |home, cx| home.undo(cx)));
+    assert_eq!(rows(cx), ["e1", "e2"]);
+
+    // Back on Home inside the window, ⌘Z takes it back.
+    home.update(cx, |home, cx| home.set_frame(0.0, 600.0, 600.0, 1.0, cx));
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(rows(cx), ["e0", "e1", "e2"]);
+
+    // Off screen as its window passes, a Done goes.
+    home.update(cx, |home, cx| {
+        home.act("ends", "e1", done(), cx);
+        home.hide(cx);
+    });
+    cx.simulate_keystrokes("cmd-z");
+    cx.executor().advance_clock(UNDO_WINDOW);
+    cx.run_until_parked();
+    let done: Vec<serde_json::Value> = posted
+        .borrow()
+        .iter()
+        .filter(|(path, _)| path == "/memory/loose-ends/done")
+        .map(|(_, body)| body["ids"].clone())
+        .collect();
+    assert_eq!(done, [serde_json::json!(["e1"])]);
 }

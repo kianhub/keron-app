@@ -125,6 +125,8 @@ impl Render for Home {
             .children(tray)
             .children(grid);
         div()
+            // Its controls take ⌘Z too ([`crate::app_menus::bind_keys`]).
+            .key_context("Home")
             .relative()
             .size_full()
             .opacity(frame.opacity)
@@ -824,7 +826,10 @@ impl Home {
         let dragging = self.drag.as_ref().is_some_and(|drag| drag.id == id);
         let header = self.render_header(theme, manifest, state);
         let body = self.render_body(theme, manifest, state, cx);
-        let footer = render_footer(theme, manifest, state);
+        // A held row action takes the footer's place while it can be undone.
+        let footer = self
+            .render_held(theme, manifest, cx)
+            .or_else(|| render_footer(theme, manifest, state));
         // The room the row's stretch leaves under the body.
         let slack = Rc::new(Cell::new(Pixels::ZERO));
         let body = div().flex_grow_1().flex().flex_col().child(body).child(
@@ -985,6 +990,48 @@ impl Home {
             .children(content)
             .children(action_error)
             .into_any_element()
+    }
+
+    /// The card's foot while a row action on it is in its undo window: the
+    /// newest, as "Done: <title>", with Undo beside it.
+    fn render_held(
+        &self,
+        theme: &Theme,
+        manifest: &Manifest,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let held = self.newest_held(&manifest.id)?;
+        let label = held.line();
+        let id = held.id;
+        let key = format!("home-undo-{}", manifest.id);
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .pt(px(8.0))
+                .border_t_1()
+                .border_color(widgets::row_divider(theme))
+                .text_size(ui_rems(12.0))
+                .line_height(ui_rems(16.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(label.clone())),
+                )
+                .child(
+                    undo_button(theme, key.clone())
+                        .debug_selector(move || key)
+                        .aria_label(format!("Undo {label}"))
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| this.undo_held(id, cx)),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A compact warning with Retry; rows already shown stay under it.
@@ -2221,6 +2268,37 @@ fn small_button(theme: &Theme, id: String) -> Stateful<Div> {
         .tab_index(0)
         .role(Role::Button)
         .focus_visible(move |s| s.border_color(accent))
+}
+
+/// "Undo ⌘Z" beside a held row action: quiet like the row actions, nothing
+/// behind it until the pointer is over it, its shortcut in faint mono.
+fn undo_button(theme: &Theme, id: String) -> Stateful<Div> {
+    let accent = theme.accent;
+    let wash = theme.ink(0.08);
+    let text = theme.text;
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(move |s| s.bg(wash).text_color(text))
+        .tab_index(0)
+        .role(Role::Button)
+        .focus_visible(move |s| s.border_1().border_color(accent))
+        .child("Undo")
+        .child(
+            div()
+                .font_family(theme.font_mono.clone())
+                .text_size(ui_rems(11.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(crate::settings::badge_combo("mod-z"))),
+        )
 }
 
 /// A row action: a quiet icon-only button, like the app's other small icon

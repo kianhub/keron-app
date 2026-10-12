@@ -149,6 +149,15 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
         shell::OpenSettings,
         None,
     )];
+    // Edit › Undo's key on Home's own controls too, as in a text input:
+    // there it takes back Home's newest held row action.
+    for prefix in ["cmd", "ctrl"] {
+        bindings.push(KeyBinding::new(
+            &format!("{prefix}-z"),
+            composer::Undo,
+            Some("Home"),
+        ));
+    }
     if macos {
         bindings.extend([
             KeyBinding::new("cmd-q", Quit, None),
