@@ -10,19 +10,19 @@ use std::time::Duration;
 use chrono::{Local, NaiveDate, Utc};
 use gpui::{
     AnimationExt as _, AnyElement, AnyView, App, ClickEvent, Context, CursorStyle, DispatchPhase,
-    Div, ElementId, EntityId, FontWeight, HitboxBehavior, Hsla, MouseButton, MouseMoveEvent,
-    Pixels, Role, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Toggled, WeakFocusHandle,
-    Window, div, prelude::*, px, relative,
+    Div, ElementId, EntityId, Focusable as _, FontWeight, HitboxBehavior, Hsla, KeyDownEvent,
+    MouseButton, MouseMoveEvent, Pixels, Role, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, Toggled, WeakFocusHandle, Window, div, prelude::*, px, relative,
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
-use keron_home::loose_ends::{Action, snooze_choices};
+use keron_home::loose_ends::{self, Action, COMMENT_LIMIT, snooze_choices};
 use keron_home::{AgendaItem, DeviceItem, Heat, Kind, Stat, TimelineItem};
 use zeron_theme::AccentPreset;
 
 use super::{
-    Body, CardDragPayload, Drawn, Home, Leaving, ListItem, Manifest, Mode, Payload, RowChange,
-    RowUi, SignIn, Slot, SourceSpec, WheelTarget, WidgetState, drawn_limit, drawn_list_rows,
-    is_door, limit, masonry, scrolls, visible_list_rows,
+    Body, CardDragPayload, Drawn, Home, Leaving, ListItem, Manifest, Mode, NoteKind, Payload,
+    RowChange, RowNote, RowUi, SignIn, Slot, SourceSpec, WheelTarget, WidgetState, drawn_limit,
+    drawn_list_rows, is_door, limit, masonry, scrolls, visible_list_rows,
 };
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec};
@@ -94,6 +94,7 @@ impl Render for Home {
             return div().into_any_element();
         }
         self.note_keyboard_focus(window, cx);
+        self.focus_note(window, cx);
         self.sync_quiet(cx);
         // Rows closing up after Done, and chips and cards fading in where
         // they moved, are drawn from the clock, frame by frame.
@@ -1080,6 +1081,19 @@ impl Home {
                     .position(|(item, _)| item.id.as_deref() == Some(row.as_str()))?;
                 Some((ix, handle))
             });
+        // A note just opened in a card that scrolls: its row and field come
+        // into view.
+        if scrolls
+            && let Some(note) = self.note.as_ref().filter(|note| note.widget == manifest.id)
+            && note.reveal_pending.take()
+            && let Some(ix) = drawn
+                .rows
+                .iter()
+                .position(|(item, _)| item.id.as_deref() == Some(note.row.as_str()))
+            && let Some(list) = self.list_scrolls.borrow().get(&manifest.id)
+        {
+            list.page.scroll.scroll_to_item(ix);
+        }
         let rows: Vec<AnyElement> = drawn
             .rows
             .into_iter()
@@ -1403,7 +1417,21 @@ impl Home {
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.open_link(&link, cx)),
                 );
         }
-        row.into_any_element()
+        // The note field opens under its row, and the two scroll, close and
+        // come into view as one.
+        let note = self.note.as_ref().filter(|note| {
+            note.widget == widget && row_id.is_some_and(|row| row == note.row.as_str())
+        });
+        match note {
+            Some(note) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(row)
+                .child(render_note(theme, note, &item.title, cx))
+                .into_any_element(),
+            None => row.into_any_element(),
+        }
     }
 
     /// Snooze (or "not a thing") and Done as quiet icon buttons, Done
@@ -1424,18 +1452,28 @@ impl Home {
         let widget = manifest.id.as_str();
         let offers = |name: &str| item.actions.iter().any(|action| action == name);
         let pair = (widget.to_string(), row.to_string());
-        let focus = state.row_ui(row, cx).focus.clone();
+        let (focus, snooze_focus) = {
+            let ui = state.row_ui(row, cx);
+            (ui.focus.clone(), ui.snooze.clone())
+        };
         let tip = |text: &'static str| row_tooltip(text, state.row_ui.clone(), row.to_string());
+        // Loose ends close with a note too, from the snooze menu.
+        let notes = manifest.source == loose_ends::loose_ends();
         let mut buttons: Vec<AnyElement> = Vec::new();
         if offers("snooze") {
             let mut snooze = icon_button(
                 theme,
                 format!("home-snooze-{widget}-{row}"),
                 icons::CLOCK_CIRCLE,
-                (!menu_open).then(|| tip("Snooze")),
+                (!menu_open).then(|| tip(if notes { "Snooze and more" } else { "Snooze" })),
             )
-            .aria_label(format!("Snooze {}", item.title))
+            .aria_label(if notes {
+                format!("Snooze and more for {}", item.title)
+            } else {
+                format!("Snooze {}", item.title)
+            })
             .aria_expanded(menu_open)
+            .track_focus(&snooze_focus)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener({
@@ -1449,12 +1487,12 @@ impl Home {
             .on_click(cx.listener({
                 let pair = pair.clone();
                 let row_fade = row_fade.to_string();
-                move |this, event: &ClickEvent, _, cx| {
+                move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     if !actions_showing(event, &row_fade) {
                         return;
                     }
-                    this.open_snooze_menu(&pair.0, &pair.1, cx);
+                    this.open_snooze_menu(&pair.0, &pair.1, event.is_keyboard(), window, cx);
                 }
             }));
             if menu_open {
@@ -1462,7 +1500,11 @@ impl Home {
                     theme,
                     widget,
                     row,
-                    offers("dismiss"),
+                    MenuOffers {
+                        dismiss: offers("dismiss"),
+                        done_note: notes && offers("done"),
+                        dismiss_note: notes && offers("dismiss"),
+                    },
                     cx,
                 ));
             }
@@ -1475,7 +1517,7 @@ impl Home {
                     "dismiss",
                     icons::CLOSE,
                     tip("Not a thing"),
-                    Action::Dismiss,
+                    Action::Dismiss { comment: None },
                     row_fade,
                     cx,
                 )
@@ -1491,7 +1533,7 @@ impl Home {
                     "done",
                     icons::CHECK,
                     tip("No reply needed"),
-                    Action::Done,
+                    Action::Done { comment: None },
                     row_fade,
                     cx,
                 )
@@ -1503,7 +1545,7 @@ impl Home {
                     "done",
                     icons::CHECK,
                     tip("Done"),
-                    Action::Done,
+                    Action::Done { comment: None },
                     row_fade,
                     cx,
                 )
@@ -1526,54 +1568,164 @@ impl Home {
         (cluster, count)
     }
 
+    /// Snooze choices, then the ways to close the row besides its Done
+    /// button: with a note, or as "not a thing", with why or without. Opened
+    /// from the keyboard, its card has focus: the arrows, Home and End move
+    /// through it, Enter or Space picks, Escape closes it back to Snooze, and
+    /// Tab closes it and moves on from Snooze.
     fn render_snooze_menu(
         &self,
         theme: &Theme,
         widget: &str,
         row: &str,
-        dismiss: bool,
+        offers: MenuOffers,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let popup = theme.for_popup();
+        let mut picks: Vec<(String, SharedString, MenuPick)> = snooze_choices(Local::now())
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (label, until))| {
+                (
+                    format!("home-snooze-{widget}-{row}-{ix}"),
+                    label.into(),
+                    MenuPick::Act(Action::Snooze { until }),
+                )
+            })
+            .collect();
+        let snoozes = picks.len();
+        if offers.done_note {
+            picks.push((
+                format!("home-done-note-{widget}-{row}"),
+                "Done with a note…".into(),
+                MenuPick::Note(NoteKind::Done),
+            ));
+        }
+        if offers.dismiss {
+            picks.push((
+                format!("home-dismiss-{widget}-{row}"),
+                "Not a thing".into(),
+                MenuPick::Act(Action::Dismiss { comment: None }),
+            ));
+        }
+        if offers.dismiss_note {
+            picks.push((
+                format!("home-dismiss-note-{widget}-{row}"),
+                "Not a thing, because…".into(),
+                MenuPick::Note(NoteKind::Dismiss),
+            ));
+        }
+        let picks = Rc::new(picks);
+        let count = picks.len();
         let mut menu = popover::popover_card(&popup)
+            .id(SharedString::from(format!(
+                "home-snooze-card-{widget}-{row}"
+            )))
             .w(px(184.0))
             .flex()
             .flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_snooze_menu(cx)));
-        let item = |key: String, label: SharedString, action: Action| {
-            let (widget, row) = (widget.to_string(), row.to_string());
-            popover::menu_row(&popup, false, key.clone())
-                .id(SharedString::from(key))
-                .tab_index(0)
-                .role(Role::MenuItem)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .role(Role::Menu)
+            .aria_label("Snooze and more")
+            .track_focus(&self.menu_focus)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_snooze_menu(cx)))
+            .on_key_down(cx.listener({
+                let (widget, row) = (widget.to_string(), row.to_string());
+                let picks = picks.clone();
+                move |this, event: &KeyDownEvent, window, cx| {
+                    if !this.snooze_menu.is_open() {
+                        return;
+                    }
+                    let keystroke = &event.keystroke;
+                    let modifiers = keystroke.modifiers;
+                    let menu_key = popover::classify_key(
+                        keystroke.key.as_str(),
+                        modifiers.platform,
+                        modifiers.control,
+                    );
+                    match (keystroke.key.as_str(), menu_key) {
+                        (_, popover::MenuKey::Up | popover::MenuKey::Down) => {
+                            let delta = if menu_key == popover::MenuKey::Up {
+                                -1
+                            } else {
+                                1
+                            };
+                            this.menu_active = popover::menu_step(this.menu_active, count, delta);
+                        }
+                        ("home", _) => this.menu_active = Some(0),
+                        ("end", _) => this.menu_active = count.checked_sub(1),
+                        ("space", _) | (_, popover::MenuKey::Enter) => {
+                            if let Some(pick) = this.menu_active.and_then(|ix| picks.get(ix)) {
+                                this.pick_from_menu(&widget, &row, &pick.2, window, cx);
+                            }
+                        }
+                        (_, popover::MenuKey::Escape) => {
+                            this.close_snooze_menu(cx);
+                            this.focus_snooze(&widget, &row, window, cx);
+                        }
+                        ("tab", _)
+                            if !modifiers.control && !modifiers.alt && !modifiers.platform =>
+                        {
+                            this.close_snooze_menu(cx);
+                            this.focus_snooze(&widget, &row, window, cx);
+                            if modifiers.shift {
+                                window.focus_prev(cx);
+                            } else {
+                                window.focus_next(cx);
+                            }
+                        }
+                        _ => return,
+                    }
                     cx.stop_propagation();
-                    this.close_snooze_menu(cx);
-                    this.act(&widget, &row, action.clone(), cx);
-                }))
-                .child(label)
-        };
-        for (ix, (label, until)) in snooze_choices(Local::now()).into_iter().enumerate() {
-            menu = menu.child(item(
-                format!("home-snooze-{widget}-{row}-{ix}"),
-                label.into(),
-                Action::Snooze { until },
-            ));
-        }
-        if dismiss {
-            menu = menu
-                .child(div().my(px(4.0)).h(px(1.0)).bg(popup.border.opacity(0.6)))
-                .child(item(
-                    format!("home-dismiss-{widget}-{row}"),
-                    "Not a thing".into(),
-                    Action::Dismiss,
-                ));
+                    cx.notify();
+                }
+            }));
+        for (ix, (key, label, pick)) in picks.iter().enumerate() {
+            if ix == snoozes {
+                menu = menu.child(div().my(px(4.0)).h(px(1.0)).bg(popup.border.opacity(0.6)));
+            }
+            let highlighted = self.menu_active == Some(ix);
+            let (widget, row, pick) = (widget.to_string(), row.to_string(), pick.clone());
+            menu = menu.child(
+                popover::menu_row_nav(&popup, false, highlighted, key.clone())
+                    .id(SharedString::from(key.clone()))
+                    .role(Role::MenuItem)
+                    .aria_label(label.clone())
+                    // Only the keyboard highlights an item, with focus on the
+                    // card: the screen reader follows it.
+                    .when(highlighted, |row| row.aria_active_descendant())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.pick_from_menu(&widget, &row, &pick, window, cx);
+                    }))
+                    .child(label.clone()),
+            );
         }
         popover::anchored_menu_below_end(
             format!("home-snooze-menu-{widget}-{row}"),
             menu.into_any_element(),
             self.snooze_menu.closing_since(),
         )
+    }
+
+    /// A snooze menu item, clicked or picked from the keyboard. Focus that
+    /// was in the menu goes back to the row's Snooze first, so it isn't
+    /// lost with the menu; a note field then takes it.
+    fn pick_from_menu(
+        &mut self,
+        widget: &str,
+        row: &str,
+        pick: &MenuPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.menu_focus.contains_focused(window, cx) {
+            self.focus_snooze(widget, row, window, cx);
+        }
+        self.close_snooze_menu(cx);
+        match pick {
+            MenuPick::Act(action) => self.act(widget, row, action.clone(), cx),
+            MenuPick::Note(kind) => self.open_note(widget, row, *kind, cx),
+        }
     }
 
     // ---- agenda ----
@@ -2120,6 +2272,89 @@ fn row_action(
         }
         this.act(&widget, &row, action.clone(), cx);
     }))
+}
+
+/// The note field's count shows once this close to the door's limit.
+const NOTE_COUNT_FROM: usize = 30;
+
+/// What a row's snooze menu offers past its snooze choices.
+#[derive(Clone, Copy)]
+struct MenuOffers {
+    dismiss: bool,
+    done_note: bool,
+    dismiss_note: bool,
+}
+
+/// What a snooze menu item does: act at once, or open the note field.
+#[derive(Clone)]
+enum MenuPick {
+    Act(Action),
+    Note(NoteKind),
+}
+
+/// The note field under a loose end: one quiet line, focused. Enter sends
+/// ([`Home::send_note`]). Typing stops at what the door takes; the count
+/// shows as it gets close.
+fn render_note(theme: &Theme, note: &RowNote, title: &str, cx: &mut Context<Home>) -> AnyElement {
+    let typed = note.input.read(cx).text().chars().count();
+    let count = (typed + NOTE_COUNT_FROM > COMMENT_LIMIT).then_some(typed);
+    let label = match note.kind {
+        NoteKind::Done => format!("Done with a note: {title}"),
+        NoteKind::Dismiss => format!("Not a thing: {title}"),
+    };
+    let id = format!("home-note-{}-{}", note.widget, note.row);
+    let focus = note.input.focus_handle(cx);
+    div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
+        .role(Role::Group)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .h(ui_rems(24.0))
+        .px(px(7.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.accent)
+        .bg(theme.input_glass_bg())
+        .text_color(theme.text)
+        .cursor_text()
+        // The field isn't the card. A press on its edge keeps the field: the
+        // input lets focus go on a press outside itself, and it's back
+        // before the frame ends, so its blur never fires.
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.focus(&focus, cx);
+            cx.stop_propagation();
+        })
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                this.escape_note(window, cx);
+            }
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(note.input.clone()),
+        )
+        .when_some(count, |el, count| {
+            el.child(
+                div()
+                    .id("home-note-count")
+                    .flex_none()
+                    .role(Role::Label)
+                    .aria_label(format!("{count} of {COMMENT_LIMIT} characters"))
+                    .text_size(ui_rems(11.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{count}/{COMMENT_LIMIT}"))),
+            )
+        })
+        .into_any_element()
 }
 
 /// Whether a click on a row's action counts: from the keyboard, or with
