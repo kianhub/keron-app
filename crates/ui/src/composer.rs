@@ -884,6 +884,15 @@ const UNDO_COALESCE: Duration = Duration::from_millis(700);
 /// Cap on retained undo steps — a long-lived composer must not grow forever.
 const UNDO_LIMIT: usize = 200;
 
+/// When the newest step that [`Undo`] can take back outside the text was
+/// taken, if one is waiting: a Home row closed a moment ago. Undo goes to
+/// whichever is newer, so an input whose own last edit is older lets the
+/// action go on to the view that holds that step.
+#[derive(Default)]
+pub(crate) struct UndoElsewhere(pub(crate) Option<Instant>);
+
+impl gpui::Global for UndoElsewhere {}
+
 const MENTION_TOOLTIP_DELAY: Duration = Duration::from_millis(420);
 const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 // Nonbreaking spaces give chips their side inset, shaped in Geist like the
@@ -902,6 +911,9 @@ struct EditSnapshot {
     selected_range: Range<usize>,
     selection_reversed: bool,
     caret_affinity: CaretAffinity,
+    /// When the edit it undoes was made; the latest keystroke for a run of
+    /// typing merged into one step.
+    at: Instant,
 }
 
 /// A strict, local-only Markdown representation of a file mention. The
@@ -2925,6 +2937,7 @@ impl ComposerInput {
             selected_range: self.selected_range.clone(),
             selection_reversed: self.selection_reversed,
             caret_affinity: self.caret_affinity,
+            at: Instant::now(),
         }
     }
 
@@ -2967,6 +2980,8 @@ impl ComposerInput {
             if self.undo_stack.len() > UNDO_LIMIT {
                 self.undo_stack.remove(0);
             }
+        } else if let Some(step) = self.undo_stack.last_mut() {
+            step.at = Instant::now();
         }
         // Any fresh edit invalidates the redo branch.
         self.redo_stack.clear();
@@ -2998,6 +3013,10 @@ impl ComposerInput {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.yields_undo(cx) {
+            cx.propagate();
+            return;
+        }
         if self.dictation.phase.active() {
             cx.emit(DictationInputEvent::Changed);
             cx.notify();
@@ -3011,6 +3030,19 @@ impl ComposerInput {
         };
         self.redo_stack.push(self.snapshot());
         self.restore(previous, cx);
+    }
+
+    /// Whether Undo here belongs to a step outside the text taken since this
+    /// input's last edit ([`UndoElsewhere`]). Dictation still cancels first.
+    fn yields_undo(&self, cx: &App) -> bool {
+        let Some(elsewhere) = cx.try_global::<UndoElsewhere>().and_then(|undo| undo.0) else {
+            return false;
+        };
+        !self.dictation.phase.active()
+            && self
+                .undo_stack
+                .last()
+                .is_none_or(|step| step.at < elsewhere)
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {

@@ -46,7 +46,7 @@ use keron_home::{
     ZeronSnapshot,
 };
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::composer::{ComposerInput, ComposerInputEvent, Undo, UndoElsewhere};
 use crate::popover::Popup;
 use crate::settings::widgets::PageScroll;
 
@@ -69,6 +69,9 @@ const SWAP: crate::motion::MotionSpec = crate::motion::DIALOG_IN;
 /// A wheel gesture stays with the list or page it started scrolling,
 /// momentum included, until the wheel rests this long.
 const WHEEL_HOLD: Duration = Duration::from_millis(200);
+/// A row action waits this long in the app, where ⌘Z takes it back, before
+/// it goes to the door.
+const UNDO_WINDOW: Duration = Duration::from_secs(10);
 
 /// Sends one row action to the door and says whether it took it. Tests use
 /// a fake.
@@ -333,6 +336,24 @@ struct RowOverride {
     settled: bool,
 }
 
+/// A row action waiting out [`UNDO_WINDOW`] before it's sent. Its row is
+/// hidden or snoozed already; taken back, it's as it was, and the door never
+/// hears of it.
+struct HeldAction {
+    /// Tells it from another action on the same row.
+    id: u64,
+    widget: String,
+    row: String,
+    change: RowChange,
+    /// "Done", "Not a thing" or "Snoozed", for the line on its card.
+    verb: &'static str,
+    title: String,
+    request: loose_ends::Request,
+    at: Instant,
+    /// Sends it when the window ends; dropped, it never does.
+    _send: Task<()>,
+}
+
 /// One widget in Home's order.
 #[derive(Clone, Debug)]
 struct Slot {
@@ -412,10 +433,13 @@ pub struct Home {
     menu_active: Option<usize>,
     /// The note being written under a loose end, if one is open.
     note: Option<RowNote>,
-    /// Notes sent with a Done or "not a thing" the door hasn't taken yet,
-    /// by (widget id, row id): if it fails, the row's field opens with the
-    /// note again.
+    /// Notes on a Done or "not a thing" the door hasn't taken yet, held or
+    /// sent, by (widget id, row id): if it fails, the row's field opens with
+    /// the note again.
     sent_notes: HashMap<(String, String), String>,
+    /// Row actions in their undo window, oldest first.
+    held: Vec<HeldAction>,
+    next_held: u64,
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
@@ -446,6 +470,7 @@ pub struct Home {
     _path: Option<Task<()>>,
     _sign_in: Option<Task<()>>,
     _zeron_tick: Task<()>,
+    _quit: Subscription,
 }
 
 impl EventEmitter<HomeEvent> for Home {}
@@ -535,7 +560,20 @@ impl Home {
                 }
             }
         });
-        cx.on_release(|this, _| this.flush_layout_now()).detach();
+        cx.on_release(|this, cx| {
+            this.flush_layout_now();
+            // Held row actions go now, and finish without Home.
+            for post in this.post_held(cx) {
+                post.detach();
+            }
+        })
+        .detach();
+        let quit = cx.on_app_quit(|this, cx| {
+            let posts = this.post_held(cx);
+            async move {
+                futures::future::join_all(posts).await;
+            }
+        });
         Self {
             paths,
             fetcher,
@@ -560,6 +598,8 @@ impl Home {
             menu_active: None,
             note: None,
             sent_notes: HashMap::new(),
+            held: Vec::new(),
+            next_held: 0,
             keyboard_row: None,
             keyboard_in: None,
             focus_seen: None,
@@ -578,6 +618,7 @@ impl Home {
             _path: None,
             _sign_in: None,
             _zeron_tick: zeron_tick,
+            _quit: quit,
         }
     }
 
@@ -1212,24 +1253,32 @@ impl Home {
                 *state = WidgetState::default();
             }
         }
+        // Held row actions go now, rather than wait on cards that are gone.
+        for held in std::mem::take(&mut self.held) {
+            self.send(held, cx);
+        }
+        self.sync_undo_elsewhere(cx);
         self.sync_quiet(cx);
         cx.notify();
     }
 
     // ---- row actions ----
 
-    /// Snooze, done or dismiss one row: shown at once, then sent to the
-    /// widget's own source through the door (`/memory/loose-ends/done`,
-    /// `/sources/slack-waiting/done`), then the widget fetches again. A
-    /// failure puts the row back and says why on the card, except a mail or
-    /// Slack row the source has already dropped, which stays hidden.
+    /// Snooze, done or dismiss one row: shown at once, and held in the app
+    /// for [`UNDO_WINDOW`], where ⌘Z takes it back ([`Home::undo`]). Then
+    /// it's sent to the widget's own source through the door
+    /// (`/memory/loose-ends/done`, `/sources/slack-waiting/done`), and the
+    /// widget fetches again. A failure puts the row back and says why on the
+    /// card, except a mail or Slack row the source has already dropped,
+    /// which stays hidden.
     pub(crate) fn act(&mut self, widget: &str, row: &str, action: Action, cx: &mut Context<Self>) {
-        let Some(post) = self.poster.clone() else {
+        if self.poster.is_none() {
             return;
-        };
-        let change = match action {
-            Action::Done { .. } | Action::Dismiss { .. } => RowChange::Hidden,
-            Action::Snooze { .. } => RowChange::Snoozed,
+        }
+        let (change, verb) = match action {
+            Action::Done { .. } => (RowChange::Hidden, "Done"),
+            Action::Dismiss { .. } => (RowChange::Hidden, "Not a thing"),
+            Action::Snooze { .. } => (RowChange::Snoozed, "Snoozed"),
             Action::Shown | Action::Notified { .. } => return,
         };
         // A row on its way out can still be clicked while it collapses; it's
@@ -1249,22 +1298,20 @@ impl Home {
         else {
             return;
         };
+        let item = self
+            .widgets
+            .get(widget)
+            .and_then(|state| state.payload.as_ref())
+            .and_then(|payload| match &payload.body {
+                Body::List(items) => items.iter().find(|item| item.id.as_deref() == Some(row)),
+                _ => None,
+            });
+        let title = item.map_or_else(|| row.to_string(), |item| item.title.clone());
         // Mail and Slack: say which message the owner saw, so a newer one isn't hidden too.
-        if matches!(manifest.source, SourceSpec::KeronSources(_)) {
-            let shown = self
-                .widgets
-                .get(widget)
-                .and_then(|state| state.payload.as_ref())
-                .and_then(|payload| match &payload.body {
-                    Body::List(items) => items
-                        .iter()
-                        .find(|item| item.id.as_deref() == Some(row))
-                        .and_then(|item| item.at.clone()),
-                    _ => None,
-                });
-            if let Some(at) = shown {
-                request = request.seen([(row, at.as_str())]);
-            }
+        if matches!(manifest.source, SourceSpec::KeronSources(_))
+            && let Some(at) = item.and_then(|item| item.at.as_deref())
+        {
+            request = request.seen([(row, at)]);
         }
         if let Action::Done {
             comment: Some(comment),
@@ -1276,15 +1323,24 @@ impl Home {
             self.sent_notes
                 .insert((widget.to_string(), row.to_string()), comment.clone());
         }
-        let send = post(request, cx);
-        let task = cx.spawn({
-            let (widget, row) = (widget.to_string(), row.to_string());
-            async move |this, cx| {
-                let result = send.await;
-                this.update(cx, |this, cx| this.finish_action(&widget, &row, result, cx))
-                    .ok();
-            }
+        let id = self.next_held;
+        self.next_held += 1;
+        let send = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UNDO_WINDOW).await;
+            this.update(cx, |this, cx| this.send_held(id, cx)).ok();
         });
+        self.held.push(HeldAction {
+            id,
+            widget: widget.to_string(),
+            row: row.to_string(),
+            change,
+            verb,
+            title,
+            request,
+            at: Instant::now(),
+            _send: send,
+        });
+        self.sync_undo_elsewhere(cx);
         let reduced = crate::motion::reduced_motion(cx);
         let state = self.widgets.entry(widget.to_string()).or_default();
         state.overrides.insert(
@@ -1295,7 +1351,6 @@ impl Home {
             },
         );
         state.action_error = None;
-        state.actions.insert(row.to_string(), task);
         // A hidden row closes up rather than vanishing, unless Reduce Motion
         // is on or it was never drawn.
         let height = state
@@ -1335,6 +1390,117 @@ impl Home {
         }
     }
 
+    /// ⌘Z: take back the newest row action still in its undo window.
+    /// Returns whether there was one.
+    fn undo(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.held.last().map(|held| held.id) else {
+            return false;
+        };
+        self.undo_held(id, cx);
+        true
+    }
+
+    /// Take back a held row action: it's never sent, and its row is as it
+    /// was, closing up no more and with no note waiting.
+    fn undo_held(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self.held.iter().position(|held| held.id == id) else {
+            return;
+        };
+        let held = self.held.remove(ix);
+        self.sync_undo_elsewhere(cx);
+        // An older action on the row, still held, shows as it did.
+        let older = self
+            .held
+            .iter()
+            .rev()
+            .find(|older| older.widget == held.widget && older.row == held.row)
+            .map(|older| older.change);
+        if let Some(state) = self.widgets.get_mut(&held.widget) {
+            match older {
+                Some(change) => {
+                    state.overrides.insert(
+                        held.row.clone(),
+                        RowOverride {
+                            change,
+                            settled: false,
+                        },
+                    );
+                }
+                None => {
+                    state.overrides.remove(&held.row);
+                }
+            }
+            state.leaving.remove(&held.row);
+        }
+        if held.change == RowChange::Hidden {
+            self.sent_notes.remove(&(held.widget, held.row));
+        }
+        cx.notify();
+    }
+
+    /// A held row action's undo window ended: it goes to the door, after
+    /// any older ones still held (their windows are over too), so actions
+    /// go in the order they were taken.
+    fn send_held(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self.held.iter().position(|held| held.id == id) else {
+            return;
+        };
+        let due: Vec<HeldAction> = self.held.drain(..=ix).collect();
+        self.sync_undo_elsewhere(cx);
+        for held in due {
+            self.send(held, cx);
+        }
+        cx.notify();
+    }
+
+    /// Send a row action now; [`Home::finish_action`] takes the answer.
+    fn send(&mut self, held: HeldAction, cx: &mut Context<Self>) {
+        let Some(post) = self.poster.clone() else {
+            return;
+        };
+        let HeldAction {
+            widget,
+            row,
+            request,
+            ..
+        } = held;
+        let send = post(request, cx);
+        let task = cx.spawn({
+            let (widget, row) = (widget.clone(), row.clone());
+            async move |this, cx| {
+                let result = send.await;
+                this.update(cx, |this, cx| this.finish_action(&widget, &row, result, cx))
+                    .ok();
+            }
+        });
+        // A widget dropped meanwhile (its manifest changed) still has it sent.
+        match self.widgets.get_mut(&widget) {
+            Some(state) => {
+                state.actions.insert(row, task);
+            }
+            None => task.detach(),
+        }
+    }
+
+    /// Every held row action, sent at once as the app quits or Home goes;
+    /// the answers come back to no one.
+    fn post_held(&mut self, cx: &mut App) -> Vec<Task<Result<(), FetchError>>> {
+        let held = std::mem::take(&mut self.held);
+        self.sync_undo_elsewhere(cx);
+        let Some(post) = self.poster.clone() else {
+            return Vec::new();
+        };
+        held.into_iter()
+            .map(|held| post(held.request, cx))
+            .collect()
+    }
+
+    /// Tell text inputs when the newest held row action was taken, so Undo
+    /// in one with no newer edit comes on to Home ([`UndoElsewhere`]).
+    fn sync_undo_elsewhere(&self, cx: &mut App) {
+        cx.set_global(UndoElsewhere(self.held.last().map(|held| held.at)));
+    }
+
     fn finish_action(
         &mut self,
         widget: &str,
@@ -1349,13 +1515,18 @@ impl Home {
             Err(error) if already_gone(&error) && self.from_keron_sources(widget) => Ok(()),
             other => other,
         };
+        // A newer action on the row, still held, keeps the row as it shows it.
+        let held = self
+            .held
+            .iter()
+            .any(|held| held.widget == widget && held.row == row);
         let Some(state) = self.widgets.get_mut(widget) else {
             return;
         };
         state.actions.remove(row);
         match result {
             Ok(()) => {
-                if let Some(change) = state.overrides.get_mut(row) {
+                if !held && let Some(change) = state.overrides.get_mut(row) {
                     change.settled = true;
                     if change.change == RowChange::Hidden {
                         self.sent_notes
@@ -1366,8 +1537,10 @@ impl Home {
             }
             Err(FetchError::SignedOut) => self.signed_out(cx),
             Err(error) => {
-                state.overrides.remove(row);
-                state.leaving.remove(row);
+                if !held {
+                    state.overrides.remove(row);
+                    state.leaving.remove(row);
+                }
                 state.action_error = Some((error.to_string(), Instant::now()));
             }
         }
@@ -1811,6 +1984,16 @@ impl Home {
     fn cancel_drag(&mut self, cx: &mut Context<Self>) {
         if self.drag.take().is_some() {
             cx.notify();
+        }
+    }
+}
+
+/// Undo (⌘Z, or Edit › Undo) that reached the view Home sits in with no
+/// text input taking it: Home's newest held row action goes back.
+pub(crate) fn undo_listener(home: Entity<Home>) -> impl Fn(&Undo, &mut Window, &mut App) + 'static {
+    move |_, _, cx| {
+        if !home.update(cx, |home, cx| home.undo(cx)) {
+            cx.propagate();
         }
     }
 }

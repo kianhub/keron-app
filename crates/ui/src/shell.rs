@@ -13102,6 +13102,9 @@ impl Render for Shell {
             )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
             .on_key_down(cx.listener(Self::on_key_down))
+            // Undo that no text input took (one with no edit newer than
+            // Home's held row action lets it by): Home takes that action back.
+            .on_action(crate::home::undo_listener(self.home.clone()))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
             .on_drag_move(cx.listener(Self::on_files_panel_drag))
