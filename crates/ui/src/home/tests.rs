@@ -307,12 +307,12 @@ fn a_dropped_card_lands_between_the_right_widgets_when_some_are_hidden() {
     assert_eq!(drop_target(&all, &shown, "b", 0), 0);
 }
 
-fn place(x: f32, y: f32, width: f32, height: f32) -> Place {
+fn place(x: f32, y: f32, width: f32, stretch: impl Into<Option<f32>>) -> Place {
     Place {
         x,
         y,
         width,
-        height,
+        stretch: stretch.into(),
     }
 }
 
@@ -342,7 +342,7 @@ fn cards_fill_each_row_across_and_share_its_height() {
 #[test]
 fn a_card_that_does_not_fit_starts_the_next_row_and_fills_it() {
     // Three narrow cards fill the first row in thirds; the wide one can't
-    // join them and has the next row to itself.
+    // join them and has the next row to itself, at its own height.
     let (places, height) = pack_rows(&[1, 1, 1, 2], &[50.0, 90.0, 70.0, 40.0], 4, 1220.0, 10.0);
     assert_eq!(
         places,
@@ -350,7 +350,7 @@ fn a_card_that_does_not_fit_starts_the_next_row_and_fills_it() {
             place(0.0, 0.0, 400.0, 90.0),
             place(410.0, 0.0, 400.0, 90.0),
             place(820.0, 0.0, 400.0, 90.0),
-            place(0.0, 100.0, 1220.0, 40.0),
+            place(0.0, 100.0, 1220.0, None),
         ]
     );
     assert_eq!(height, 140.0);
@@ -358,7 +358,7 @@ fn a_card_that_does_not_fit_starts_the_next_row_and_fills_it() {
     let (places, height) = pack_rows(&[2, 1], &[50.0, 40.0], 1, 300.0, 10.0);
     assert_eq!(
         places,
-        vec![place(0.0, 0.0, 300.0, 50.0), place(0.0, 60.0, 300.0, 40.0)]
+        vec![place(0.0, 0.0, 300.0, None), place(0.0, 60.0, 300.0, None)]
     );
     assert_eq!(height, 100.0);
 }
@@ -941,7 +941,8 @@ fn loose_end(ix: usize) -> ListItem {
     }
 }
 
-fn set_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext) {
+/// Give the Loose ends card `count` rows, and draw the frame they arrive in.
+fn draw_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext) {
     home.update(cx, |home, cx| {
         home.widgets.get_mut("ends").unwrap().payload = Some(Payload {
             updated: None,
@@ -951,18 +952,26 @@ fn set_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext)
         cx.notify();
     });
     cx.run_until_parked();
+}
+
+/// Give the Loose ends card `count` rows, and let the grid settle.
+fn set_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext) {
+    draw_loose_ends(home, count, cx);
     settle(cx);
 }
 
-/// Deliver the frames Home asks for until it stops: the grid lays out from
-/// the last frame's card heights, and a test window has no frame loop.
-fn settle(cx: &mut VisualTestContext) {
+/// Deliver the frames Home asks for until it stops, and say whether it did
+/// within ten: the grid lays out from the last frame's card heights, and a
+/// test window has no frame loop. A card fading in asks for frames until it
+/// is in, which a test doesn't wait for.
+fn settle(cx: &mut VisualTestContext) -> bool {
     for _ in 0..10 {
         if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-            return;
+            return true;
         }
         cx.run_until_parked();
     }
+    false
 }
 
 /// Home drawn in a short window, signed in, with a Loose ends card of
@@ -1026,8 +1035,9 @@ fn loose_ends_draw_every_row_in_a_card_that_stops_growing(cx: &mut TestAppContex
     set_loose_ends(&home, 30, cx);
     assert_eq!(list_scroll(&home, cx).children_count(), 30);
     assert!((card_height(&home, cx) - tall).abs() < 0.5);
-    // A short list keeps its own height.
-    set_loose_ends(&home, 2, cx);
+    // A short list keeps its own height, from the frame it arrives in: a
+    // card alone in its row doesn't wait a frame to shrink.
+    draw_loose_ends(&home, 2, cx);
     assert!(card_height(&home, cx) < tall - 100.0);
 
     // Other lists still stop at their limit.
@@ -1108,7 +1118,8 @@ fn a_row_shrinks_with_its_tallest_card_after_stretching_the_others(cx: &mut Test
         home.set_frame(0.0, 700.0, 600.0, 1.0, cx);
     });
     cx.run_until_parked();
-    settle(cx);
+    // A stretched card's height doesn't feed back into its row's.
+    assert!(settle(cx), "the grid settles");
     let drawn = |home: &Entity<Home>, cx: &mut VisualTestContext| {
         home.read_with(cx, |home, _| {
             let bounds = home.card_bounds.borrow();
@@ -1129,6 +1140,7 @@ fn a_row_shrinks_with_its_tallest_card_after_stretching_the_others(cx: &mut Test
         home.cancel_drag(cx);
     });
     set_loose_ends(&home, 2, cx);
+    assert!(settle(cx), "and settles again");
     let (short, other) = drawn(&home, cx);
     assert!(short < tall - 100.0);
     assert!((other - short).abs() < 0.5, "and shrinks with it");

@@ -742,7 +742,7 @@ impl Home {
             let slot = &slots[ix];
             let place = places[position];
             let (x, y) = (place.x, place.y);
-            let mut card = self.render_card(theme, slot, ix, place.height, cx);
+            let mut card = self.render_card(theme, slot, ix, place.stretch, cx);
             // Just out of its chip: it fades in and rises into place.
             let fade_in = Home::swap_t(self.card_in.get(&slot.manifest.id));
             let mut rise = 0.0;
@@ -808,14 +808,14 @@ impl Home {
         Some(grid)
     }
 
-    /// A card at least `row_height` tall, its row's height: its content stays
-    /// at the top and its footer goes to the bottom.
+    /// A card, at least `stretch` tall when it shares a row: its content
+    /// stays at the top and its footer goes to the bottom.
     fn render_card(
         &self,
         theme: &Theme,
         slot: &Slot,
         index: usize,
-        row_height: f32,
+        stretch: Option<f32>,
         cx: &mut Context<Self>,
     ) -> Div {
         let manifest = &slot.manifest;
@@ -840,7 +840,7 @@ impl Home {
         let mut card = card_surface(theme)
             .id(SharedString::from(format!("home-card-{id}")))
             .min_w_0()
-            .min_h(px(row_height))
+            .when_some(stretch, |card, height| card.min_h(px(height)))
             .px(px(CARD_PAD_X))
             .pt(px(10.0))
             .pb(px(12.0))

@@ -1984,15 +1984,17 @@ struct Place {
     x: f32,
     y: f32,
     width: f32,
-    /// Its row's height: the tallest card's in it.
-    height: f32,
+    /// The height it stretches to, its row's tallest card's, when other
+    /// cards share its row. A card alone keeps its own height, so it shrinks
+    /// in the frame its content does.
+    stretch: Option<f32>,
 }
 
 /// Where each card goes in a grid `width` wide and `columns` across, and the
 /// grid's height. In order, each card takes its `widths` in columns in the
 /// current row, or starts the next row when they don't fit. A row's cards
-/// share its whole width by their columns, and all are as tall as its
-/// tallest (`heights`), so their edges line up.
+/// share its whole width by their columns, and stretch to its tallest
+/// (`heights`), so their edges line up.
 fn pack_rows(
     widths: &[u8],
     heights: &[f32],
@@ -2018,6 +2020,7 @@ fn pack_rows(
         }
         let room = width - gap * (end - start - 1) as f32;
         let height = heights[start..end].iter().copied().fold(0.0, f32::max);
+        let stretch = (end - start > 1).then_some(height);
         let mut x = 0.0;
         for &span in &spans[start..end] {
             let card_width = room * f32::from(span) / f32::from(filled);
@@ -2025,7 +2028,7 @@ fn pack_rows(
                 x,
                 y: top,
                 width: card_width,
-                height,
+                stretch,
             });
             x += card_width + gap;
         }
