@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, Entity, ScrollDelta, Task, TestAppContext, TouchPhase, VisualTestContext,
-    point, px, size,
+    AppContext as _, Entity, KeyUpEvent, Keystroke, ScrollDelta, Task, TestAppContext, TouchPhase,
+    VisualTestContext, point, px, size,
 };
 use keron_home::catalog::Catalog;
 use keron_home::{
@@ -1176,6 +1176,13 @@ fn a_note_typed_under_a_loose_end_goes_with_it_and_escape_drops_it(cx: &mut Test
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(!field_open(cx));
+
+    // Typing stops at what the door takes, so Enter always sends.
+    open("e2", NoteKind::Done, cx);
+    cx.simulate_input(&"x".repeat(loose_ends::COMMENT_LIMIT + 5));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!field_open(cx));
     assert_eq!(
         *posted.borrow(),
         [
@@ -1187,6 +1194,114 @@ fn a_note_typed_under_a_loose_end_goes_with_it_and_escape_drops_it(cx: &mut Test
                 "/memory/loose-ends/dismiss".to_string(),
                 serde_json::json!({"ids": ["e1"]})
             ),
+            (
+                "/memory/loose-ends/done".to_string(),
+                serde_json::json!({"ids": ["e2"], "comment": "x".repeat(loose_ends::COMMENT_LIMIT)})
+            ),
         ]
     );
+}
+
+#[gpui::test]
+fn a_loose_end_closes_with_a_note_from_the_keyboard(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(3, cx);
+    cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+    let posted = Rc::new(RefCell::new(Vec::new()));
+    home.update(cx, |home, _| {
+        home.poster = Some({
+            let posted = posted.clone();
+            Rc::new(move |request: loose_ends::Request, cx: &App| {
+                posted.borrow_mut().push((request.path, request.body));
+                cx.background_spawn(std::future::pending())
+            })
+        });
+    });
+    let (snooze, menu) = home.read_with(cx, |home, _| {
+        let rows = home.widgets["ends"].row_ui.borrow();
+        (rows["e0"].snooze.clone(), home.menu_focus.clone())
+    });
+    let focused = |handle: &FocusHandle, cx: &mut VisualTestContext| {
+        cx.update(|window, _| handle.is_focused(window))
+    };
+    let menu_open =
+        |cx: &mut VisualTestContext| home.read_with(cx, |home, _| home.snooze_menu.is_open());
+    // A key down and up: a button clicks on the up.
+    let press = |keys: &str, cx: &mut VisualTestContext| {
+        for key in keys.split(' ') {
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(KeyUpEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+            });
+            cx.run_until_parked();
+        }
+    };
+
+    // Tab past Customize and the first row's link to its Snooze.
+    cx.simulate_keystrokes("a");
+    for _ in 0..3 {
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+    }
+    assert!(focused(&snooze, cx));
+    // Enter opens the menu with focus in it; Escape closes it back to Snooze.
+    press("enter", cx);
+    assert!(menu_open(cx));
+    assert!(focused(&menu, cx));
+    press("escape", cx);
+    assert!(!menu_open(cx));
+    assert!(focused(&snooze, cx));
+
+    // Its last item is "Done with a note…": the field opens focused, and
+    // Enter sends what was typed with Done.
+    press("enter end enter", cx);
+    assert!(!menu_open(cx));
+    assert!(cx.debug_bounds("home-note-ends-e0").is_some());
+    cx.simulate_input("called her back");
+    press("enter", cx);
+    assert!(home.read_with(cx, |home, _| home.note.is_none()));
+    assert_eq!(
+        *posted.borrow(),
+        [(
+            "/memory/loose-ends/done".to_string(),
+            serde_json::json!({"ids": ["e0"], "comment": "called her back"})
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_note_the_door_turned_down_is_back_in_its_field(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(3, cx);
+    cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+    home.update(cx, |home, _| {
+        home.poster = Some(Rc::new(|_: loose_ends::Request, _: &App| {
+            Task::ready(Err(FetchError::Unsupported("door down".to_string())))
+        }));
+    });
+    let open = |cx: &mut VisualTestContext| {
+        home.update(cx, |home, cx| {
+            home.open_note("ends", "e1", NoteKind::Done, cx)
+        });
+        cx.run_until_parked();
+    };
+    open(cx);
+    cx.simulate_input("called her back");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    home.read_with(cx, |home, _| {
+        assert!(home.note.is_none());
+        assert!(!home.widgets["ends"].overrides.contains_key("e1"));
+        assert!(home.widgets["ends"].action_error.is_some());
+    });
+    // Opened again on that row, the field has the note to send again.
+    open(cx);
+    let typed = home.read_with(cx, |home, cx| {
+        home.note
+            .as_ref()
+            .unwrap()
+            .input
+            .read(cx)
+            .text()
+            .to_string()
+    });
+    assert_eq!(typed, "called her back");
 }

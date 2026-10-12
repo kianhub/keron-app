@@ -189,11 +189,14 @@ fn leave_duration() -> Duration {
 
 /// A row between frames: the focus around its action buttons (keyboard
 /// focus there shows them, like hover does), the row's own focus when it
-/// opens a link, and where a row with actions was last drawn, in window
-/// coordinates (a collapse starts from its height; tooltips sit above it).
+/// opens a link, its Snooze button's (focus comes back there from its
+/// menu and note field), and where a row with actions was last drawn, in
+/// window coordinates (a collapse starts from its height; tooltips sit
+/// above it).
 struct RowUi {
     focus: FocusHandle,
     link: FocusHandle,
+    snooze: FocusHandle,
     bounds: Option<Bounds<Pixels>>,
 }
 
@@ -202,6 +205,7 @@ impl RowUi {
         Self {
             focus: cx.focus_handle(),
             link: cx.focus_handle().tab_stop(true),
+            snooze: cx.focus_handle().tab_stop(true),
             bounds: None,
         }
     }
@@ -301,6 +305,7 @@ impl NoteKind {
 /// The one-line field open under a loose end after "Done with a note…" or
 /// "Not a thing, because…". Enter closes the row with what was typed, the
 /// door adding it to the memory's note; Escape or focus leaving drops it.
+/// Typing stops at what the door takes, so Enter always sends.
 struct RowNote {
     widget: String,
     row: String,
@@ -364,14 +369,6 @@ struct CardDrag {
     scroll_y: Pixels,
 }
 
-/// A cleaned note's length in characters, when it's longer than the door
-/// takes.
-fn comment_too_long(comment: Option<&str>) -> Option<usize> {
-    comment
-        .map(|comment| comment.chars().count())
-        .filter(|count| *count > loose_ends::COMMENT_LIMIT)
-}
-
 /// Home spreads past the composer, up to this wide.
 const MAX_WIDTH: f32 = 1320.0;
 /// Kept free on each side of Home in the conversation column.
@@ -409,8 +406,16 @@ pub struct Home {
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
+    /// The snooze menu's card, which has focus when the menu opened from
+    /// the keyboard, and the item its arrow keys are on then.
+    menu_focus: FocusHandle,
+    menu_active: Option<usize>,
     /// The note being written under a loose end, if one is open.
     note: Option<RowNote>,
+    /// Notes sent with a Done or "not a thing" the door hasn't taken yet,
+    /// by (widget id, row id): if it fails, the row's field opens with the
+    /// note again.
+    sent_notes: HashMap<(String, String), String>,
     /// The row whose action buttons have keyboard focus: (widget id, row
     /// id), read at the start of each render.
     keyboard_row: Option<(String, String)>,
@@ -551,7 +556,10 @@ impl Home {
             drag: None,
             card_bounds: Rc::default(),
             snooze_menu: Popup::default(),
+            menu_focus: cx.focus_handle(),
+            menu_active: None,
             note: None,
+            sent_notes: HashMap::new(),
             keyboard_row: None,
             keyboard_in: None,
             focus_seen: None,
@@ -1258,6 +1266,16 @@ impl Home {
                 request = request.seen([(row, at.as_str())]);
             }
         }
+        if let Action::Done {
+            comment: Some(comment),
+        }
+        | Action::Dismiss {
+            comment: Some(comment),
+        } = &action
+        {
+            self.sent_notes
+                .insert((widget.to_string(), row.to_string()), comment.clone());
+        }
         let send = post(request, cx);
         let task = cx.spawn({
             let (widget, row) = (widget.to_string(), row.to_string());
@@ -1339,6 +1357,10 @@ impl Home {
             Ok(()) => {
                 if let Some(change) = state.overrides.get_mut(row) {
                     change.settled = true;
+                    if change.change == RowChange::Hidden {
+                        self.sent_notes
+                            .remove(&(widget.to_string(), row.to_string()));
+                    }
                 }
                 self.retry(widget, cx);
             }
@@ -1412,12 +1434,25 @@ impl Home {
         }));
     }
 
-    pub(crate) fn open_snooze_menu(&mut self, widget: &str, row: &str, cx: &mut Context<Self>) {
+    /// Open a row's snooze menu. From the keyboard, its card takes focus
+    /// with the first item picked, for the arrow keys and Enter.
+    pub(crate) fn open_snooze_menu(
+        &mut self,
+        widget: &str,
+        row: &str,
+        from_keyboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.snooze_menu.take_press_was_open() {
             self.close_snooze_menu(cx);
             return;
         }
         self.snooze_menu.open((widget.to_string(), row.to_string()));
+        self.menu_active = from_keyboard.then_some(0);
+        if from_keyboard {
+            window.focus(&self.menu_focus, cx);
+        }
         cx.notify();
     }
 
@@ -1428,17 +1463,37 @@ impl Home {
         cx.notify();
     }
 
-    /// Open the note field under a loose end, focused from the next frame.
+    /// Give focus back to a row's Snooze button.
+    fn focus_snooze(&self, widget: &str, row: &str, window: &mut Window, cx: &mut App) {
+        let snooze = self.widgets.get(widget).and_then(|state| {
+            let rows = state.row_ui.borrow();
+            rows.get(row).map(|ui| ui.snooze.clone())
+        });
+        if let Some(snooze) = snooze {
+            window.focus(&snooze, cx);
+        }
+    }
+
+    /// Open the note field under a loose end, focused from the next frame,
+    /// with the note the door last failed to take on that row, if any.
     fn open_note(&mut self, widget: &str, row: &str, kind: NoteKind, cx: &mut Context<Self>) {
+        let unsent = self
+            .sent_notes
+            .remove(&(widget.to_string(), row.to_string()));
         let input = cx.new(|cx| {
-            ComposerInput::new(kind.placeholder(), cx)
+            let mut input = ComposerInput::new(kind.placeholder(), cx)
                 .with_single_line()
+                .with_max_chars(loose_ends::COMMENT_LIMIT)
                 .with_text_metrics(12.5, 16.0)
-                .with_accessibility_role(Role::TextInput)
+                .with_accessibility_role(Role::TextInput);
+            if let Some(unsent) = unsent {
+                input.set_text(unsent, cx);
+            }
+            input
         });
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.send_note(cx),
-            // Its length shows once it's past what the door takes.
+            // Its length shows as it nears what the door takes.
             ComposerInputEvent::Edited => cx.notify(),
             _ => {}
         });
@@ -1475,19 +1530,12 @@ impl Home {
     }
 
     /// Enter in the note field: the row closes as Done or "not a thing",
-    /// with the note, or without one when the field is empty. A note longer
-    /// than the door takes stays open, saying how long it is.
+    /// with the note, or without one when the field is empty.
     fn send_note(&mut self, cx: &mut Context<Self>) {
-        let Some(note) = self.note.as_ref() else {
-            return;
-        };
-        let comment = loose_ends::clean_comment(note.input.read(cx).text());
-        if comment_too_long(comment.as_deref()).is_some() {
-            return;
-        }
         let Some(note) = self.note.take() else {
             return;
         };
+        let comment = loose_ends::clean_comment(note.input.read(cx).text());
         self.act(&note.widget, &note.row, note.kind.action(comment), cx);
     }
 
@@ -1498,18 +1546,12 @@ impl Home {
     }
 
     /// Escape in the note field: drop it, and give focus back to the row's
-    /// actions, where Tab reaches its Snooze again.
+    /// Snooze, whose menu opened it.
     fn escape_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(note) = self.note.take() else {
             return;
         };
-        let actions = self.widgets.get(&note.widget).and_then(|state| {
-            let rows = state.row_ui.borrow();
-            rows.get(&note.row).map(|ui| ui.focus.clone())
-        });
-        if let Some(actions) = actions {
-            window.focus(&actions, cx);
-        }
+        self.focus_snooze(&note.widget, &note.row, window, cx);
         cx.notify();
     }
 

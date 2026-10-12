@@ -1966,6 +1966,8 @@ pub struct ComposerInput {
     text_size: f32,
     configured_line_height: f32,
     single_line: bool,
+    /// Typing and pasting stop at this many characters.
+    max_chars: Option<usize>,
     scroll_left: f32,
     // -- measured state (written during layout/paint) --
     last_lines: Vec<WrappedLine>,
@@ -2084,6 +2086,7 @@ impl ComposerInput {
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
             single_line: false,
+            max_chars: None,
             scroll_left: 0.0,
             last_lines: Vec::new(),
             line_starts: vec![0],
@@ -2137,6 +2140,13 @@ impl ComposerInput {
     /// Keep compact fields on one row and reveal the caret horizontally.
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// Stop typing and pasting at `max` characters, like a web field's
+    /// `maxlength`: what doesn't fit is left out.
+    pub fn with_max_chars(mut self, max: usize) -> Self {
+        self.max_chars = Some(max);
         self
     }
 
@@ -4630,6 +4640,22 @@ impl EntityInputHandler for ComposerInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.projection.normalize_range(range);
+        let new_text = match self.max_chars {
+            Some(max) => {
+                let kept = self.content[..range.start].chars().count()
+                    + self.content[range.end..].chars().count();
+                let room = max.saturating_sub(kept);
+                match new_text.char_indices().nth(room) {
+                    // Nothing fits, and nothing is replaced.
+                    Some(_) if room == 0 && range.is_empty() && self.marked_range.is_none() => {
+                        return;
+                    }
+                    Some((at, _)) => &new_text[..at],
+                    None => new_text,
+                }
+            }
+            None => new_text,
+        };
         self.invalidate_mention_tooltip();
         // An IME commit is the tail of a composition whose pre-composition
         // snapshot was already taken (`replace_and_mark_text_in_range`);
