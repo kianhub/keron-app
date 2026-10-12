@@ -401,9 +401,12 @@ pub struct Home {
     chip_in: HashMap<String, Instant>,
     card_in: HashMap<String, Instant>,
     drag: Option<CardDrag>,
-    /// Each shown card's bounds from the last frame: their heights lay out
-    /// the grid, and Customize's drag hit-tests them.
+    /// Each shown card's bounds from the last frame, as drawn: Customize's
+    /// drag hit-tests them.
     card_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Each shown card's height from the last frame, without its row's
+    /// stretch: these lay out the grid, so a row shrinks with its tallest card.
+    card_heights: Rc<RefCell<HashMap<String, f32>>>,
     /// The open snooze menu: (widget id, row id).
     snooze_menu: Popup<(String, String)>,
     /// The snooze menu's card, which has focus when the menu opened from
@@ -555,6 +558,7 @@ impl Home {
             card_in: HashMap::new(),
             drag: None,
             card_bounds: Rc::default(),
+            card_heights: Rc::default(),
             snooze_menu: Popup::default(),
             menu_focus: cx.focus_handle(),
             menu_active: None,
@@ -1974,25 +1978,64 @@ fn drop_target(all: &[&str], shown: &[&str], id: &str, over: usize) -> usize {
     }
 }
 
-/// Where each card goes in `columns` columns, as `(column, top)`, and the
-/// grid's height: in order, each card goes into the shortest column (a wide
-/// card into the lowest pair side by side, the leftmost on a tie), so a short
-/// card never leaves a gap under it the height of a tall neighbour.
-fn masonry(widths: &[u8], heights: &[f32], columns: u16, gap: f32) -> (Vec<(u16, f32)>, f32) {
-    let columns = usize::from(columns.max(1));
-    let mut stacks = vec![0.0_f32; columns];
-    let mut places = Vec::with_capacity(widths.len());
-    for (&width, &height) in widths.iter().zip(heights) {
-        let span = usize::from(width).clamp(1, columns);
-        let (column, top) = (0..=columns - span)
-            .map(|c| (c, stacks[c..c + span].iter().copied().fold(0.0, f32::max)))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .unwrap_or((0, 0.0));
-        stacks[column..column + span].fill(top + height + gap);
-        places.push((column as u16, top));
+/// A card's place in Home's grid, in pixels from the grid's top left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    x: f32,
+    y: f32,
+    width: f32,
+    /// The height it stretches to, its row's tallest card's, when other
+    /// cards share its row. A card alone keeps its own height, so it shrinks
+    /// in the frame its content does.
+    stretch: Option<f32>,
+}
+
+/// Where each card goes in a grid `width` wide and `columns` across, and the
+/// grid's height. In order, each card takes its `widths` in columns in the
+/// current row, or starts the next row when they don't fit. A row's cards
+/// share its whole width by their columns, and stretch to its tallest
+/// (`heights`), so their edges line up.
+fn pack_rows(
+    widths: &[u8],
+    heights: &[f32],
+    columns: u16,
+    width: f32,
+    gap: f32,
+) -> (Vec<Place>, f32) {
+    let columns = columns.max(1);
+    let spans: Vec<u16> = widths
+        .iter()
+        .map(|&span| u16::from(span).clamp(1, columns))
+        .collect();
+    let mut places = Vec::with_capacity(spans.len());
+    let mut top = 0.0;
+    let mut start = 0;
+    while start < spans.len() {
+        // The row takes cards while their columns fit; the first always does.
+        let mut end = start;
+        let mut filled = 0;
+        while end < spans.len() && filled + spans[end] <= columns {
+            filled += spans[end];
+            end += 1;
+        }
+        let room = width - gap * (end - start - 1) as f32;
+        let height = heights[start..end].iter().copied().fold(0.0, f32::max);
+        let stretch = (end - start > 1).then_some(height);
+        let mut x = 0.0;
+        for &span in &spans[start..end] {
+            let card_width = room * f32::from(span) / f32::from(filled);
+            places.push(Place {
+                x,
+                y: top,
+                width: card_width,
+                stretch,
+            });
+            x += card_width + gap;
+        }
+        top += height + gap;
+        start = end;
     }
-    let bottom = stacks.iter().copied().fold(0.0, f32::max);
-    (places, (bottom - gap).max(0.0))
+    (places, (top - gap).max(0.0))
 }
 
 /// The login shell's PATH joined after the app's own, as the harnesses
