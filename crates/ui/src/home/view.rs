@@ -22,7 +22,7 @@ use zeron_theme::AccentPreset;
 use super::{
     Body, CardDragPayload, Drawn, Home, Leaving, ListItem, Manifest, Mode, NoteKind, Payload,
     RowChange, RowNote, RowUi, SignIn, Slot, SourceSpec, WheelTarget, WidgetState, drawn_limit,
-    drawn_list_rows, is_door, limit, masonry, scrolls, visible_list_rows,
+    drawn_list_rows, is_door, limit, pack_rows, scrolls, visible_list_rows,
 };
 use crate::icons::{self, icon};
 use crate::motion::{self, MotionSpec};
@@ -695,7 +695,9 @@ impl Home {
                 1
             }
         };
-        let widths: Vec<u8> = order.iter().map(|&ix| span_of(ix)).collect();
+        let widths_of =
+            |order: &[usize]| -> Vec<u8> { order.iter().map(|&ix| span_of(ix)).collect() };
+        let widths = widths_of(&order);
         // Fewer cards than columns: the grid narrows to the columns they
         // fill, at the same column width, and centers under the composer.
         let column_width = (width - GRID_GAP * f32::from(columns - 1)) / f32::from(columns);
@@ -704,44 +706,43 @@ impl Home {
             .map(|&w| u16::from(w))
             .sum::<u16>()
             .clamp(1, columns);
-        let columns = used;
         let grid_width = column_width * f32::from(used) + GRID_GAP * f32::from(used - 1);
-        // Cards stack in columns by their heights from the last frame; one
-        // not measured yet counts as CARD_ESTIMATE until it is (its canvas
-        // asks for another frame when its height changes).
+        // Cards fill rows by their heights from the last frame; one not
+        // measured yet counts as CARD_ESTIMATE until it is (its canvas asks
+        // for another frame when its height changes).
         let (places, height, before) = {
-            let measured = self.card_bounds.borrow();
+            let measured = self.card_heights.borrow();
             let heights = |order: &[usize]| -> Vec<f32> {
                 order
                     .iter()
                     .map(|&ix| {
                         measured
                             .get(&slots[ix].manifest.id)
-                            .map_or(CARD_ESTIMATE, |bounds| f32::from(bounds.size.height))
+                            .copied()
+                            .unwrap_or(CARD_ESTIMATE)
                     })
                     .collect()
             };
-            let widths_of =
-                |order: &[usize]| -> Vec<u8> { order.iter().map(|&ix| span_of(ix)).collect() };
-            let (places, height) = masonry(&widths, &heights(&order), columns, GRID_GAP);
-            let (before, _) = masonry(
-                &widths_of(&previous),
-                &heights(&previous),
-                columns,
-                GRID_GAP,
-            );
+            let pack = |order: &[usize]| {
+                pack_rows(
+                    &widths_of(order),
+                    &heights(order),
+                    used,
+                    grid_width,
+                    GRID_GAP,
+                )
+            };
+            let (places, height) = pack(&order);
+            let (before, _) = pack(&previous);
             (places, height, before)
         };
-        let at = |column: u16, top: f32| (f32::from(column) * (column_width + GRID_GAP), top);
         let reduced = motion::reduced_motion(cx);
         let mut cards = Vec::with_capacity(count);
         for (position, &ix) in order.iter().enumerate() {
             let slot = &slots[ix];
-            let (column, top) = places[position];
-            let (x, y) = at(column, top);
-            let span = f32::from(widths[position]);
-            let card_width = column_width * span + GRID_GAP * (span - 1.0);
-            let mut card = self.render_card(theme, slot, ix, cx);
+            let place = places[position];
+            let (x, y) = (place.x, place.y);
+            let mut card = self.render_card(theme, slot, ix, place.height, cx);
             // Just out of its chip: it fades in and rises into place.
             let fade_in = Home::swap_t(self.card_in.get(&slot.manifest.id));
             let mut rise = 0.0;
@@ -749,11 +750,11 @@ impl Home {
                 card = card.opacity(t);
                 rise = CARD_RISE * (1.0 - t);
             }
-            // A card that moved while dragging slides from where it was.
+            // A card that moved while dragging slides from where it was; a
+            // new width in its new row snaps.
             let slide = self.drag.as_ref().and_then(|drag| {
                 let was = previous.iter().position(|&other| other == ix)?;
-                let (from_x, from_y) = at(before[was].0, before[was].1);
-                let (dx, dy) = (from_x - x, from_y - y);
+                let (dx, dy) = (before[was].x - x, before[was].y - y);
                 (dx.abs() > 0.5 || dy.abs() > 0.5).then_some((dx, dy, drag.epoch))
             });
             // The backdrop blur ignores opacity, so it fades in with the card.
@@ -762,7 +763,7 @@ impl Home {
                 .absolute()
                 .left(px(x))
                 .top(px(y + rise))
-                .w(px(card_width))
+                .w(px(place.width))
                 .child(crate::frost::frosted(CARD_RADIUS, blur, card));
             cards.push(match slide {
                 Some((dx, dy, epoch)) if !reduced => placed
@@ -807,13 +808,16 @@ impl Home {
         Some(grid)
     }
 
+    /// A card at least `row_height` tall, its row's height: its content stays
+    /// at the top and its footer goes to the bottom.
     fn render_card(
         &self,
         theme: &Theme,
         slot: &Slot,
         index: usize,
+        row_height: f32,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Div {
         let manifest = &slot.manifest;
         let id = manifest.id.clone();
         let state = self.widgets.get(&id);
@@ -821,9 +825,22 @@ impl Home {
         let header = self.render_header(theme, manifest, state);
         let body = self.render_body(theme, manifest, state, cx);
         let footer = render_footer(theme, manifest, state);
+        // The room the row's stretch leaves under the body.
+        let slack = Rc::new(Cell::new(Pixels::ZERO));
+        let body = div().flex_grow_1().flex().flex_col().child(body).child(
+            gpui::canvas(
+                {
+                    let slack = slack.clone();
+                    move |room, _, _| slack.set(room.size.height)
+                },
+                |_, _, _, _| {},
+            )
+            .flex_grow_1(),
+        );
         let mut card = card_surface(theme)
             .id(SharedString::from(format!("home-card-{id}")))
             .min_w_0()
+            .min_h(px(row_height))
             .px(px(CARD_PAD_X))
             .pt(px(10.0))
             .pb(px(12.0))
@@ -834,24 +851,7 @@ impl Home {
             .child(header)
             .child(body)
             .children(footer);
-        // Its size, for the grid's next frame; a new height asks for one.
-        let bounds = self.card_bounds.clone();
         let key = id.clone();
-        card = card.child(
-            gpui::canvas(
-                move |measured, window, _| {
-                    let old = bounds.borrow_mut().insert(key, measured);
-                    if old
-                        .is_none_or(|old| (old.size.height - measured.size.height).abs() > px(0.5))
-                    {
-                        window.request_animation_frame();
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0(),
-        );
         if self.customize {
             card = card.cursor(CursorStyle::OpenHand).on_drag(
                 CardDragPayload { id, from: index },
@@ -861,7 +861,26 @@ impl Home {
                 },
             );
         }
-        card
+        // Its bounds as drawn, and its height without the stretch for the
+        // grid's next frame; a new height asks for one. Both are taken around
+        // the card, as a canvas inside it would leave out its border.
+        let bounds = self.card_bounds.clone();
+        let heights = self.card_heights.clone();
+        div().relative().child(card).child(
+            gpui::canvas(
+                move |drawn, window, _| {
+                    let height = f32::from(drawn.size.height - slack.get());
+                    bounds.borrow_mut().insert(key.clone(), drawn);
+                    let old = heights.borrow_mut().insert(key, height);
+                    if old.is_none_or(|old| (old - height).abs() > 0.5) {
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
     }
 
     fn render_header(

@@ -221,6 +221,10 @@ shown = false
 - The order of the `[[widget]]` tables is the order on Home.
 - `shown` defaults to `true`.
 - `width` is 1 or 2 columns. When it's missing, the manifest's `wide` decides.
+- Cards fill rows in this order. A card that doesn't fit beside the ones
+  before it starts the next row. The cards in a row share its whole width (a
+  two-column card gets twice a one-column card's share) and are all as tall
+  as its tallest.
 - A widget that isn't listed yet (one you just added) shows at the end.
 - An entry whose manifest is gone is kept, so the widget gets its place back
   if you add it again.

@@ -307,16 +307,59 @@ fn a_dropped_card_lands_between_the_right_widgets_when_some_are_hidden() {
     assert_eq!(drop_target(&all, &shown, "b", 0), 0);
 }
 
+fn place(x: f32, y: f32, width: f32, height: f32) -> Place {
+    Place {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 #[test]
-fn short_cards_leave_no_gap_under_a_tall_neighbour() {
-    // Loose ends and Slack (short), Memory (wide and tall), then Usage in four
-    // columns: Usage goes under the shorter of the two, not below Memory.
-    let (places, height) = masonry(&[1, 1, 2, 1], &[110.0, 70.0, 380.0, 220.0], 4, 10.0);
-    assert_eq!(places, vec![(0, 0.0), (1, 0.0), (2, 0.0), (1, 80.0)]);
-    assert_eq!(height, 380.0);
+fn cards_fill_each_row_across_and_share_its_height() {
+    // Loose ends (wide), Today, Memory (wide) and Usage in four columns:
+    // two rows split two thirds and one third, each as tall as its tallest.
+    let (places, height) = pack_rows(
+        &[2, 1, 2, 1],
+        &[300.0, 180.0, 120.0, 260.0],
+        4,
+        1210.0,
+        10.0,
+    );
+    assert_eq!(
+        places,
+        vec![
+            place(0.0, 0.0, 800.0, 300.0),
+            place(810.0, 0.0, 400.0, 300.0),
+            place(0.0, 310.0, 800.0, 260.0),
+            place(810.0, 310.0, 400.0, 260.0),
+        ]
+    );
+    assert_eq!(height, 570.0);
+}
+
+#[test]
+fn a_card_that_does_not_fit_starts_the_next_row_and_fills_it() {
+    // Three narrow cards fill the first row in thirds; the wide one can't
+    // join them and has the next row to itself.
+    let (places, height) = pack_rows(&[1, 1, 1, 2], &[50.0, 90.0, 70.0, 40.0], 4, 1220.0, 10.0);
+    assert_eq!(
+        places,
+        vec![
+            place(0.0, 0.0, 400.0, 90.0),
+            place(410.0, 0.0, 400.0, 90.0),
+            place(820.0, 0.0, 400.0, 90.0),
+            place(0.0, 100.0, 1220.0, 40.0),
+        ]
+    );
+    assert_eq!(height, 140.0);
     // One column: a plain stack, wide cards included.
-    let (places, height) = masonry(&[2, 1], &[50.0, 40.0], 1, 10.0);
-    assert_eq!(places, vec![(0, 0.0), (0, 60.0)]);
+    let (places, height) = pack_rows(&[2, 1], &[50.0, 40.0], 1, 300.0, 10.0);
+    assert_eq!(
+        places,
+        vec![place(0.0, 0.0, 300.0, 50.0), place(0.0, 60.0, 300.0, 40.0)]
+    );
     assert_eq!(height, 100.0);
 }
 
@@ -908,6 +951,18 @@ fn set_loose_ends(home: &Entity<Home>, count: usize, cx: &mut VisualTestContext)
         cx.notify();
     });
     cx.run_until_parked();
+    settle(cx);
+}
+
+/// Deliver the frames Home asks for until it stops: the grid lays out from
+/// the last frame's card heights, and a test window has no frame loop.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..10 {
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            return;
+        }
+        cx.run_until_parked();
+    }
 }
 
 /// Home drawn in a short window, signed in, with a Loose ends card of
@@ -1036,6 +1091,47 @@ fn the_memory_timeline_scrolls_through_every_note_too(cx: &mut TestAppContext) {
         f32::from(home.card_bounds.borrow()["mem"].size.height)
     });
     assert!((taller - height).abs() < 0.5, "the card stops growing");
+}
+
+#[gpui::test]
+fn a_row_shrinks_with_its_tallest_card_after_stretching_the_others(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = loose_ends_home(13, cx);
+    home.update(cx, |home, cx| {
+        let mut ends = manifest("ends", "Loose ends");
+        ends.source = loose_ends::loose_ends();
+        // Added signed out, as the loose ends card was, so nothing fetches.
+        let signed_in = std::mem::replace(&mut home.sign_in, SignIn::NoDoor);
+        home.apply_catalog(catalog(vec![ends, manifest("other", "Other")]), cx);
+        home.sign_in = signed_in;
+        home.widgets.entry("other".to_string()).or_default().payload = Some(rows(&["a"]));
+        // Wide enough for two columns: both cards in one row.
+        home.set_frame(0.0, 700.0, 600.0, 1.0, cx);
+    });
+    cx.run_until_parked();
+    settle(cx);
+    let drawn = |home: &Entity<Home>, cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| {
+            let bounds = home.card_bounds.borrow();
+            let height = |id: &str| f32::from(bounds[id].size.height);
+            (height("ends"), height("other"))
+        })
+    };
+    let (tall, other) = drawn(&home, cx);
+    assert!(
+        (other - tall).abs() < 0.5,
+        "the short card stretches to its row"
+    );
+    // A card dragged over the stretched part of the short one lands there.
+    home.update(cx, |home, cx| {
+        let corner = home.card_bounds.borrow()["other"].bottom_left();
+        home.drag_over("ends", 0, corner + point(px(20.0), px(-10.0)), cx);
+        assert_eq!(home.drag.as_ref().map(|drag| drag.over), Some(1));
+        home.cancel_drag(cx);
+    });
+    set_loose_ends(&home, 2, cx);
+    let (short, other) = drawn(&home, cx);
+    assert!(short < tall - 100.0);
+    assert!((other - short).abs() < 0.5, "and shrinks with it");
 }
 
 #[gpui::test]
