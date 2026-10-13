@@ -10630,6 +10630,9 @@ impl Shell {
         let show_home = (has_spaces || no_project)
             && home_opacity > 0.001
             && (!has_selection || dock_frame.active);
+        // Home's dashboard page has the column to itself, without the composer.
+        let show_composer = (has_spaces || no_project || has_appshots)
+            && !(show_home && self.home.read(cx).dashboard_open());
         if show_home {
             // Under the pill sits the new-chat footer row (checkout and branch
             // pickers): one column gap, then SESSION_FOOTER_HEIGHT. Home starts below it.
@@ -10801,7 +10804,7 @@ impl Shell {
                     )
                     .children(self.render_voice_composer_orb(composer_width, cx))
                     .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .when(show_composer, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(
                             crate::composer_dock::docked_composer(

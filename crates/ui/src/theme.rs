@@ -1625,7 +1625,35 @@ impl Theme {
     pub fn wash(&self, alpha: f32) -> Hsla {
         wash_for(self.appearance, alpha)
     }
+
+    /// A chart series' color: one of [`CHART_SLOTS`] categorical hues, in
+    /// a fixed order, stepped for this appearance's surface. Charts give a
+    /// series its slot by what it is, never by rank, so a series keeps its
+    /// color whatever else is drawn beside it. These are the dataviz
+    /// skill's reference palette, checked with its validator against white
+    /// and `#121212`: neighbouring slots stay apart for colorblind eyes
+    /// (OKLab ΔE ≥ 8.4) and for everyone (≥ 19.3), and every dark step
+    /// clears 3:1. On white, aqua, yellow and magenta fall under 3:1, so a
+    /// chart names its series in a legend or a tooltip, never by color
+    /// alone.
+    pub fn chart_series(&self, slot: usize) -> Hsla {
+        const LIGHT: [u32; CHART_SLOTS] = [
+            0x2a78d6, 0xeb6834, 0x1baf7a, 0xeda100, 0xe87ba4, 0x008300, 0x4a3aa7, 0xe34948,
+        ];
+        const DARK: [u32; CHART_SLOTS] = [
+            0x3987e5, 0xd95926, 0x199e70, 0xc98500, 0xd55181, 0x008300, 0x9085e9, 0xe66767,
+        ];
+        let steps = match self.appearance {
+            Appearance::Dark => DARK,
+            Appearance::Light => LIGHT,
+        };
+        gpui::rgb(steps[slot % CHART_SLOTS]).into()
+    }
 }
+
+/// How many series colors [`Theme::chart_series`] has: blue, orange, aqua,
+/// yellow, magenta, green, violet, red.
+pub const CHART_SLOTS: usize = 8;
 
 fn scrollbar_thumb_colors(theme: &Theme) -> (Hsla, Hsla, Hsla) {
     (
@@ -2023,6 +2051,51 @@ mod tests {
             (c[1] * 255.0).round() as u8,
             (c[2] * 255.0).round() as u8,
         ]
+    }
+
+    /// OKLab, ×100 so a just-noticeable step is about 1.
+    fn oklab(color: Hsla) -> [f32; 3] {
+        let lin = |c: f32| {
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [r, g, b] = hsl_to_rgb(color.h, color.s, color.l).map(lin);
+        let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_99 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+        [
+            100.0 * (0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s),
+            100.0 * (1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s),
+            100.0 * (0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s),
+        ]
+    }
+
+    #[test]
+    fn chart_series_neighbours_stay_apart_and_dark_steps_clear_3_to_1() {
+        for theme in [Theme::light(), Theme::dark()] {
+            let colors: Vec<Hsla> = (0..CHART_SLOTS)
+                .map(|slot| theme.chart_series(slot))
+                .collect();
+            // A stack of a whole set (every job, every app) is in slot
+            // order; one missing some series isn't, and leans on its legend.
+            for pair in colors.windows(2) {
+                let ([l1, a1, b1], [l2, a2, b2]) = (oklab(pair[0]), oklab(pair[1]));
+                let apart = ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
+                assert!(
+                    apart >= 15.0,
+                    "{:?}: {pair:?} are {apart:.1} apart",
+                    theme.appearance
+                );
+            }
+            if theme.appearance.is_dark() {
+                for color in &colors {
+                    assert!(contrast_ratio(*color, theme.bg) >= 3.0, "{color:?}");
+                }
+            }
+        }
     }
 
     #[test]

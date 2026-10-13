@@ -16,7 +16,7 @@ use gpui::{
 };
 use keron_home::kinds::{is_openable, parse_chat_link, parse_date, parse_time, short_age};
 use keron_home::loose_ends::{self, Action, COMMENT_LIMIT, snooze_choices};
-use keron_home::{AgendaItem, DeviceItem, Heat, Kind, Stat, TimelineItem};
+use keron_home::{AgendaItem, Dashboard, DeviceItem, Heat, Kind, Stat, TimelineItem};
 use zeron_theme::AccentPreset;
 
 use super::{
@@ -31,7 +31,7 @@ use crate::settings::widgets::{self, ActionTone};
 use crate::theme::Theme;
 use crate::typography::ui_rems;
 
-const CARD_RADIUS: f32 = 12.0;
+pub(super) const CARD_RADIUS: f32 = 12.0;
 /// A card's inner side margin.
 const CARD_PAD_X: f32 = 12.0;
 /// One more column each time every card can get at least this much.
@@ -105,6 +105,21 @@ impl Render for Home {
             window.request_animation_frame();
         }
         let theme = Theme::of(cx).clone();
+        // The dashboard page takes the grid's place while its widget shows.
+        let page = self.page.as_ref().and_then(|page| {
+            self.arranged().into_iter().find(|slot| {
+                slot.shown
+                    && slot.manifest.id == page.widget
+                    && slot.manifest.kind == Kind::Dashboard
+            })
+        });
+        if page.is_none() {
+            // Its widget went (its manifest deleted or hidden): back to the grid.
+            self.close_dashboard(window, cx);
+        }
+        if let Some(slot) = page {
+            return self.render_page(&theme, &slot, width, cx);
+        }
         let columns = (((width + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)).floor() as u16)
             .clamp(1, MAX_COLUMNS);
         // The toolbar ends where the composer above it ends.
@@ -163,6 +178,46 @@ impl Render for Home {
 }
 
 impl Home {
+    /// The dashboard page in the grid's place, from under the titlebar (the
+    /// shell hides the composer meanwhile), scrolling on its own.
+    fn render_page(
+        &self,
+        theme: &Theme,
+        slot: &Slot,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page = self.render_dashboard_page(theme, slot, width, cx);
+        div()
+            .key_context("Home")
+            .relative()
+            .size_full()
+            .opacity(self.frame.opacity)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(super::dashboard::PAGE_TOP))
+                    .left_0()
+                    .right_0()
+                    .bottom(px(BOTTOM_CLEARANCE))
+                    .child(
+                        crate::edge_fade::edge_faded(
+                            FADE_BAND,
+                            true,
+                            true,
+                            div()
+                                .id("home-dashboard-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.page_scroll)
+                                .child(page),
+                        )
+                        .fade_overflow_y(&self.page_scroll),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // ---- toolbar ----
 
     fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -299,7 +354,11 @@ impl Home {
 
     /// The one place to connect the door, shown while a shown widget needs
     /// it and it isn't connected.
-    fn render_sign_in(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_sign_in(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let needs_door = self
             .arranged()
             .iter()
@@ -824,7 +883,7 @@ impl Home {
         let id = manifest.id.clone();
         let state = self.widgets.get(&id);
         let dragging = self.drag.as_ref().is_some_and(|drag| drag.id == id);
-        let header = self.render_header(theme, manifest, state);
+        let header = self.render_header(theme, manifest, state, cx);
         let body = self.render_body(theme, manifest, state, cx);
         // A held row action takes the footer's place while it can be undone.
         let footer = self
@@ -865,6 +924,11 @@ impl Home {
                     cx.new(|_| CardGhost)
                 },
             );
+        } else if dashboard_of(state).is_some() {
+            // Out of Customize, where a press drags, a click opens the page.
+            card = card.cursor_pointer().on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| this.open_dashboard(&id, window, cx),
+            ));
         }
         // Its bounds as drawn, and its height without the stretch for the
         // grid's next frame; a new height asks for one. Both are taken around
@@ -893,8 +957,14 @@ impl Home {
         theme: &Theme,
         manifest: &Manifest,
         state: Option<&WidgetState>,
+        cx: &mut Context<Self>,
     ) -> Div {
         let (count, hot) = card_count(state);
+        // A dashboard names the period its card shows, and opens its page.
+        let dashboard = dashboard_of(state);
+        let period = dashboard
+            .and_then(|dashboard| dashboard.period_or_first(dashboard.card.period))
+            .map(|(_, data)| data.label.to_lowercase());
         div()
             .flex()
             .items_center()
@@ -916,7 +986,9 @@ impl Home {
                     .child(SharedString::from(manifest.title.clone())),
             )
             .children(count.map(|count| {
+                let id = manifest.id.clone();
                 let chip = div()
+                    .debug_selector(move || format!("home-count-{id}"))
                     .flex_none()
                     .text_size(ui_rems(11.0))
                     .font_weight(FontWeight::MEDIUM);
@@ -931,7 +1003,17 @@ impl Home {
                 };
                 chip.child(SharedString::from(count.to_string()))
             }))
+            .children(period.map(|period| {
+                div()
+                    .flex_none()
+                    .text_size(ui_rems(12.5))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("· {period}")))
+            }))
             .child(div().flex_1())
+            .when(dashboard.is_some(), |el| {
+                el.child(self.open_dashboard_button(theme, manifest, cx))
+            })
             .when(self.customize, |el| {
                 el.child(
                     icon(icons::DRAG_HANDLE)
@@ -941,7 +1023,7 @@ impl Home {
             })
     }
 
-    fn render_body(
+    pub(super) fn render_body(
         &self,
         theme: &Theme,
         manifest: &Manifest,
@@ -1035,7 +1117,7 @@ impl Home {
     }
 
     /// A compact warning with Retry; rows already shown stay under it.
-    fn render_error(
+    pub(super) fn render_error(
         &self,
         theme: &Theme,
         manifest: &Manifest,
@@ -1069,12 +1151,16 @@ impl Home {
             )
             .when(can_retry, |el| {
                 let id = manifest.id.clone();
+                let key = format!("home-retry-{id}");
                 el.child(
-                    small_button(theme, format!("home-retry-{id}"))
+                    small_button(theme, key.clone())
+                        .debug_selector(move || key)
                         .aria_label(format!("Retry {}", manifest.title))
-                        .on_click(
-                            cx.listener(move |this, _: &ClickEvent, _, cx| this.retry(&id, cx)),
-                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            // Not a click on the card: a dashboard's would open.
+                            cx.stop_propagation();
+                            this.retry(&id, cx)
+                        }))
                         .child("Retry"),
                 )
             })
@@ -1109,6 +1195,9 @@ impl Home {
             Body::Agenda(items) => self.render_agenda(theme, manifest, items, cx),
             Body::Devices(items) => render_devices(theme, manifest, items),
             Body::Stat(stat) => render_stat(theme, manifest, stat),
+            Body::Dashboard(dashboard) => {
+                self.render_dashboard_card(theme, manifest, payload, dashboard, cx)
+            }
         }
     }
 
@@ -2163,7 +2252,11 @@ fn render_footer(
     state: Option<&WidgetState>,
 ) -> Option<AnyElement> {
     let payload = state?.payload.as_ref()?;
-    let problems = payload.errors.len();
+    // A dashboard says its problems in its body, quietly.
+    let problems = match payload.body {
+        Body::Dashboard(_) => 0,
+        _ => payload.errors.len(),
+    };
     let stale = freshness(manifest, payload);
     if problems == 0 && stale.is_none() {
         return None;
@@ -2226,7 +2319,7 @@ fn freshness(manifest: &Manifest, payload: &Payload) -> Option<String> {
 
 /// The card look: the composer pill's fill and edge, so Home reads as part
 /// of the same surface.
-fn card_surface(theme: &Theme) -> Div {
+pub(super) fn card_surface(theme: &Theme) -> Div {
     div()
         .relative()
         .flex()
@@ -2238,7 +2331,7 @@ fn card_surface(theme: &Theme) -> Div {
 }
 
 /// A focusable settings-style action.
-fn button(theme: &Theme, id: &'static str, tone: ActionTone) -> Stateful<Div> {
+pub(super) fn button(theme: &Theme, id: &'static str, tone: ActionTone) -> Stateful<Div> {
     let accent = theme.accent;
     widgets::action_button(theme, tone)
         .id(id)
@@ -2637,7 +2730,7 @@ fn muted(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-fn empty(theme: &Theme, manifest: &Manifest) -> AnyElement {
+pub(super) fn empty(theme: &Theme, manifest: &Manifest) -> AnyElement {
     muted(theme, empty_text(manifest))
 }
 
@@ -2825,6 +2918,7 @@ fn icon_for(manifest: &Manifest) -> &'static str {
             Kind::Stat => icons::BARS,
             Kind::Agenda => icons::CALENDAR,
             Kind::Devices => icons::MONITOR,
+            Kind::Dashboard => icons::BARS,
         },
     }
 }
@@ -2846,8 +2940,16 @@ fn card_count(state: Option<&WidgetState>) -> (Option<usize>, bool) {
             });
             (Some(rows.len()), hot)
         }
-        Body::Stat(_) => (None, false),
+        Body::Stat(_) | Body::Dashboard(_) => (None, false),
         body => (Some(body.len()), false),
+    }
+}
+
+/// The dashboard a widget shows, once its data is in.
+fn dashboard_of(state: Option<&WidgetState>) -> Option<&Dashboard> {
+    match &state?.payload.as_ref()?.body {
+        Body::Dashboard(dashboard) => Some(dashboard),
+        _ => None,
     }
 }
 
@@ -2888,6 +2990,6 @@ fn moved(len: usize, from: usize, to: usize) -> Vec<usize> {
     order
 }
 
-fn toggled(on: bool) -> Toggled {
+pub(super) fn toggled(on: bool) -> Toggled {
     if on { Toggled::True } else { Toggled::False }
 }

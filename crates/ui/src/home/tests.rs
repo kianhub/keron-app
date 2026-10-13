@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use gpui::{
     AppContext as _, Entity, InteractiveElement as _, IntoElement, KeyUpEvent, Keystroke,
-    Modifiers, ParentElement as _, Render, ScrollDelta, Styled as _, Task, TestAppContext,
-    TouchPhase, VisualTestContext, div, point, px, size,
+    Modifiers, MouseButton, ParentElement as _, Render, ScrollDelta, Styled as _, Task,
+    TestAppContext, TouchPhase, VisualTestContext, div, point, px, size,
 };
 use keron_home::catalog::Catalog;
 use keron_home::{
@@ -685,13 +685,20 @@ fn done_on_a_row_the_source_already_dropped_still_hides_it(cx: &mut TestAppConte
 #[gpui::test]
 fn customize_adds_a_builtin_the_folder_is_missing(cx: &mut TestAppContext) {
     let (home, paths, _dir) = home(cx);
-    // A widgets folder seeded before the app had Usage.
+    // A widgets folder seeded before the app had Usage and Mini.
     std::fs::remove_file(paths.widgets_dir.join("usage.toml")).unwrap();
+    std::fs::remove_file(paths.widgets_dir.join("dashboard.toml")).unwrap();
     std::fs::remove_file(paths.widgets_dir.join(".builtins")).unwrap();
     home.update(cx, |home, cx| home.reload(cx));
     cx.run_until_parked();
     home.read_with(cx, |home, _| {
-        assert_eq!(home.missing_builtins(), [("usage", "Usage".to_string())]);
+        assert_eq!(
+            home.missing_builtins(),
+            [
+                ("usage", "Usage".to_string()),
+                ("dashboard", "Mini".to_string())
+            ]
+        );
         assert!(!home.shows_usage());
     });
 
@@ -699,7 +706,7 @@ fn customize_adds_a_builtin_the_folder_is_missing(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(paths.widgets_dir.join("usage.toml").is_file());
     home.read_with(cx, |home, _| {
-        assert!(home.missing_builtins().is_empty());
+        assert_eq!(home.missing_builtins(), [("dashboard", "Mini".to_string())]);
         // Not in home.toml yet, so it shows at the end.
         assert!(home.shows_usage());
         assert_eq!(
@@ -1889,4 +1896,346 @@ fn cmd_z_leaves_held_row_actions_be_while_home_is_off_screen(cx: &mut TestAppCon
         .map(|(_, body)| body["ids"].clone())
         .collect();
     assert_eq!(done, [serde_json::json!(["e1"])]);
+}
+
+#[test]
+fn a_series_keeps_its_color_by_what_it_is() {
+    let jobs = [
+        "loose-ends",
+        "brief",
+        "naps",
+        "judge",
+        "screen-notes",
+        "compare",
+        "checks",
+        "backup",
+    ];
+    let apps = [
+        "claude-code",
+        "codex",
+        "claude-ai",
+        "cursor",
+        "chatgpt",
+        "keron-app",
+        "capture",
+        "other",
+    ];
+    // Each set has every slot once, in the order the mini sends it, so a
+    // stack of the whole set has the palette's checked neighbours.
+    for set in [jobs, apps] {
+        let slots: Vec<usize> = set.iter().map(|id| dashboard::slot(id)).collect();
+        assert_eq!(slots, (0..8).collect::<Vec<_>>());
+    }
+    assert_ne!(dashboard::slot("rounds"), dashboard::slot("failures"));
+    // Anything new lands on a slot of its own name, the same every time.
+    let new = dashboard::slot("a-new-job");
+    assert!(new < crate::theme::CHART_SLOTS);
+    assert_eq!(dashboard::slot("a-new-job"), new);
+}
+
+#[test]
+fn a_bar_with_anything_shows_however_far_below_the_line() {
+    // Clef's hours under its line of 10,000 free neurons a day.
+    assert!(dashboard::bar_height(10.0, 10_000.0, 120.0) >= 2.0);
+    assert_eq!(dashboard::bar_height(5_000.0, 10_000.0, 120.0), 60.0);
+    assert_eq!(dashboard::bar_height(0.0, 10_000.0, 120.0), 0.0);
+}
+
+#[test]
+fn tables_go_two_across_only_while_their_labels_keep_room() {
+    let table = |columns: usize| keron_home::dashboard::Breakdown {
+        id: "jobs".to_string(),
+        title: "By job".to_string(),
+        columns: vec!["Calls".to_string(); columns],
+        rows: Vec::new(),
+    };
+    // Four columns, as By job has, take a wide page; two fit sooner.
+    let tables = [table(4), table(2)];
+    assert!(!dashboard::tables_two_across(&tables, 720.0));
+    assert!(dashboard::tables_two_across(&tables, 1000.0));
+    assert!(dashboard::tables_two_across(&[table(2)], 720.0));
+    assert!(!dashboard::tables_two_across(&[table(2)], 700.0));
+}
+
+/// A made-up Mini payload: Today with three tiles (the card names two),
+/// 7 days with one tile and a table, a year of days, and one problem.
+fn mini_payload() -> Payload {
+    let tile = |id: &str, text: &str| serde_json::json!({"id": id, "label": id, "text": text});
+    let chart = serde_json::json!({
+        "id": "tokens", "title": "Tokens by job", "unit": "tokens", "labels": ["00", "01", "02"],
+        "series": [{"id": "naps", "label": "Naps", "values": [0, 1200, 300]},
+                   {"id": "judge", "label": "Judge", "values": [100, 0, 0]}],
+        "texts": ["00:00 · 100 tokens", "01:00 · 1.2k tokens", "02:00 · 300 tokens"],
+        "line": {"value": 1000, "label": "a line"}
+    });
+    let served = serde_json::json!({
+        "source": "dashboard", "kind": "dashboard", "errors": ["unpriced: a-model"],
+        "note": "Dollars are estimates.",
+        "card": {"period": "day", "tiles": ["tokens", "runs"], "chart": "tokens"},
+        "periods": {
+            "day": {"label": "Today", "range": "Mon 12 Oct",
+                    "tiles": [tile("tokens", "1.6k"), tile("runs", "3"), tile("notes", "9")],
+                    "charts": [chart.clone()], "breakdowns": []},
+            "week": {"label": "7 days", "range": "6–12 Oct",
+                     "tiles": [tile("tokens", "8.4k")], "charts": [chart],
+                     "breakdowns": [{"id": "jobs", "title": "By job", "columns": ["Tokens"],
+                                     "rows": [{"label": "Naps", "cells": ["8.4k"], "share": 1}]}]}
+        },
+        "heatmap": {"label": "Tokens per day", "end": "2026-10-12", "levels": [100, 500, 1000],
+                    "days": [{"date": "2026-10-12", "value": 1600, "text": "Mon 12 Oct · 1.6k tokens"}]}
+    });
+    keron_home::kinds::parse_payload(Kind::Dashboard, &served).unwrap()
+}
+
+/// Home drawn signed in with the Mini card, and `others` cards after it
+/// with their data.
+fn mini_home(
+    others: Vec<(Manifest, Payload)>,
+    cx: &mut TestAppContext,
+) -> (Entity<Home>, &mut VisualTestContext, tempfile::TempDir) {
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(crate::theme::Theme::default());
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HomePaths::under_home(dir.path());
+    let (home, cx) = cx.add_window_view(|_, cx| Home::with_parts(paths, None, cx));
+    cx.simulate_resize(size(px(800.0), px(900.0)));
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        let mini = Manifest {
+            kind: Kind::Dashboard,
+            source: SourceSpec::Memory("dashboard".to_string()),
+            wide: true,
+            ..manifest("mini", "Mini")
+        };
+        let mut manifests = vec![mini];
+        manifests.extend(others.iter().map(|(manifest, _)| manifest.clone()));
+        // Signed in only once they're added, and with refresh loops standing
+        // in for their own, so nothing fetches.
+        home.apply_catalog(catalog(manifests), cx);
+        let data = others
+            .into_iter()
+            .map(|(manifest, payload)| (manifest.id, payload));
+        for (id, payload) in std::iter::once(("mini".to_string(), mini_payload())).chain(data) {
+            let state = home.widgets.entry(id).or_default();
+            state.payload = Some(payload);
+            state.refresh = Some(Task::ready(()));
+        }
+        home.sign_in = SignIn::SignedIn;
+        home.set_frame(0.0, 600.0, 600.0, 1.0, cx);
+    });
+    cx.run_until_parked();
+    settle(cx);
+    (home, cx, dir)
+}
+
+/// A plain list card of one row.
+fn other() -> (Manifest, Payload) {
+    (manifest("other", "other"), rows(&["other"]))
+}
+
+/// A Loose ends card of three rows, e0 to e2.
+fn loose_ends_card() -> (Manifest, Payload) {
+    let mut ends = manifest("ends", "Loose ends");
+    ends.source = loose_ends::loose_ends();
+    (ends, list((0..3).map(loose_end).collect()))
+}
+
+fn page_open(home: &Entity<Home>, cx: &mut VisualTestContext) -> bool {
+    home.read_with(cx, |home, _| home.dashboard_open())
+}
+
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    let at = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} isn't drawn"))
+        .center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_mini_card_draws_its_tiles_and_a_click_opens_its_page(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(vec![other()], cx);
+    // The card's two tiles of today, not the third, and the problem,
+    // quietly; no count in its header, as a list has.
+    assert!(cx.debug_bounds("home-dashboard-tile-tokens").is_some());
+    assert!(cx.debug_bounds("home-dashboard-tile-runs").is_some());
+    assert!(cx.debug_bounds("home-dashboard-tile-notes").is_none());
+    assert!(cx.debug_bounds("home-dashboard-problems").is_some());
+    assert!(cx.debug_bounds("home-count-other").is_some());
+    assert!(cx.debug_bounds("home-count-mini").is_none());
+    assert!(!page_open(&home, cx));
+
+    let card = home.read_with(cx, |home, _| home.card_bounds.borrow()["mini"]);
+    cx.simulate_click(card.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(page_open(&home, cx));
+    // The page in the grid's place, on Week: its tiles, not today's, its
+    // chart and table, the year of days and the footnote.
+    assert!(cx.debug_bounds("home-dashboard-page").is_some());
+    assert!(cx.debug_bounds("home-dashboard-tile-tokens").is_none());
+    assert!(cx.debug_bounds("home-count-other").is_none());
+    assert!(cx.debug_bounds("home-dashboard-page-tile-tokens").is_some());
+    assert!(cx.debug_bounds("home-dashboard-page-tile-runs").is_none());
+    for part in [
+        "home-dashboard-panel-tokens",
+        "home-dashboard-table-jobs",
+        "home-dashboard-heatmap-page-mini",
+        "home-dashboard-note",
+    ] {
+        assert!(cx.debug_bounds(part).is_some(), "{part} isn't drawn");
+    }
+}
+
+#[gpui::test]
+fn retry_on_the_mini_card_doesnt_open_its_page(cx: &mut TestAppContext) {
+    // Retry fetches on Tokio, off the test's thread (and finds no door).
+    cx.update(gpui_tokio::init);
+    cx.executor().allow_parking();
+    let (home, cx, _dir) = mini_home(Vec::new(), cx);
+    home.update(cx, |home, cx| {
+        home.widgets.get_mut("mini").unwrap().error = Some("The mini didn't answer".to_string());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    click("home-retry-mini", cx);
+    assert!(!page_open(&home, cx));
+}
+
+#[gpui::test]
+fn the_period_switch_changes_the_tiles_and_stays_through_a_refresh(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(Vec::new(), cx);
+    click("home-dashboard-open", cx);
+    assert_eq!(home.read_with(cx, |home, _| home.period), Period::Week);
+
+    click("home-dashboard-period-day", cx);
+    assert!(cx.debug_bounds("home-dashboard-page-tile-runs").is_some());
+    assert!(cx.debug_bounds("home-dashboard-page-tile-notes").is_some());
+
+    // A refresh keeps the period, and so does going back and in again.
+    home.update(cx, |home, cx| {
+        home.apply_fetch("mini", Instant::now(), Ok(mini_payload()), cx);
+    });
+    cx.run_until_parked();
+    click("home-dashboard-back", cx);
+    click("home-dashboard-open", cx);
+    assert_eq!(home.read_with(cx, |home, _| home.period), Period::Day);
+    assert!(cx.debug_bounds("home-dashboard-page-tile-runs").is_some());
+}
+
+#[gpui::test]
+fn escape_back_or_home_going_closes_the_page(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(Vec::new(), cx);
+    click("home-dashboard-open", cx);
+    assert!(page_open(&home, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!page_open(&home, cx));
+    assert!(cx.debug_bounds("home-dashboard-tile-tokens").is_some());
+    // Focus is back on what opened it.
+    let open = home.read_with(cx, |home, _| home.open_focus.borrow()["mini"].clone());
+    assert!(cx.update(|window, _| open.is_focused(window)));
+
+    click("home-dashboard-open", cx);
+    click("home-dashboard-back", cx);
+    assert!(!page_open(&home, cx));
+    assert!(cx.debug_bounds("home-dashboard-page").is_none());
+
+    // A chat opening over Home closes it too.
+    click("home-dashboard-open", cx);
+    home.update(cx, |home, cx| home.hide(cx));
+    assert!(!page_open(&home, cx));
+}
+
+#[gpui::test]
+fn the_grid_under_the_page_is_off_screen_until_it_closes(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(vec![loose_ends_card()], cx);
+    let posted = Posted::default();
+    let undo_elsewhere =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<UndoElsewhere>().0.is_some());
+    home.update(cx, |home, cx| {
+        home.poster = Some(unanswered(&posted));
+        home.act("ends", "e0", done(), cx);
+    });
+    click("home-dashboard-open", cx);
+    assert!(!undo_elsewhere(cx));
+
+    // Loose ends refreshed under the page aren't seen, and ⌘Z leaves the
+    // Done be.
+    home.update(cx, |home, cx| {
+        home.apply_fetch(
+            "ends",
+            Instant::now(),
+            Ok(list((0..3).map(loose_end).collect())),
+            cx,
+        );
+        assert!(!home.undo(cx));
+    });
+    assert!(paths(&posted).is_empty());
+
+    // Back on the grid, the rows in view are, and ⌘Z takes the Done back.
+    click("home-dashboard-back", cx);
+    assert_eq!(paths(&posted), ["/memory/loose-ends/shown"]);
+    assert!(undo_elsewhere(cx));
+    assert!(home.update(cx, |home, cx| home.undo(cx)));
+}
+
+#[gpui::test]
+fn hovering_a_heatmap_day_shows_its_tooltip(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(Vec::new(), cx);
+    let heatmap = cx.debug_bounds("home-dashboard-heatmap-card-mini").unwrap();
+    let pitch = f32::from(heatmap.size.width) / keron_home::dashboard::WEEKS as f32;
+    assert!(pitch > 4.0 && f32::from(heatmap.size.height) > 6.0 * pitch);
+    let hovered = |cx: &mut VisualTestContext| {
+        home.read_with(cx, |home, _| {
+            home.heat_hover.as_ref().map(|hover| hover.day)
+        })
+    };
+    // Today, a Monday: the top of the last week's column.
+    let today = heatmap.origin + point(px(52.5 * pitch), px(0.5 * pitch));
+    cx.simulate_mouse_move(today, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(hovered(cx), Some(52 * 7));
+    assert!(cx.debug_bounds("home-dashboard-heat-tip").is_some());
+    // The day under it in that column is still to come: nothing there.
+    cx.simulate_mouse_move(today + point(px(0.0), px(pitch)), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(hovered(cx), None);
+    assert!(cx.debug_bounds("home-dashboard-heat-tip").is_none());
+    // The first week's Monday.
+    cx.simulate_mouse_move(
+        heatmap.origin + point(px(0.5 * pitch), px(0.5 * pitch)),
+        None,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(hovered(cx), Some(0));
+}
+
+#[gpui::test]
+fn customize_still_drags_the_mini_card(cx: &mut TestAppContext) {
+    let (home, cx, _dir) = mini_home(vec![other()], cx);
+    home.update(cx, |home, cx| home.toggle_customize(cx));
+    cx.run_until_parked();
+    settle(cx);
+    let (mini, other) = home.read_with(cx, |home, _| {
+        let bounds = home.card_bounds.borrow();
+        (bounds["mini"].center(), bounds["other"].center())
+    });
+    // A click there doesn't open the page...
+    cx.simulate_click(mini, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!page_open(&home, cx));
+
+    // ...and a drag moves the card.
+    cx.simulate_mouse_down(mini, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(other, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_move(other, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(other, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!page_open(&home, cx));
+    let order = home.read_with(cx, |home, _| ids(home.arranged()));
+    assert_eq!(order, ["other", "mini"]);
 }
