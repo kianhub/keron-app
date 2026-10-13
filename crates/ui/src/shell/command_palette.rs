@@ -255,13 +255,10 @@ impl Shell {
                         } else {
                             ShortcutId::NewProject
                         };
-                        let combo = self.settings.keymap.get(id);
-                        let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-                        Some(crate::settings::badge_combo(if valid {
-                            combo
-                        } else {
-                            id.default_combo()
-                        }))
+                        self.settings
+                            .keymap
+                            .bound(id)
+                            .map(crate::settings::badge_combo)
                     }
                     Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
                     _ => None,
@@ -422,7 +419,10 @@ impl Shell {
             .child(palette_header(
                 &theme,
                 search.into_any_element(),
-                popover::kbd_hint(&theme, &crate::settings::badge_combo("mod-k")),
+                Some(popover::kbd_hint(
+                    &theme,
+                    &crate::settings::badge_combo("mod-k"),
+                )),
             ))
             .child(body)
             .child(
@@ -487,7 +487,11 @@ pub(super) fn palette_card(
         .text_color(theme.text)
 }
 
-pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div) -> gpui::Div {
+pub(super) fn palette_header(
+    theme: &Theme,
+    search: AnyElement,
+    hint: Option<gpui::Div>,
+) -> gpui::Div {
     div()
         .min_h(px(44.0))
         .flex_none()
@@ -506,7 +510,7 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
                 .text_size(crate::typography::ui_rems(14.0))
                 .child(search),
         )
-        .child(hint)
+        .children(hint)
 }
 
 pub(super) fn palette_footer() -> gpui::Div {

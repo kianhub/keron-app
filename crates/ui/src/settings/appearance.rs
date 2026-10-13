@@ -3688,7 +3688,16 @@ impl Render for AppearancePage {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Choose a folder of wallpaper images.".into());
-        let shortcut = crate::settings::display_combo(&wallpaper_settings.keymap.random_wallpaper);
+        let folder_meta = match wallpaper_settings
+            .keymap
+            .bound(crate::settings::ShortcutId::RandomWallpaper)
+        {
+            Some(combo) => format!(
+                "{folder_label} · {} picks a random image",
+                crate::settings::display_combo(combo)
+            ),
+            None => folder_label,
+        };
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(
@@ -3700,9 +3709,7 @@ impl Render for AppearancePage {
                             &theme,
                             vec![
                                 div()
-                                    .child(SharedString::from(format!(
-                                        "{folder_label} · {shortcut} picks a random image"
-                                    )))
+                                    .child(SharedString::from(folder_meta))
                                     .into_any_element(),
                             ],
                         )),

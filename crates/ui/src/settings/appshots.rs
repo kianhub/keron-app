@@ -238,7 +238,7 @@ impl ShortcutsPage {
                 text_access.into_any_element(),
             ));
         let helper: SharedString = if self.recording.is_some() {
-            "Press Escape to cancel.".into()
+            RECORDING_HINT.into()
         } else {
             self.conflict_notice.clone().unwrap_or_default()
         };

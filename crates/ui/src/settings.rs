@@ -1241,7 +1241,9 @@ impl ShortcutId {
 }
 
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
-/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`].
+/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. An empty combo is a
+/// shortcut the owner removed: it binds nothing and loads back empty, since
+/// serde's defaults only fill a field that is missing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
@@ -1392,6 +1394,22 @@ impl KeymapConfig {
 
     pub fn reset(&mut self, id: ShortcutId) {
         self.set(id, id.default_combo().to_string());
+    }
+
+    /// Leave `id` with no combo, freeing its old one for another shortcut.
+    pub fn unset(&mut self, id: ShortcutId) {
+        self.set(id, String::new());
+    }
+
+    /// The combo `id` is bound to, as `shell::apply_keymap` binds it: `None`
+    /// while it is unset, its default when a hand-edited combo does not
+    /// parse. Shortcut hints read this, so an unset action shows none.
+    pub fn bound(&self, id: ShortcutId) -> Option<&str> {
+        match self.get(id) {
+            "" => None,
+            combo if gpui::Keystroke::parse(&platform_combo(combo)).is_ok() => Some(combo),
+            _ => Some(id.default_combo()),
+        }
     }
 
     /// Restore the jump list to exactly [`JUMP_SLOTS`] entries: a hand-edited
@@ -3442,6 +3460,50 @@ mod tests {
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
         restored.reset(ShortcutId::NewProject);
         assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
+    }
+
+    #[test]
+    fn removed_shortcuts_stay_unset_across_a_restart() {
+        // An empty combo is a removal, not a missing value: loading must not
+        // refill it with the default, nor let a migration hand it a new one.
+        let mut removed = vec![
+            ShortcutId::ToggleSidebar,
+            // Each of these has a load-time migration keyed on its field.
+            ShortcutId::SaveFile,
+            ShortcutId::ToggleFiles,
+            ShortcutId::ShowHome,
+            // The jump list is healed to its length on load.
+            ShortcutId::JumpSession(3),
+        ];
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            removed.push(ShortcutId::CaptureAppshot);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = UiSettings::default();
+        for &id in &removed {
+            settings.keymap.unset(id);
+        }
+        settings.save(dir.path()).unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.keymap, settings.keymap);
+        for id in removed {
+            assert_eq!(loaded.keymap.get(id), "", "{id:?}");
+            assert_eq!(loaded.keymap.bound(id), None, "{id:?}");
+        }
+        // Unset shortcuts share no combo, so none reads as a conflict.
+        assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
+    }
+
+    #[test]
+    fn bound_combo_is_none_while_unset_and_the_default_when_unparseable() {
+        let mut keymap = KeymapConfig::default();
+        assert_eq!(keymap.bound(ShortcutId::NewSession), Some("mod-n"));
+        keymap.unset(ShortcutId::NewSession);
+        assert_eq!(keymap.bound(ShortcutId::NewSession), None);
+        keymap.set(ShortcutId::NewSession, "mod-x-y".into());
+        assert_eq!(keymap.bound(ShortcutId::NewSession), Some("mod-n"));
+        keymap.set(ShortcutId::NewSession, "mod-alt-n".into());
+        assert_eq!(keymap.bound(ShortcutId::NewSession), Some("mod-alt-n"));
     }
 
     #[test]

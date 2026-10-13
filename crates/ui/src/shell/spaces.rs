@@ -6653,12 +6653,11 @@ impl Shell {
                     .fade_overflow_x(&crumb_scroll),
             );
 
-        let shortcut = {
-            let id = ShortcutId::NewProject;
-            let combo = self.settings.keymap.get(id);
-            let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-            crate::settings::badge_combo(if valid { combo } else { id.default_combo() })
-        };
+        let shortcut = self
+            .settings
+            .keymap
+            .bound(ShortcutId::NewProject)
+            .map(crate::settings::badge_combo);
         let can_add = !busy && listing.is_some();
         let footer = command_palette::palette_footer()
             .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
@@ -6730,7 +6729,7 @@ impl Shell {
                 .child(command_palette::palette_header(
                     &theme,
                     search.into_any_element(),
-                    popover::kbd_hint(&theme, &shortcut),
+                    shortcut.map(|shortcut| popover::kbd_hint(&theme, &shortcut)),
                 ))
                 .child(crumbs)
                 .child(results)

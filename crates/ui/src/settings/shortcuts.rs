@@ -1,11 +1,12 @@
 //! Settings → Shortcuts (feature-inventory §1.4): a table of the rebindable
-//! bindings — click a combo to record (Esc cancels), live conflict detection,
-//! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
-//! shell persists them and re-applies the app keymap.
+//! bindings — click a combo to record (Esc cancels, Delete removes), live
+//! conflict detection, per-row Remove and Reset, and Restore defaults.
+//! Changes emit [`ShortcutsEvent`]; the shell persists them and re-applies the
+//! app keymap.
 //!
 //! Search by keys (as in ChatGPT's and Codex's desktop apps): press a
 //! combination and the page says what in Keron uses it, read from the live
-//! keymap ([`key_uses`]).
+//! keymap ([`key_uses`]), with Remove beside each shortcut it finds.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -38,6 +39,9 @@ pub enum RecordOutcome {
     Set(String),
 }
 
+/// The helper line while a combo records.
+const RECORDING_HINT: &str = "Press Escape to cancel, Delete to remove.";
+
 pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> RecordOutcome {
     if key.eq_ignore_ascii_case("escape") {
         return RecordOutcome::Cancelled;
@@ -46,6 +50,12 @@ pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> R
         Some(combo) => RecordOutcome::Set(combo),
         None => RecordOutcome::Ignored,
     }
+}
+
+/// Delete or Backspace pressed alone while recording: the owner wants the
+/// shortcut gone. With a modifier (⌘⌫) the key records like any other. Pure.
+fn removes_shortcut(combo: &str) -> bool {
+    matches!(combo, "backspace" | "delete")
 }
 
 #[derive(Debug, Clone)]
@@ -338,22 +348,37 @@ impl ShortcutsPage {
                 cx.notify();
             }
             RecordOutcome::Ignored => {}
-            RecordOutcome::Set(combo) => {
-                self.stop_recording();
-                self.conflict_notice =
-                    refusal(&self.keymap, self.composer_send_behavior, recording, &combo);
-                if self.conflict_notice.is_none() {
-                    self.keymap.set(recording, combo);
-                    self.commit(cx);
-                }
-                cx.notify();
-            }
+            RecordOutcome::Set(combo) if removes_shortcut(&combo) => self.remove(recording, cx),
+            RecordOutcome::Set(combo) => self.assign(recording, combo, cx),
         }
         cx.stop_propagation();
     }
 
-    /// One shortcut row: label left, Reset when customized, and
-    /// the click-to-record combo chip (recording inverts it to
+    /// Bind `combo` to `id` unless [`refusal`] turns it down.
+    fn assign(&mut self, id: ShortcutId, combo: String, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.conflict_notice = refusal(&self.keymap, self.composer_send_behavior, id, &combo);
+        if self.conflict_notice.is_none() {
+            self.keymap.set(id, combo);
+            self.commit(cx);
+        }
+        cx.notify();
+    }
+
+    /// Leave `id` unset, freeing its combo for another shortcut. A key
+    /// search that found it stops listing it.
+    fn remove(&mut self, id: ShortcutId, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.conflict_notice = None;
+        self.keymap.unset(id);
+        if let Some(search) = self.key_search.as_mut() {
+            search.uses.retain(|found| found.shortcut != Some(id));
+        }
+        self.commit(cx);
+    }
+
+    /// One shortcut row: label left, Reset when customized, Remove when
+    /// bound, and the click-to-record combo chip (recording inverts it to
     /// white-on-black). `ix` is the id's position in [`ShortcutId::ALL`]
     /// (unique element ids across the group cards); `gx` is the row's place
     /// in its own card (separator rule). A key search hit is tinted, and
@@ -417,6 +442,7 @@ impl ShortcutsPage {
     ) -> gpui::Div {
         let page = cx.entity().downgrade();
         let reset_page = page.clone();
+        let remove_page = page.clone();
         binding_control(
             id,
             ix,
@@ -427,11 +453,12 @@ impl ShortcutsPage {
             move |_, cx| {
                 reset_page
                     .update(cx, |this, cx| {
-                        this.keymap.reset(id);
-                        this.stop_recording();
-                        this.commit(cx);
+                        this.assign(id, id.default_combo().into(), cx)
                     })
                     .ok();
+            },
+            move |_, cx| {
+                remove_page.update(cx, |this, cx| this.remove(id, cx)).ok();
             },
             move |window, cx| {
                 page.update(cx, |this, cx| this.start_recording(id, window, cx))
@@ -609,35 +636,40 @@ impl ShortcutField {
         ) {
             RecordOutcome::Cancelled => self.stop_recording(),
             RecordOutcome::Ignored => {}
-            RecordOutcome::Set(combo) => {
-                self.stop_recording();
-                let current = crate::settings::current(cx);
-                self.notice = refusal(
-                    &current.keymap,
-                    current.composer_send_behavior,
-                    self.id,
-                    &combo,
-                );
-                if self.notice.is_none() {
-                    self.save(Some(combo), cx);
-                }
-            }
+            RecordOutcome::Set(combo) if removes_shortcut(&combo) => self.remove(cx),
+            RecordOutcome::Set(combo) => self.assign(combo, cx),
         }
         cx.notify();
         cx.stop_propagation();
     }
 
-    /// `None` restores the default binding.
-    fn save(&mut self, combo: Option<String>, cx: &mut Context<Self>) {
-        let id = self.id;
-        crate::settings::update(
-            crate::settings::SavePolicy::Immediate,
-            cx,
-            |settings| match combo {
-                Some(combo) => settings.keymap.set(id, combo),
-                None => settings.keymap.reset(id),
-            },
+    /// Bind `combo` unless [`refusal`] turns it down.
+    fn assign(&mut self, combo: String, cx: &mut Context<Self>) {
+        self.stop_recording();
+        let current = crate::settings::current(cx);
+        self.notice = refusal(
+            &current.keymap,
+            current.composer_send_behavior,
+            self.id,
+            &combo,
         );
+        if self.notice.is_none() {
+            self.save(combo, cx);
+        }
+    }
+
+    fn remove(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording();
+        self.notice = None;
+        self.save(String::new(), cx);
+    }
+
+    /// An empty `combo` leaves the shortcut unset.
+    fn save(&mut self, combo: String, cx: &mut Context<Self>) {
+        let id = self.id;
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            settings.keymap.set(id, combo)
+        });
         let current = crate::settings::current(cx);
         crate::shell::apply_keymap(cx, &current.keymap, current.composer_send_behavior);
         cx.notify();
@@ -653,9 +685,10 @@ impl Render for ShortcutField {
             .position(|&id| id == self.id)
             .unwrap_or(0);
         let reset = cx.entity().downgrade();
+        let remove = reset.clone();
         let record = reset.clone();
         let helper: Option<SharedString> = if self.recording {
-            Some("Press Escape to cancel.".into())
+            Some(RECORDING_HINT.into())
         } else {
             self.notice.clone()
         };
@@ -676,11 +709,13 @@ impl Render for ShortcutField {
                 move |_, cx| {
                     reset
                         .update(cx, |field, cx| {
-                            field.stop_recording();
-                            field.notice = None;
-                            field.save(None, cx);
+                            field.assign(field.id.default_combo().into(), cx);
+                            cx.notify();
                         })
                         .ok();
+                },
+                move |_, cx| {
+                    remove.update(cx, |field, cx| field.remove(cx)).ok();
                 },
                 move |window, cx| {
                     record
@@ -697,10 +732,11 @@ impl Render for ShortcutField {
     }
 }
 
-/// Reset (when customized) plus the click-to-record combo chip; recording
-/// inverts it to the accent wash, and a key search hit wears the same wash
-/// around its combo. Shared by Settings → Shortcuts and the feature pages
-/// that own a shortcut ([`ShortcutField`]).
+/// Reset (when customized), Remove (when bound) and the click-to-record combo
+/// chip; recording inverts it to the accent wash, and a key search hit wears
+/// the same wash around its combo. An unset shortcut's chip reads "Not set".
+/// Shared by Settings → Shortcuts and the feature pages that own a shortcut
+/// ([`ShortcutField`]).
 #[allow(clippy::too_many_arguments)]
 fn binding_control(
     id: ShortcutId,
@@ -710,15 +746,22 @@ fn binding_control(
     is_hit: bool,
     theme: &Theme,
     on_reset: impl Fn(&mut Window, &mut gpui::App) + 'static,
+    on_remove: impl Fn(&mut Window, &mut gpui::App) + 'static,
     on_record: impl Fn(&mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Div {
     let accent = theme.accent;
     let combo = combo.to_string();
     let non_default = combo != id.default_combo();
+    let unset = combo.is_empty();
+    let shown: SharedString = if unset {
+        "Not set".into()
+    } else {
+        display_combo(&combo).into()
+    };
     let chip_text: SharedString = if is_recording {
         "Press keys…".into()
     } else {
-        display_combo(&combo).into()
+        shown.clone()
     };
     div()
         .flex()
@@ -729,6 +772,7 @@ fn binding_control(
             el.child(
                 div()
                     .id(("shortcut-reset", ix))
+                    .debug_selector(move || format!("shortcut-reset-{ix}"))
                     .role(gpui::Role::Button)
                     .aria_label(format!("Reset {} shortcut", id.label()))
                     .min_h(px(24.0))
@@ -744,47 +788,105 @@ fn binding_control(
         })
         .child(
             div()
-                .id(("shortcut-combo", ix))
-                .role(gpui::Role::Button)
-                .aria_label(format!(
-                    "Change {} shortcut: {}",
-                    id.label(),
-                    display_combo(&combo)
-                ))
-                .tab_index(0)
-                .min_w(px(96.0))
-                .h(px(widgets::SELECT_HEIGHT))
-                .px(px(12.0))
-                .rounded(px(8.0))
-                // Same glass wash as the settings dropdowns; the
-                // transparent edge is held for the focus ring.
-                .border_1()
-                .border_color(gpui::transparent_black())
-                .focus_visible(move |style| style.border_color(accent))
                 .flex()
                 .items_center()
-                .justify_center()
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-                .cursor_pointer()
-                .map(|el| {
-                    if is_recording || is_hit {
-                        el.bg(accent.opacity(0.16))
-                            .border_color(accent.opacity(0.55))
-                            .text_color(theme.text)
-                    } else {
-                        let hover_key = format!("shortcut-combo-{ix}-hover");
-                        el.bg(crate::motion::hover_blend(
-                            &hover_key,
-                            widgets::select_fill(theme, false),
-                            widgets::select_fill(theme, true),
-                        ))
-                        .on_hover(crate::motion::hover_listener(hover_key))
-                        .text_color(theme.text)
-                    }
+                .gap(px(4.0))
+                .when(!unset && !is_recording, |el| {
+                    el.child(remove_control(
+                        format!("shortcut-remove-{ix}"),
+                        id,
+                        &combo,
+                        true,
+                        theme,
+                        on_remove,
+                    ))
                 })
-                .on_click(move |_, window, cx| on_record(window, cx))
-                .child(chip_text),
+                .child(
+                    div()
+                        .id(("shortcut-combo", ix))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Change {} shortcut: {shown}", id.label()))
+                        .tab_index(0)
+                        .min_w(px(96.0))
+                        .h(px(widgets::SELECT_HEIGHT))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        // Same glass wash as the settings dropdowns; the
+                        // transparent edge is held for the focus ring.
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .focus_visible(move |style| style.border_color(accent))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .cursor_pointer()
+                        .map(|el| {
+                            if is_recording || is_hit {
+                                el.bg(accent.opacity(0.16))
+                                    .border_color(accent.opacity(0.55))
+                                    .text_color(theme.text)
+                            } else {
+                                let hover_key = format!("shortcut-combo-{ix}-hover");
+                                el.bg(crate::motion::hover_blend(
+                                    &hover_key,
+                                    widgets::select_fill(theme, false),
+                                    widgets::select_fill(theme, true),
+                                ))
+                                .on_hover(crate::motion::hover_listener(hover_key))
+                                .text_color(if unset {
+                                    theme.text_muted
+                                } else {
+                                    theme.text
+                                })
+                            }
+                        })
+                        .on_click(move |_, window, cx| on_record(window, cx))
+                        .child(chip_text),
+                ),
+        )
+}
+
+/// The quiet × that removes a bound shortcut, styled like Reset. During a
+/// key search every key is a search, so the results card's copy is not
+/// `focusable`: pressing it must leave focus, and the search, on the page.
+fn remove_control(
+    key: String,
+    id: ShortcutId,
+    combo: &str,
+    focusable: bool,
+    theme: &Theme,
+    on_remove: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let accent = theme.accent;
+    let hover = theme.text;
+    div()
+        .id(SharedString::from(key.clone()))
+        .debug_selector({
+            let key = key.clone();
+            move || key
+        })
+        .group(key.clone())
+        .role(gpui::Role::Button)
+        .aria_label(format!(
+            "Remove {} from {}",
+            display_combo(combo),
+            id.label()
+        ))
+        .min_h(px(24.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .when(focusable, |el| el.tab_index(0))
+        .focus_visible(move |style| style.border_2().border_color(accent))
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_remove(window, cx))
+        .child(
+            crate::icons::icon(crate::icons::CLOSE)
+                .size(px(10.0))
+                .text_color(theme.text_muted)
+                .group_hover(key, move |s| s.text_color(hover)),
         )
 }
 
@@ -828,7 +930,8 @@ fn refusal(
     })
 }
 
-/// The shortcut (other than `id`) already bound to `combo`, if any. Pure.
+/// The shortcut (other than `id`) already bound to `combo`, if any. An unset
+/// shortcut owns nothing, so its old combo is free. Pure.
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
@@ -1092,8 +1195,14 @@ fn group(id: ShortcutId) -> &'static str {
 }
 
 /// What a key search found, above the table: the combination pressed and
-/// each use of it, or a prompt while nothing has been pressed yet.
-fn render_key_search(search: &KeySearch, theme: &Theme) -> gpui::Div {
+/// each use of it, or a prompt while nothing has been pressed yet. A
+/// rebindable shortcut's use has Remove beside it, freeing the combination
+/// right there; fixed bindings have none.
+fn render_key_search(
+    search: &KeySearch,
+    page: &gpui::WeakEntity<ShortcutsPage>,
+    theme: &Theme,
+) -> gpui::Div {
     let row = |gx: usize, title: SharedString, meta: Vec<String>| {
         widgets::card_row(theme, gx == 0).child(
             div()
@@ -1127,7 +1236,20 @@ fn render_key_search(search: &KeySearch, theme: &Theme) -> gpui::Div {
                     None if found.places.is_empty() => vec!["Everywhere".to_string()],
                     None => found.places.clone(),
                 };
-                card = card.child(row(gx, found.name.clone().into(), meta));
+                let remove = found.shortcut.map(|id| {
+                    let page = page.clone();
+                    remove_control(
+                        format!("key-search-remove-{gx}"),
+                        id,
+                        combo,
+                        false,
+                        theme,
+                        move |_, cx| {
+                            page.update(cx, |this, cx| this.remove(id, cx)).ok();
+                        },
+                    )
+                });
+                card = card.child(row(gx, found.name.clone().into(), meta).children(remove));
             }
             display_combo(combo)
         }
@@ -1416,8 +1538,9 @@ impl Render for ShortcutsPage {
             }
             groups.push(widgets::section(&theme, name, card).into_any_element());
         }
+        let page = cx.entity().downgrade();
         let key_search = self.key_search.as_ref().map(|search| {
-            render_key_search(search, &theme)
+            render_key_search(search, &page, &theme)
                 .relative()
                 .debug_selector(|| "shortcuts-key-search-results".into())
                 .child(reveal_marker(
@@ -1430,7 +1553,7 @@ impl Render for ShortcutsPage {
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (zeron settings.shortcuts.tsx).
         let helper: SharedString = if recording.is_some() {
-            "Press Escape to cancel.".into()
+            RECORDING_HINT.into()
         } else if self.key_search.is_some() {
             "Press Escape to stop searching.".into()
         } else if let Some(notice) = self.conflict_notice.clone() {
@@ -1745,9 +1868,9 @@ mod tests {
         window
             .update(cx, |page, _, _| assert!(page.appshot_sound_enabled))
             .unwrap();
-        // Skip the shortcut trigger; arrows open the destination dropdown on
-        // the current choice and Enter commits the highlighted one.
-        for key in ["tab", "tab", "down", "down", "enter"] {
+        // Skip the shortcut's Remove and trigger; arrows open the destination
+        // dropdown on the current choice and Enter commits the highlighted one.
+        for key in ["tab", "tab", "tab", "down", "down", "enter"] {
             press(cx, key);
         }
         window
@@ -2056,6 +2179,262 @@ mod tests {
         draw(cx);
         cx.simulate_keystrokes(&crate::settings::platform_combo("mod-u"));
         assert!(answer_on_screen(cx));
+    }
+
+    /// Draw, then click the element `selector` names.
+    fn click(cx: &mut gpui::VisualTestContext, selector: String) {
+        cx.update(|window, cx| window.draw(cx).clear());
+        let bounds = cx
+            .debug_bounds(selector.clone().leak())
+            .unwrap_or_else(|| panic!("{selector} is not on screen"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
+    fn shown(cx: &mut gpui::VisualTestContext, selector: String) -> bool {
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.debug_bounds(selector.leak()).is_some()
+    }
+
+    fn ix(id: ShortcutId) -> usize {
+        ShortcutId::ALL
+            .iter()
+            .position(|&other| other == id)
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn removed_shortcuts_bind_nothing_and_leave_no_menu_hint(cx: &mut gpui::TestAppContext) {
+        // The menu bar shows an item's combo from the keymap's binding for
+        // its action, so the configurable items that would show one are
+        // those with a binding.
+        let hinted_menu_items = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let bindings = cx.key_bindings();
+                let bindings = bindings.borrow();
+                let configurable: Vec<_> = ShortcutId::ALL
+                    .into_iter()
+                    .filter_map(crate::shell::shortcut_action)
+                    .collect();
+                crate::app_menus::app_menus()
+                    .iter()
+                    .flat_map(|menu| menu.items.iter())
+                    .filter_map(|item| match item {
+                        gpui::MenuItem::Action { name, action, .. }
+                            if configurable
+                                .iter()
+                                .any(|own| own.partial_eq(action.as_ref()))
+                                && bindings
+                                    .bindings_for_action(action.as_ref())
+                                    .next()
+                                    .is_some() =>
+                        {
+                            Some(name.to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        install_keymap(cx, &KeymapConfig::default());
+        assert_eq!(hinted_menu_items(cx), ["Show Home"]);
+        let mut keymap = KeymapConfig::default();
+        for id in ShortcutId::ALL {
+            keymap.unset(id);
+        }
+        install_keymap(cx, &keymap);
+        cx.update(|cx| {
+            let bindings = cx.key_bindings();
+            let bindings = bindings.borrow();
+            for id in ShortcutId::ALL {
+                if let Some(action) = crate::shell::shortcut_action(id) {
+                    assert!(
+                        bindings
+                            .bindings_for_action(action.as_ref())
+                            .next()
+                            .is_none(),
+                        "{id:?} is still bound"
+                    );
+                }
+            }
+        });
+        assert!(hinted_menu_items(cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_removed_shortcuts_combo_runs_nothing_until_another_takes_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::{cell::Cell, rc::Rc};
+        let mut keymap = KeymapConfig::default();
+        keymap.unset(ShortcutId::ToggleSidebar);
+        install_keymap(cx, &keymap);
+        let (sidebar, new_session) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        cx.update(|cx| {
+            let sidebar = sidebar.clone();
+            cx.on_action(move |_: &crate::shell::ToggleSidebar, _| sidebar.set(sidebar.get() + 1));
+            let new_session = new_session.clone();
+            cx.on_action(move |_: &crate::shell::NewSession, _| {
+                new_session.set(new_session.get() + 1)
+            });
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            ShortcutsPage::new(
+                state,
+                keymap,
+                false,
+                ComposerSendBehavior::default(),
+                false,
+                false,
+                AppshotDestination::Automatic,
+                cx,
+            )
+        });
+        let old_combo = crate::settings::platform_combo("mod-b");
+        page.update_in(cx, |page, window, cx| window.focus(&page.focus, cx));
+        cx.simulate_keystrokes(&old_combo);
+        assert_eq!(sidebar.get(), 0, "a removed shortcut still ran");
+        // Its old combo records for another action without a conflict.
+        page.update_in(cx, |page, window, cx| {
+            page.start_recording(ShortcutId::NewSession, window, cx)
+        });
+        cx.simulate_keystrokes(&old_combo);
+        let keymap = page.update(cx, |page, _| {
+            assert_eq!(page.conflict_notice, None);
+            assert_eq!(page.keymap.new_session, "mod-b");
+            page.keymap.clone()
+        });
+        cx.update(|_, cx| crate::shell::apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
+        cx.simulate_keystrokes(&old_combo);
+        assert_eq!((sidebar.get(), new_session.get()), (0, 1));
+    }
+
+    #[gpui::test]
+    fn a_shortcut_can_be_removed_and_reset_from_its_row(cx: &mut gpui::TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        install_keymap(cx, &KeymapConfig::default());
+        let (page, cx) = cx.add_window_view(|_, cx| new_page(cx));
+        // What the shell persists and re-applies.
+        let committed = Rc::new(RefCell::new(None));
+        cx.update(|_, cx| {
+            let committed = committed.clone();
+            cx.subscribe(&page, move |_, event, _| {
+                if let ShortcutsEvent::KeymapChanged(keymap) = event {
+                    *committed.borrow_mut() = Some(keymap.clone());
+                }
+            })
+            .detach();
+        });
+        let sidebar = ShortcutId::ToggleSidebar;
+        let row = ix(sidebar);
+        let committed_sidebar = || {
+            committed
+                .borrow()
+                .as_ref()
+                .map(|keymap: &KeymapConfig| keymap.toggle_sidebar.clone())
+        };
+        assert!(!shown(cx, format!("shortcut-reset-{row}")));
+        click(cx, format!("shortcut-remove-{row}"));
+        assert_eq!(committed_sidebar().as_deref(), Some(""));
+        // An unset row has nothing to remove, and Reset brings the default back.
+        assert!(!shown(cx, format!("shortcut-remove-{row}")));
+        click(cx, format!("shortcut-reset-{row}"));
+        assert_eq!(committed_sidebar().as_deref(), Some("mod-b"));
+        assert!(!shown(cx, format!("shortcut-reset-{row}")));
+        // While recording, Delete or Backspace alone removes it; with a
+        // modifier the key records like any other.
+        let record = |cx: &mut gpui::VisualTestContext, keys: &str| {
+            page.update_in(cx, |page, window, cx| {
+                page.start_recording(sidebar, window, cx)
+            });
+            cx.simulate_keystrokes(keys);
+            page.update(cx, |page, _| {
+                assert_eq!(page.recording, None);
+                page.keymap.toggle_sidebar.clone()
+            })
+        };
+        assert_eq!(
+            record(cx, &crate::settings::platform_combo("mod-backspace")),
+            "mod-backspace"
+        );
+        assert_eq!(record(cx, "backspace"), "");
+        click(cx, format!("shortcut-reset-{row}"));
+        assert_eq!(record(cx, "delete"), "");
+        // Reset turns the default down once another shortcut has taken it.
+        page.update_in(cx, |page, window, cx| {
+            page.start_recording(ShortcutId::ToggleTerminal, window, cx)
+        });
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-b"));
+        click(cx, format!("shortcut-reset-{row}"));
+        page.update(cx, |page, _| {
+            assert_eq!(page.keymap.toggle_sidebar, "");
+            assert!(
+                page.conflict_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("Toggle terminal")),
+                "{:?}",
+                page.conflict_notice
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn key_search_removes_a_shortcut_it_finds(cx: &mut gpui::TestAppContext) {
+        install_keymap(cx, &KeymapConfig::default());
+        let (page, cx) = cx.add_window_view(|_, cx| new_page(cx));
+        click(cx, "shortcuts-key-search".into());
+        // A fixed binding has nothing to remove.
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-k"));
+        assert!(!shown(cx, "key-search-remove-0".into()));
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-b"));
+        click(cx, "key-search-remove-0".into());
+        page.update(cx, |page, _| {
+            assert_eq!(page.keymap.toggle_sidebar, "");
+            let search = page.key_search.as_ref().expect("still listening");
+            assert!(!rows(&search.uses).contains(&ShortcutId::ToggleSidebar));
+        });
+        // It is still listening: the next combination is a search.
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-n"));
+        page.update(cx, |page, _| {
+            let search = page.key_search.as_ref().expect("still listening");
+            assert_eq!(search.combo.as_deref(), Some("mod-n"));
+        });
+    }
+
+    #[gpui::test]
+    fn voice_shortcut_can_be_removed_on_its_own_page(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let dictation = ShortcutId::ToggleDictation;
+        let (field, cx) = cx.add_window_view(|_, cx| ShortcutField::new(dictation, cx));
+        let stored = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| crate::settings::current(cx).keymap.toggle_dictation.clone())
+        };
+        // Remove is the first tab stop, ahead of the chip, and Enter on it
+        // removes. (The page around the field moves focus on Tab.)
+        cx.update(|window, cx| {
+            window.draw(cx).clear();
+            window.focus_next(cx);
+            window.draw(cx).clear();
+        });
+        let enter = Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: enter });
+        assert_eq!(stored(cx), "");
+        click(cx, format!("shortcut-reset-{}", ix(dictation)));
+        assert_eq!(stored(cx), "mod-d");
+        field.update_in(cx, |field, window, cx| field.start_recording(window, cx));
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(stored(cx), "");
+        field.update(cx, |field, _| assert!(!field.recording));
     }
 
     #[test]

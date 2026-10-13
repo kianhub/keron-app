@@ -87,7 +87,8 @@ impl Shortcut {
 }
 
 struct Preferences {
-    shortcut: Shortcut,
+    /// `None` while the owner has the shortcut unset.
+    shortcut: Option<Shortcut>,
     recording: bool,
     subscribers: Vec<mpsc::UnboundedSender<Option<Shortcut>>>,
 }
@@ -96,8 +97,7 @@ fn preferences() -> &'static Mutex<Preferences> {
     static PREFERENCES: OnceLock<Mutex<Preferences>> = OnceLock::new();
     PREFERENCES.get_or_init(|| {
         Mutex::new(Preferences {
-            shortcut: Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo())
-                .unwrap(),
+            shortcut: Some(default_shortcut()),
             recording: false,
             subscribers: Vec::new(),
         })
@@ -106,7 +106,9 @@ fn preferences() -> &'static Mutex<Preferences> {
 
 impl Preferences {
     fn active(&self) -> Option<Shortcut> {
-        (super::enabled() && !self.recording).then(|| self.shortcut.clone())
+        self.shortcut
+            .clone()
+            .filter(|_| super::enabled() && !self.recording)
     }
 }
 
@@ -147,13 +149,21 @@ pub fn set_shortcut(combo: &str) {
     if !super::is_desktop() {
         return;
     }
-    let shortcut = Shortcut::parse(combo).unwrap_or_else(|_| {
-        Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo()).unwrap()
-    });
+    let shortcut = registered(combo);
     if preferences().lock().unwrap().shortcut == shortcut {
         return;
     }
     update(|preferences| preferences.shortcut = shortcut);
+}
+
+/// The hotkey a stored combo registers: none while it is unset, the default
+/// when it does not parse.
+fn registered(combo: &str) -> Option<Shortcut> {
+    (!combo.is_empty()).then(|| Shortcut::parse(combo).unwrap_or_else(|_| default_shortcut()))
+}
+
+fn default_shortcut() -> Shortcut {
+    Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo()).unwrap()
 }
 
 pub fn set_recording(recording: bool) {
@@ -178,6 +188,12 @@ mod tests {
         for combo in ["ctrl-alt-space", "mod-shift-k", "alt-f12", "ctrl-pageup"] {
             assert!(Shortcut::parse(combo).is_ok(), "{combo}");
         }
+    }
+    #[test]
+    fn an_unset_shortcut_registers_no_hotkey() {
+        assert_eq!(registered(""), None);
+        assert_eq!(registered("mod-alt-k"), Shortcut::parse("mod-alt-k").ok());
+        assert_eq!(registered("shift-a"), Some(default_shortcut()));
     }
     #[test]
     fn portal_uses_xkb_key_names_and_selected_modifiers() {

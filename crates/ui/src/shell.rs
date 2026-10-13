@@ -17,9 +17,9 @@ use std::time::Duration;
 use chrono::Utc;
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
-    IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window,
-    WindowControlArea, actions, div, prelude::*, px,
+    IntoElement, KeyBinding, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point, Render, SharedString, Subscription, Task, Window, WindowControlArea, actions,
+    div, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
@@ -401,21 +401,27 @@ pub fn cluster_clearance(
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
-/// §1.4) and rebuilds the menu bar on them. Invalid persisted combos fall back
-/// to that shortcut's default.
+/// §1.4) and rebuilds the menu bar on them. A shortcut the owner removed binds
+/// nothing; invalid persisted combos fall back to that shortcut's default.
 pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
     composer_send_behavior: ComposerSendBehavior,
 ) {
-    fn valid_or_default(combo: &str, fallback: &str) -> String {
-        let candidate = platform_combo(combo);
-        if Keystroke::parse(&candidate).is_ok() {
-            candidate
-        } else {
-            tracing::warn!(%combo, "unparseable shortcut combo; using default");
-            platform_combo(fallback)
+    fn bind<A: Action>(
+        keymap: &KeymapConfig,
+        id: ShortcutId,
+        action: A,
+        context: Option<&str>,
+    ) -> Option<KeyBinding> {
+        let combo = keymap.bound(id)?;
+        if combo != keymap.get(id) {
+            tracing::warn!(
+                combo = keymap.get(id),
+                "unparseable shortcut combo; using default"
+            );
         }
+        Some(KeyBinding::new(&platform_combo(combo), action, context))
     }
     crate::appshots::set_shortcut(&keymap.capture_appshot);
     cx.clear_key_bindings();
@@ -424,113 +430,51 @@ pub fn apply_keymap(
     // rebuilding Zeron's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
     crate::composer::init(cx, composer_send_behavior);
-    cx.bind_keys([KeyBinding::new(
-        &valid_or_default(
-            &keymap.toggle_dictation,
-            ShortcutId::ToggleDictation.default_combo(),
-        ),
+    cx.bind_keys(bind(
+        keymap,
+        ShortcutId::ToggleDictation,
         crate::composer::ToggleDictation,
         Some("MessageComposer"),
-    )]);
+    ));
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
-    cx.bind_keys([
-        KeyBinding::new(
-            &valid_or_default(&keymap.random_wallpaper, "mod-u"),
-            RandomWallpaper,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.save_file, "mod-s"),
-            SaveFile,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_sidebar, "mod-b"),
-            ToggleSidebar,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_changes, "mod-r"),
-            ToggleChanges,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_files, "mod-e"),
-            ToggleFiles,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_terminal, "mod-j"),
-            ToggleTerminal,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.new_session, "mod-n"),
-            NewSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(
-                &keymap.next_session,
-                crate::settings::ShortcutId::NextSession.default_combo(),
-            ),
-            NextSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(
-                &keymap.prev_session,
-                crate::settings::ShortcutId::PrevSession.default_combo(),
-            ),
-            PrevSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.archive_session, "mod-shift-a"),
-            ArchiveSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
-            AddSpacePalette,
-            None,
-        ),
-        // Fixed: ⌘K summons the command palette.
-        // Pressing it again dismisses.
-        KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
-        KeyBinding::new(
-            &valid_or_default(&keymap.open_model_picker, "mod-/"),
-            OpenModelPicker,
-            None,
-        ),
-    ]);
-    // Show Home arrives unbound when an older keymap already used its
-    // default; like a cleared jump slot, it then binds nothing.
-    if !keymap.show_home.is_empty() {
-        cx.bind_keys([KeyBinding::new(
-            &valid_or_default(&keymap.show_home, ShortcutId::ShowHome.default_combo()),
-            ShowHome,
-            None,
-        )]);
-    }
+    cx.bind_keys(
+        [
+            bind(keymap, ShortcutId::RandomWallpaper, RandomWallpaper, None),
+            bind(keymap, ShortcutId::SaveFile, SaveFile, None),
+            bind(keymap, ShortcutId::ToggleSidebar, ToggleSidebar, None),
+            bind(keymap, ShortcutId::ToggleChanges, ToggleChanges, None),
+            bind(keymap, ShortcutId::ToggleFiles, ToggleFiles, None),
+            bind(keymap, ShortcutId::ToggleTerminal, ToggleTerminal, None),
+            bind(keymap, ShortcutId::NewSession, NewSession, None),
+            bind(keymap, ShortcutId::NextSession, NextSession, None),
+            bind(keymap, ShortcutId::PrevSession, PrevSession, None),
+            bind(keymap, ShortcutId::ArchiveSession, ArchiveSession, None),
+            bind(keymap, ShortcutId::NewProject, AddSpacePalette, None),
+            // Fixed: ⌘K summons the command palette.
+            // Pressing it again dismisses.
+            Some(KeyBinding::new(
+                &platform_combo("mod-k"),
+                ToggleCommandPalette,
+                None,
+            )),
+            bind(keymap, ShortcutId::OpenModelPicker, OpenModelPicker, None),
+            bind(keymap, ShortcutId::ShowHome, ShowHome, None),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     crate::browser::bind_keys(cx, keymap);
-    // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
-    // combo in a hand-edited file) binds nothing rather than falling back —
-    // the user cleared it on purpose.
+    // ⌘1..⌘9 open the sidebar's first nine rows.
     cx.bind_keys((0..JUMP_SLOTS).filter_map(|slot| {
-        let id = ShortcutId::JumpSession(slot);
-        let combo = keymap.get(id);
-        if combo.is_empty() {
-            return None;
-        }
-        Some(KeyBinding::new(
-            &valid_or_default(combo, id.default_combo()),
+        bind(
+            keymap,
+            ShortcutId::JumpSession(slot),
             JumpSession(slot),
             None,
-        ))
+        )
     }));
     // The menu bar shows each item's combo and macOS fires the item on it;
     // gpui copies both when the menus are set, so a rebind (Show Home's, from
@@ -13828,7 +13772,7 @@ mod tests {
         for id in crate::settings::ShortcutId::ALL {
             let combo = platform_combo(id.default_combo());
             assert!(
-                Keystroke::parse(&combo).is_ok(),
+                gpui::Keystroke::parse(&combo).is_ok(),
                 "{} default {combo:?} does not parse",
                 id.label()
             );
