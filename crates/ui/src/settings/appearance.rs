@@ -1418,6 +1418,22 @@ fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> Str
     }
 }
 
+/// The Wallpaper folder row's meta line: the folder, and the Random
+/// wallpaper shortcut while one is set.
+fn wallpaper_folder_meta(folder: Option<&Path>, keymap: &crate::settings::KeymapConfig) -> String {
+    let folder = folder.map_or_else(
+        || "Choose a folder of wallpaper images.".into(),
+        |path| path.display().to_string(),
+    );
+    match keymap.bound(crate::settings::ShortcutId::RandomWallpaper) {
+        Some(combo) => format!(
+            "{folder} · {} picks a random image",
+            crate::settings::display_combo(combo)
+        ),
+        None => folder,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Corners {
     All,
@@ -3683,21 +3699,10 @@ impl Render for AppearancePage {
                 .into_any_element(),
         );
         let wallpaper_settings = crate::settings::current(cx);
-        let folder_label = wallpaper_settings
-            .wallpaper_folder
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Choose a folder of wallpaper images.".into());
-        let folder_meta = match wallpaper_settings
-            .keymap
-            .bound(crate::settings::ShortcutId::RandomWallpaper)
-        {
-            Some(combo) => format!(
-                "{folder_label} · {} picks a random image",
-                crate::settings::display_combo(combo)
-            ),
-            None => folder_label,
-        };
+        let folder_meta = wallpaper_folder_meta(
+            wallpaper_settings.wallpaper_folder.as_deref(),
+            &wallpaper_settings.keymap,
+        );
         settings_rows.push(
             widgets::card_row(&theme, false)
                 .child(
@@ -4306,6 +4311,25 @@ mod tests {
         assert_eq!(
             registry.variants_for(zeron_theme::Appearance::Dark).count(),
             27
+        );
+    }
+
+    #[test]
+    fn wallpaper_folder_names_the_random_wallpaper_shortcut_only_while_set() {
+        let mut keymap = crate::settings::KeymapConfig::default();
+        let combo = crate::settings::display_combo(keymap.random_wallpaper.as_str());
+        assert_eq!(
+            wallpaper_folder_meta(Some(Path::new("/tmp/walls")), &keymap),
+            format!("/tmp/walls · {combo} picks a random image")
+        );
+        keymap.unset(crate::settings::ShortcutId::RandomWallpaper);
+        assert_eq!(
+            wallpaper_folder_meta(Some(Path::new("/tmp/walls")), &keymap),
+            "/tmp/walls"
+        );
+        assert_eq!(
+            wallpaper_folder_meta(None, &keymap),
+            "Choose a folder of wallpaper images."
         );
     }
 

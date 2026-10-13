@@ -37,7 +37,7 @@ impl EnterPress {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Entry {
+pub(super) enum Entry {
     NewChat,
     NewProject,
     Settings,
@@ -61,6 +61,18 @@ impl Entry {
             )),
             Self::Chat(_) => None,
         }
+    }
+
+    /// The key hint beside an action, from the keymap as bound: none for a
+    /// shortcut the owner removed.
+    pub(super) fn shortcut(&self, keymap: &KeymapConfig) -> Option<String> {
+        match self {
+            Self::NewChat => keymap.bound(ShortcutId::NewSession),
+            Self::NewProject => keymap.bound(ShortcutId::NewProject),
+            Self::Settings => Some("mod-,"),
+            Self::Theme(_) | Self::Chat(_) => None,
+        }
+        .map(crate::settings::badge_combo)
     }
 }
 
@@ -248,21 +260,7 @@ impl Shell {
                 row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
             let content = if let Some((label, glyph)) = entry.action() {
-                let shortcut = match entry {
-                    Entry::NewChat | Entry::NewProject => {
-                        let id = if *entry == Entry::NewChat {
-                            ShortcutId::NewSession
-                        } else {
-                            ShortcutId::NewProject
-                        };
-                        self.settings
-                            .keymap
-                            .bound(id)
-                            .map(crate::settings::badge_combo)
-                    }
-                    Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
-                    _ => None,
-                };
+                let shortcut = entry.shortcut(&self.settings.keymap);
                 let entry = entry.clone();
                 popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
@@ -743,6 +741,25 @@ mod tests {
             vec![Entry::Theme(AppearanceMode::Light)]
         );
         assert!(actions_for("deployment", true).is_empty());
+    }
+
+    #[test]
+    fn removed_shortcuts_leave_their_actions_without_a_hint() {
+        let mut keymap = KeymapConfig::default();
+        let hints = |keymap: &KeymapConfig| {
+            [Entry::NewChat, Entry::NewProject, Entry::Settings].map(|entry| entry.shortcut(keymap))
+        };
+        assert_eq!(
+            hints(&keymap),
+            ["mod-n", "mod-shift-n", "mod-,"]
+                .map(|combo| Some(crate::settings::badge_combo(combo)))
+        );
+        keymap.unset(ShortcutId::NewSession);
+        keymap.unset(ShortcutId::NewProject);
+        assert_eq!(
+            hints(&keymap),
+            [None, None, Some(crate::settings::badge_combo("mod-,"))]
+        );
     }
 
     #[test]

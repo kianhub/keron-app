@@ -753,11 +753,7 @@ fn binding_control(
     let combo = combo.to_string();
     let non_default = combo != id.default_combo();
     let unset = combo.is_empty();
-    let shown: SharedString = if unset {
-        "Not set".into()
-    } else {
-        display_combo(&combo).into()
-    };
+    let shown = combo_label(&combo);
     let chip_text: SharedString = if is_recording {
         "Press keys…".into()
     } else {
@@ -848,9 +844,20 @@ fn binding_control(
         )
 }
 
-/// The quiet × that removes a bound shortcut, styled like Reset. During a
-/// key search every key is a search, so the results card's copy is not
-/// `focusable`: pressing it must leave focus, and the search, on the page.
+/// What a binding's chip reads: its combo, or "Not set" once removed. Pure.
+fn combo_label(combo: &str) -> SharedString {
+    if combo.is_empty() {
+        "Not set".into()
+    } else {
+        display_combo(combo).into()
+    }
+}
+
+/// The quiet × that removes a bound shortcut, styled like Reset. A row's ×
+/// goes with the binding, so it hands focus to the chip after it, where
+/// Enter records a new combo. During a key search every key is a search, so
+/// the results card's copy is not `focusable`: pressing it must leave focus,
+/// and the search, on the page.
 fn remove_control(
     key: String,
     id: ShortcutId,
@@ -881,7 +888,12 @@ fn remove_control(
         .when(focusable, |el| el.tab_index(0))
         .focus_visible(move |style| style.border_2().border_color(accent))
         .cursor_pointer()
-        .on_click(move |_, window, cx| on_remove(window, cx))
+        .on_click(move |_, window, cx| {
+            on_remove(window, cx);
+            if focusable {
+                window.focus_next(cx);
+            }
+        })
         .child(
             crate::icons::icon(crate::icons::CLOSE)
                 .size(px(10.0))
@@ -2421,20 +2433,47 @@ mod tests {
             window.focus_next(cx);
             window.draw(cx).clear();
         });
-        let enter = Keystroke::parse("enter").unwrap();
-        cx.simulate_event(gpui::KeyDownEvent {
-            keystroke: enter.clone(),
-            is_held: false,
-            prefer_character_input: false,
-        });
-        cx.simulate_event(gpui::KeyUpEvent { keystroke: enter });
+        let enter = |cx: &mut gpui::VisualTestContext| {
+            let enter = Keystroke::parse("enter").unwrap();
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: enter.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke: enter });
+            cx.update(|window, cx| window.draw(cx).clear());
+        };
+        enter(cx);
         assert_eq!(stored(cx), "");
+        // Focus moves on from the vanished × to the chip, where Enter
+        // records a new combo.
+        enter(cx);
+        field.update(cx, |field, _| assert!(field.recording));
+        cx.simulate_keystrokes("escape");
         click(cx, format!("shortcut-reset-{}", ix(dictation)));
         assert_eq!(stored(cx), "mod-d");
         field.update_in(cx, |field, window, cx| field.start_recording(window, cx));
         cx.simulate_keystrokes("backspace");
         assert_eq!(stored(cx), "");
         field.update(cx, |field, _| assert!(!field.recording));
+        // Reset turns the default down once another shortcut has taken it.
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.keymap.set(ShortcutId::NewSession, "mod-d".into())
+            })
+        });
+        click(cx, format!("shortcut-reset-{}", ix(dictation)));
+        assert_eq!(stored(cx), "");
+        field.update(cx, |field, _| {
+            assert!(
+                field
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("New session")),
+                "{:?}",
+                field.notice
+            )
+        });
     }
 
     #[test]
@@ -2470,6 +2509,39 @@ mod tests {
             record_key("ctrl", true, false, false, false),
             RecordOutcome::Ignored
         );
+    }
+
+    #[test]
+    fn a_removed_shortcut_reads_not_set() {
+        assert_eq!(combo_label(""), "Not set");
+        assert_eq!(combo_label("mod-b"), display_combo("mod-b"));
+    }
+
+    #[test]
+    fn an_unset_appshot_shortcut_reports_no_registration() {
+        use crate::appshots::{AppshotPlatform, CapabilityState, CaptureTarget};
+        let capabilities = |global_shortcut| AppshotCapabilities {
+            platform: AppshotPlatform::MacOs,
+            global_shortcut,
+            window_capture: CapabilityState::Ready,
+            application_text: CapabilityState::Ready,
+            target: CaptureTarget::ActiveWindow,
+        };
+        let ready = capabilities(CapabilityState::Ready);
+        assert_eq!(
+            appshots_page::shortcut_status(ready, true),
+            (Some("Ready"), ready.shortcut_description())
+        );
+        // Whatever the last combo's registration did stays off the row.
+        for state in [CapabilityState::Ready, CapabilityState::SetupRequired] {
+            assert_eq!(
+                appshots_page::shortcut_status(capabilities(state), false),
+                (
+                    None,
+                    "No shortcut is set. Choose one to capture from any app."
+                )
+            );
+        }
     }
 
     #[test]

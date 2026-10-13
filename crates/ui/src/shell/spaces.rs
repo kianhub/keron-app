@@ -6653,11 +6653,7 @@ impl Shell {
                     .fade_overflow_x(&crumb_scroll),
             );
 
-        let shortcut = self
-            .settings
-            .keymap
-            .bound(ShortcutId::NewProject)
-            .map(crate::settings::badge_combo);
+        let shortcut = command_palette::Entry::NewProject.shortcut(&self.settings.keymap);
         let can_add = !busy && listing.is_some();
         let footer = command_palette::palette_footer()
             .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))

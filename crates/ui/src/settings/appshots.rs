@@ -32,6 +32,26 @@ fn row(
         .child(control)
 }
 
+/// The Global shortcut row's badge and description. An unset shortcut
+/// registers nothing, so the row says so instead of reporting how the last
+/// combo's registration went. Pure.
+pub(super) fn shortcut_status(
+    capabilities: AppshotCapabilities,
+    set: bool,
+) -> (Option<&'static str>, &'static str) {
+    if set {
+        (
+            Some(capabilities.global_shortcut.badge()),
+            capabilities.shortcut_description(),
+        )
+    } else {
+        (
+            None,
+            "No shortcut is set. Choose one to capture from any app.",
+        )
+    }
+}
+
 impl ShortcutsPage {
     pub(super) fn render_appshots(
         &mut self,
@@ -107,11 +127,15 @@ impl ShortcutsPage {
                 "Stage captures in a new-session composer, keeping existing drafts intact."
             }
         };
+        let (shortcut_badge, shortcut_description) = shortcut_status(
+            capabilities,
+            self.keymap.bound(ShortcutId::CaptureAppshot).is_some(),
+        );
         let shortcut = div()
             .flex()
             .items_center()
             .gap(px(10.0))
-            .child(widgets::badge(&theme, capabilities.global_shortcut.badge()))
+            .children(shortcut_badge.map(|badge| widgets::badge(&theme, badge)))
             .child(self.render_binding_control(
                 ShortcutId::CaptureAppshot,
                 0,
@@ -213,7 +237,7 @@ impl ShortcutsPage {
                 } else {
                     "Global shortcut"
                 },
-                capabilities.shortcut_description(),
+                shortcut_description,
                 shortcut.into_any_element(),
             ))
             .child(row(
