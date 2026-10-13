@@ -7,8 +7,9 @@
 //!   year's heatmap. A click on it, or its "Open dashboard", opens the page.
 //! - The page, in the grid's place: Back, the period switch (Day, Week,
 //!   Month, Year), every tile of the period, its charts as panels two across,
-//!   its breakdown tables, the heatmap with its month and weekday labels, and
-//!   the mini's footnote.
+//!   its breakdown tables (two across once their labels have room), the
+//!   heatmap with its month and weekday labels, and the mini's footnote.
+//!   Focus is on the page while it's open, and goes back where it was.
 //!
 //! Bars are divs, each with its own tooltip. The heatmap is one canvas: the
 //! pointer is hit-tested against its days, and the day's tooltip is drawn
@@ -39,6 +40,8 @@ pub(super) struct Page {
     pub(super) widget: String,
     /// The page's own focus, where Escape closes it.
     pub(super) focus: FocusHandle,
+    /// What had focus before the page opened, and has it again after.
+    pub(super) back_to: Option<FocusHandle>,
 }
 
 /// The heatmap day under the pointer.
@@ -67,13 +70,26 @@ const WEEKDAY_WIDTH: f32 = 28.0;
 const MONTH_ROW: f32 = 14.0;
 /// At most this many labels under a chart's bars.
 const MAX_X_LABELS: usize = 8;
+/// A bar with anything in it is at least this tall, so a little never
+/// reads as nothing beside a tall bar or a high line.
+const MIN_BAR: f32 = 2.0;
+/// The space between a stack's segments: series whose colors are close
+/// (orange and yellow) still read as two.
+const SEGMENT_GAP: f32 = 2.0;
 /// A breakdown cell's width.
 const CELL_WIDTH: f32 = 64.0;
+/// The space before each of a breakdown row's cells.
+const CELL_GAP: f32 = 8.0;
+/// Tables go two across only while each row's label keeps this much beside
+/// the widest table's cells.
+const MIN_LABEL: f32 = 140.0;
 
 /// A series' color slot, fixed by what it is: the jobs, the door's apps and
-/// the poll series each in their own order (a chart shows only one of
-/// these sets, so neighbours in it stay apart), Clef's neurons on violet,
-/// and anything else by a hash of its id.
+/// the poll series each in the order the mini sends them, so a stack of a
+/// whole set has the palette's checked neighbours; Clef's neurons on
+/// violet; anything else by a hash of its id. A bar missing some series
+/// puts two others side by side whose colors may be close (orange and
+/// yellow, say): its tooltip and the legend name them, and a gap parts them.
 pub(super) fn slot(id: &str) -> usize {
     const FIXED: [(&str, usize); 19] = [
         ("loose-ends", 0),
@@ -166,9 +182,17 @@ impl Home {
         let accent = theme.accent;
         let wash = theme.ink(0.08);
         let text = theme.text;
+        // Its focus lasts while the page is open, so focus can come back.
+        let focus = self
+            .open_focus
+            .borrow_mut()
+            .entry(id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         div()
             .id("home-dashboard-open")
             .debug_selector(|| "home-dashboard-open".to_string())
+            .track_focus(&focus)
             .flex_none()
             .flex()
             .items_center()
@@ -180,7 +204,6 @@ impl Home {
             .text_color(theme.text_muted)
             .cursor_pointer()
             .hover(move |s| s.bg(wash).text_color(text))
-            .tab_index(0)
             .role(Role::Button)
             .aria_label(format!("Open the {} dashboard", manifest.title))
             .focus_visible(move |s| s.border_1().border_color(accent))
@@ -220,6 +243,7 @@ impl Home {
             });
         let period = shown.and_then(|(_, dashboard)| dashboard.period_or_first(self.period));
         let range = period.and_then(|(_, data)| data.range.clone());
+        let title = format!("{} dashboard", manifest.title);
         let header = div()
             .flex()
             .flex_wrap()
@@ -230,7 +254,9 @@ impl Home {
                 button(theme, "home-dashboard-back", ActionTone::Quiet)
                     .debug_selector(|| "home-dashboard-back".to_string())
                     .aria_label("Back to Home")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_dashboard(cx)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_dashboard(window, cx)
+                    }))
                     .child(
                         icon(icons::ALT_ARROW_LEFT)
                             .size(px(13.0))
@@ -240,10 +266,14 @@ impl Home {
             )
             .child(
                 div()
+                    .id("home-dashboard-title")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label(title.clone())
                     .text_size(ui_rems(15.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from(format!("{} dashboard", manifest.title))),
+                    .child(SharedString::from(title.clone())),
             )
             .children(range.map(|range| {
                 div()
@@ -255,64 +285,68 @@ impl Home {
             .children(shown.zip(period).map(|((_, dashboard), (period, _))| {
                 self.period_switch(theme, dashboard, period, cx)
             }));
-        let body =
-            match shown {
-                Some((payload, dashboard)) => {
-                    // A heatmap with no period still draws.
-                    let data = period.map(|(_, data)| data);
-                    let two = width >= TWO_PANELS_FROM;
-                    let charts: Vec<AnyElement> = data
-                        .into_iter()
-                        .flat_map(|data| &data.charts)
-                        .enumerate()
-                        .map(|(ix, chart)| chart_panel(theme, chart, ix))
-                        .collect();
-                    let tables: Vec<AnyElement> = data
-                        .into_iter()
-                        .flat_map(|data| &data.breakdowns)
-                        .enumerate()
-                        .map(|(ix, table)| breakdown_panel(theme, table, ix))
-                        .collect();
-                    let tiles: Vec<&Tile> = data.into_iter().flat_map(|data| &data.tiles).collect();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(PANEL_GAP))
-                        .children(
-                            state
-                                .and_then(|state| state.error.as_ref())
-                                .map(|message| self.render_error(theme, manifest, message, cx)),
-                        )
-                        .children(problems(theme, &payload.errors))
-                        .when(!tiles.is_empty(), |el| {
-                            el.child(tile_row(theme, &tiles, true, "home-dashboard-page-tile"))
-                        })
-                        .children(panel_grid(charts, two))
-                        .children(panel_grid(tables, two))
-                        .children(dashboard.heatmap.as_ref().map(|heatmap| {
+        let body = match shown {
+            Some((payload, dashboard)) => {
+                // A heatmap with no period still draws.
+                let data = period.map(|(_, data)| data);
+                let charts: Vec<AnyElement> = data
+                    .into_iter()
+                    .flat_map(|data| &data.charts)
+                    .enumerate()
+                    .map(|(ix, chart)| chart_panel(theme, chart, ix))
+                    .collect();
+                let breakdowns: &[Breakdown] = data.map_or(&[], |data| data.breakdowns.as_slice());
+                let tables: Vec<AnyElement> = breakdowns
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, table)| breakdown_panel(theme, table, ix))
+                    .collect();
+                let tiles: Vec<&Tile> = data.into_iter().flat_map(|data| &data.tiles).collect();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(PANEL_GAP))
+                    .children(
+                        state
+                            .and_then(|state| state.error.as_ref())
+                            .map(|message| self.render_error(theme, manifest, message, cx)),
+                    )
+                    .children(problems(theme, &payload.errors))
+                    .when(!tiles.is_empty(), |el| {
+                        el.child(tile_row(theme, &tiles, true, "home-dashboard-page-tile"))
+                    })
+                    .children(panel_grid(charts, width >= TWO_PANELS_FROM))
+                    .children(panel_grid(tables, tables_two_across(breakdowns, width)))
+                    .children(
+                        dashboard.heatmap.as_ref().map(|heatmap| {
                             self.heatmap_panel(theme, heatmap, &manifest.id, width, cx)
-                        }))
-                        .children(dashboard.note.clone().map(|note| {
-                            div()
-                                .text_size(ui_rems(11.5))
-                                .line_height(ui_rems(16.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(note))
-                        }))
-                        .into_any_element()
-                }
-                // Signed out, loading or failed: as the card says it.
-                None => self.render_body(theme, manifest, state, cx),
-            };
+                        }),
+                    )
+                    .children(dashboard.note.clone().map(|note| {
+                        div()
+                            .debug_selector(|| "home-dashboard-note".to_string())
+                            .text_size(ui_rems(11.5))
+                            .line_height(ui_rems(16.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(note))
+                    }))
+                    .into_any_element()
+            }
+            // Signed out, loading or failed: as the card says it.
+            None => self.render_body(theme, manifest, state, cx),
+        };
         let focus = self.page.as_ref().map(|page| page.focus.clone());
+        // The page has focus as it opens, so a screen reader names it.
         div()
             .id("home-dashboard-page")
             .debug_selector(|| "home-dashboard-page".to_string())
+            .role(Role::Group)
+            .aria_label(title)
             .when_some(focus, |el, focus| el.track_focus(&focus))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    this.close_dashboard(cx);
+                    this.close_dashboard(window, cx);
                 }
             }))
             .w(px(width))
@@ -805,8 +839,10 @@ fn chart_panel(theme: &Theme, chart: &Chart, ix: usize) -> AnyElement {
                 .overflow_hidden()
                 .when(ix % step == 0, |el| el.child(faint(text.clone())))
         }));
+    let id = chart.id.clone();
     let panel = card_surface(theme)
         .id(("home-dashboard-panel", ix))
+        .debug_selector(move || format!("home-dashboard-panel-{id}"))
         .px(px(PANEL_PAD))
         .py(px(10.0))
         .gap(px(6.0))
@@ -869,11 +905,7 @@ fn bars(theme: &Theme, chart: &Chart, height: f32) -> Div {
         .items_end()
         .gap(px(bar_gap(chart)))
         .children(totals.iter().enumerate().map(|(ix, total)| {
-            let tall = if top > 0.0 {
-                height * (total / top) as f32
-            } else {
-                0.0
-            };
+            let tall = bar_height(*total, top, height);
             let segments: Vec<(f64, Hsla)> = chart
                 .series
                 .iter()
@@ -881,12 +913,14 @@ fn bars(theme: &Theme, chart: &Chart, height: f32) -> Div {
                 .filter(|series| series.values[ix] > 0.0)
                 .map(|series| (series.values[ix], theme.chart_series(slot(&series.id))))
                 .collect();
+            // Segments part only while each keeps some height of its own.
+            let parted = tall >= segments.len() as f32 * (MIN_BAR + SEGMENT_GAP);
             let stack = div()
                 .w_full()
                 .h(px(tall))
                 .flex()
                 .flex_col()
-                .gap(px(1.0))
+                .when(parted, |el| el.gap(px(SEGMENT_GAP)))
                 .children(segments.into_iter().enumerate().map(|(n, (value, color))| {
                     div()
                         .w_full()
@@ -910,14 +944,23 @@ fn bars(theme: &Theme, chart: &Chart, height: f32) -> Div {
         }))
 }
 
+/// A bar's height in a chart `height` tall whose top is `top`: its share,
+/// and at least [`MIN_BAR`] when it has anything.
+pub(super) fn bar_height(total: f64, top: f64, height: f32) -> f32 {
+    if top > 0.0 && total > 0.0 {
+        (height * (total / top) as f32).max(MIN_BAR)
+    } else {
+        0.0
+    }
+}
+
 fn baseline(theme: &Theme) -> Div {
     div().h(px(1.0)).bg(theme.hairline(0.12))
 }
 
-/// One panel per table: its columns, then per row its label, its share
-/// bar, its cells and its sub line.
-fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
-    let columns = if table.columns.is_empty() {
+/// A table's columns: those it names, or as many cells as its widest row.
+fn columns(table: &Breakdown) -> usize {
+    if table.columns.is_empty() {
         table
             .rows
             .iter()
@@ -926,12 +969,27 @@ fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
             .unwrap_or(0)
     } else {
         table.columns.len()
-    };
+    }
+}
+
+/// Whether a page `width` wide has room for its tables two across: at half
+/// the width, the widest table's labels keep [`MIN_LABEL`].
+pub(super) fn tables_two_across(tables: &[Breakdown], width: f32) -> bool {
+    let widest = tables.iter().map(columns).max().unwrap_or(0);
+    let inner = (width - PANEL_GAP) / 2.0 - 2.0 * PANEL_PAD - 2.0;
+    width >= TWO_PANELS_FROM && inner - widest as f32 * (CELL_WIDTH + CELL_GAP) >= MIN_LABEL
+}
+
+/// One panel per table: its columns, then per row its label, its share
+/// bar, its cells and its sub line. A long column name wraps; a long cell
+/// is cut.
+fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
+    let columns = columns(table);
     let cell = || div().flex_none().w(px(CELL_WIDTH)).flex().justify_end();
     let header = div()
         .flex()
-        .items_baseline()
-        .gap(px(8.0))
+        .items_end()
+        .gap(px(CELL_GAP))
         .child(
             div()
                 .flex_1()
@@ -941,8 +999,10 @@ fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
         .children(table.columns.iter().map(|column| {
             cell().child(
                 div()
-                    .truncate()
+                    .w_full()
+                    .text_right()
                     .text_size(ui_rems(10.5))
+                    .line_height(ui_rems(13.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(column.clone())),
             )
@@ -952,7 +1012,7 @@ fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
         div()
             .flex()
             .items_start()
-            .gap(px(8.0))
+            .gap(px(CELL_GAP))
             .child(
                 div()
                     .flex_1()
@@ -991,6 +1051,8 @@ fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
             .children((0..columns).map(|ix| {
                 cell().child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(ui_rems(11.5))
                         .line_height(ui_rems(17.0))
                         .font_family(theme.font_mono.clone())
@@ -1001,8 +1063,10 @@ fn breakdown_panel(theme: &Theme, table: &Breakdown, ix: usize) -> AnyElement {
                 )
             }))
     });
+    let id = table.id.clone();
     let panel = card_surface(theme)
         .id(("home-dashboard-table", ix))
+        .debug_selector(move || format!("home-dashboard-table-{id}"))
         .px(px(PANEL_PAD))
         .py(px(10.0))
         .gap(px(8.0))

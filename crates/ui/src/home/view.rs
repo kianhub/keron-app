@@ -113,8 +113,9 @@ impl Render for Home {
                     && slot.manifest.kind == Kind::Dashboard
             })
         });
-        if self.page.is_some() && page.is_none() {
-            self.page = None;
+        if page.is_none() {
+            // Its widget went (its manifest deleted or hidden): back to the grid.
+            self.close_dashboard(window, cx);
         }
         if let Some(slot) = page {
             return self.render_page(&theme, &slot, width, cx);
@@ -985,7 +986,9 @@ impl Home {
                     .child(SharedString::from(manifest.title.clone())),
             )
             .children(count.map(|count| {
+                let id = manifest.id.clone();
                 let chip = div()
+                    .debug_selector(move || format!("home-count-{id}"))
                     .flex_none()
                     .text_size(ui_rems(11.0))
                     .font_weight(FontWeight::MEDIUM);
@@ -1148,8 +1151,10 @@ impl Home {
             )
             .when(can_retry, |el| {
                 let id = manifest.id.clone();
+                let key = format!("home-retry-{id}");
                 el.child(
-                    small_button(theme, format!("home-retry-{id}"))
+                    small_button(theme, key.clone())
+                        .debug_selector(move || key)
                         .aria_label(format!("Retry {}", manifest.title))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             // Not a click on the card: a dashboard's would open.

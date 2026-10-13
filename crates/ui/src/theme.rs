@@ -2079,7 +2079,8 @@ mod tests {
             let colors: Vec<Hsla> = (0..CHART_SLOTS)
                 .map(|slot| theme.chart_series(slot))
                 .collect();
-            // Stacked series sit next to each other in slot order.
+            // A stack of a whole set (every job, every app) is in slot
+            // order; one missing some series isn't, and leans on its legend.
             for pair in colors.windows(2) {
                 let ([l1, a1, b1], [l2, a2, b2]) = (oklab(pair[0]), oklab(pair[1]));
                 let apart = ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();

@@ -505,13 +505,13 @@ fn heatmap(o: &Object, end: NaiveDate, skipped: &mut usize) -> Heatmap {
     }
 }
 
-/// Three numbers, in ascending order; `None` unless there are three.
+/// Three numbers, in any order ([`level`] counts those a value reaches);
+/// `None` unless there are three.
 fn thresholds(levels: Option<&Value>) -> Option<[f64; 3]> {
     let Some(Value::Array(levels)) = levels else {
         return None;
     };
-    let mut levels: Vec<f64> = levels.iter().filter_map(number).collect();
-    levels.sort_by(f64::total_cmp);
+    let levels: Vec<f64> = levels.iter().filter_map(number).collect();
     levels.try_into().ok()
 }
 
@@ -833,8 +833,8 @@ mod tests {
             [0, 1, 1, 2, 2, 3, 3, 4, 4]
         );
 
-        // Out of order is sorted; fewer than three falls back to quartiles
-        // of the days that had anything.
+        // Out of order reads the same; fewer than three falls back to
+        // quartiles of the days that had anything.
         let days = |levels: Value| {
             let days: Vec<Value> = (1..=8)
                 .map(|n| json!({"date": format!("2026-10-0{n}"), "value": n * 10}))

@@ -16,7 +16,9 @@
 //!
 //! The Mini dashboard's card opens into a page of its own ([`dashboard`]):
 //! Home then draws that instead of its grid, and the shell hides the
-//! composer above it ([`Home::dashboard_open`]) until Back or Escape.
+//! composer above it ([`Home::dashboard_open`]) until Back or Escape. The
+//! grid is off screen meanwhile: its loose ends aren't seen, and ⌘Z leaves
+//! its held row actions be.
 
 mod bridge;
 mod dashboard;
@@ -489,6 +491,9 @@ pub struct Home {
     wheel: Wheel,
     /// The dashboard page, while it's open in the grid's place.
     page: Option<dashboard::Page>,
+    /// Each dashboard card's "Open dashboard", by widget id: focus comes
+    /// back to it when the page it opened closes.
+    open_focus: RefCell<HashMap<String, FocusHandle>>,
     /// The period the dashboard page shows: Week until the owner picks
     /// another, for as long as the app runs.
     period: Period,
@@ -649,6 +654,7 @@ impl Home {
             list_scrolls: RefCell::default(),
             wheel: Wheel::default(),
             page: None,
+            open_focus: RefCell::default(),
             period: Period::Week,
             heat_hover: None,
             page_scroll: ScrollHandle::new(),
@@ -701,10 +707,7 @@ impl Home {
             self.sync_undo_elsewhere(cx);
         }
         if !was_on_screen && self.on_screen() {
-            let ids: Vec<String> = self.widgets.keys().cloned().collect();
-            for id in ids {
-                self.maybe_post_shown(&id, cx);
-            }
+            self.post_all_shown(cx);
         }
         cx.notify();
     }
@@ -722,9 +725,11 @@ impl Home {
         }
     }
 
-    /// Whether Home is in view, past halfway through its fade.
+    /// Whether Home's grid is in view: past halfway through its fade, and
+    /// not under the dashboard page, which hides the cards' rows and their
+    /// undo lines as a chat does.
     fn on_screen(&self) -> bool {
-        self.frame.opacity >= 0.5
+        self.frame.opacity >= 0.5 && self.page.is_none()
     }
 
     /// The app's own data, for `zeron:` widgets.
@@ -1675,6 +1680,14 @@ impl Home {
             .any(|m| m.id == widget && matches!(m.source, SourceSpec::KeronSources(_)))
     }
 
+    /// The grid came into view: every Loose ends card in it may be seen.
+    fn post_all_shown(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.widgets.keys().cloned().collect();
+        for id in ids {
+            self.maybe_post_shown(&id, cx);
+        }
+    }
+
     /// Tell the door which loose ends are on screen: when they first show,
     /// then at most once an hour.
     fn maybe_post_shown(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1929,32 +1942,44 @@ impl Home {
     // ---- the dashboard page ----
 
     /// Open a dashboard widget's page in the grid's place, at its top, with
-    /// focus on it so Escape closes it.
+    /// focus on it so Escape closes it. The grid is off screen meanwhile.
     pub(crate) fn open_dashboard(
         &mut self,
         widget: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let back_to = window.focused(cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         self.page = Some(dashboard::Page {
             widget: widget.to_string(),
             focus,
+            back_to,
         });
         self.heat_hover = None;
         self.page_scroll
             .set_offset(point(Pixels::ZERO, Pixels::ZERO));
+        self.sync_undo_elsewhere(cx);
         cx.notify();
     }
 
-    /// Back to the grid. Focus goes with the page, and the shell gives it
-    /// back to the composer.
-    pub(crate) fn close_dashboard(&mut self, cx: &mut Context<Self>) {
-        if self.page.take().is_some() {
-            self.heat_hover = None;
-            cx.notify();
+    /// Back to the grid, with focus where it was before the page opened
+    /// (the card's "Open dashboard", or the composer), and the grid on
+    /// screen again as when Home itself comes back.
+    pub(crate) fn close_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.page.take() else {
+            return;
+        };
+        self.heat_hover = None;
+        if let Some(back_to) = page.back_to {
+            window.focus(&back_to, cx);
         }
+        if self.on_screen() {
+            self.sync_undo_elsewhere(cx);
+            self.post_all_shown(cx);
+        }
+        cx.notify();
     }
 
     /// Whether the dashboard page is open: the shell hides the new-chat

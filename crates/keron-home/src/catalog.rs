@@ -26,7 +26,7 @@ const SEEDED_READMES: [u64; 10] = [
     0xc8d6b755772d971a,
     0xbf3cec4125850e89,
     0x8c789b8019198fbd,
-    0xfe9fe9494a131339,
+    0x1e7075bd48d46044,
 ];
 
 /// The hidden file listing the built-ins this folder has had (seeded or

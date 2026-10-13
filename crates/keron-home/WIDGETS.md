@@ -171,7 +171,7 @@ year of days. Every figure comes as the text to show (`"1.23M"`, `"$4.10"`);
 - The heatmap is the 53 weeks up to `end`, Monday first, and a day that
   isn't listed is 0. `levels` are three rising thresholds: any value above 0
   gets the faintest shade, and each threshold it reaches makes it one shade
-  darker.
+  stronger.
 - A value that isn't a number counts as 0, and a series is padded or cut to
   its chart's labels.
 
