@@ -28,6 +28,9 @@
 //!    access token as a bearer token, refresh it when it is about to expire
 //!    or the door answers 401, and retry once. Refreshes are single-flight.
 //!
+//! Every request says it's the app ([`USER_AGENT`]), so the door's access
+//! log can tell its calls from the chat apps'.
+//!
 //! Tokens, codes and verifiers never go into logs, errors or argv. Every
 //! error message here is safe to show.
 
@@ -156,6 +159,9 @@ struct Access {
     refresh_at: Instant,
 }
 
+/// `keron-app/<version>`: the door logs the product token as the caller's app.
+pub const USER_AGENT: &str = concat!("keron-app/", env!("CARGO_PKG_VERSION"));
+
 /// How long the browser has to come back to the loopback listener.
 const SIGN_IN_WAIT: Duration = Duration::from_secs(10 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -172,6 +178,7 @@ impl DoorClient {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .default_headers(headers)

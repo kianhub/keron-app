@@ -11,8 +11,8 @@ A widget is two things:
   mini's mail, calendar and Slack connectors, the app itself, or a script of
   your own.
 
-The app draws a few kinds of card (list, timeline, stat, agenda, devices). A
-new kind needs a new version of the app. A new widget doesn't: drop a manifest
+The app draws a few kinds of card (list, timeline, stat, agenda, devices,
+dashboard). A new kind needs a new version of the app. A new widget doesn't: drop a manifest
 (and its script, if it has one) into this folder and the card appears on Home
 straight away, with no rebuild and no restart.
 
@@ -37,7 +37,7 @@ empty  = "Nobody's waiting"
 | Key | Needed | Default | What it does |
 |---|---|---|---|
 | `title` | yes | | The card's heading. At most 80 characters. |
-| `kind` | yes | | How the card is drawn: `list`, `timeline`, `stat`, `agenda` or `devices`. |
+| `kind` | yes | | How the card is drawn: `list`, `timeline`, `stat`, `agenda`, `devices` or `dashboard`. |
 | `source` | yes | | Where the data comes from. See "Sources". |
 | `every` | no | `1m` | How often to refresh: `30s`, `5m`, `1h`. A bare number is seconds. The fastest is `5s`, the slowest `24h`. |
 | `icon` | no | none | One of `flag`, `chat`, `check`, `calendar`, `tree`, `pulse`, `devices`, `pr`, `mail`, `mic`, `bars`, `widget`, `bell`, `star`, `list`, `globe`, `slack`. |
@@ -54,7 +54,7 @@ isn't silently missing.
 | Source | Where the data comes from |
 |---|---|
 | `keron-sources:<name>` | The mini's read-only connectors, through your memory's door: `gmail-needs-reply`, `calendar-today`, `slack-waiting`. |
-| `memory:<name>` | Your memory, through the door: `loose-ends`, `today`. |
+| `memory:<name>` | Your memory, through the door: `loose-ends`, `today`, `dashboard` (what the Mac mini processed). |
 | `zeron:<name>` | What the app already knows: `sessions` (agent chats that are working, waiting on you or stuck), `devices`, `pull-requests`, `usage` (plan usage of the agent accounts signed in on this Mac, as Settings → Accounts shows it: one `list` row per account, the ones in use first, with a meter per limit window). `services` and `todos` are reserved; the app has no data for them yet. |
 | `script:<path>` | A program on this Mac that prints the data as JSON. A relative path is inside this folder; `~/` starts at your home folder. |
 
@@ -130,6 +130,50 @@ One big number, at the top level (no `items`).
 
 `value` can be a number or a string (`"4.2k"`). `series` draws small bars,
 oldest first; the last one is now.
+
+### dashboard
+
+The Mini card and its page: what the Mac mini processed, by period, and a
+year of days. Every figure comes as the text to show (`"1.23M"`, `"$4.10"`);
+`value` and `share` only size bars, cells and shares.
+
+```json
+{
+  "note": "Dollars are API-equivalent at list price.",
+  "card": {"period": "day", "tiles": ["tokens", "runs"], "chart": "tokens"},
+  "periods": {
+    "day": {
+      "label": "Today", "range": "Mon 12 Oct",
+      "tiles": [{"id": "tokens", "label": "Tokens", "text": "1.23M", "sub": "≈ $4.10 est.",
+                 "delta": "+12%", "tone": "up"}],
+      "charts": [{"id": "tokens", "title": "Tokens by job", "unit": "tokens", "labels": ["00", "01"],
+                  "series": [{"id": "naps", "label": "Naps", "values": [0, 1200]}],
+                  "texts": ["00:00 · nothing", "01:00 · 1.2k tokens"],
+                  "line": {"value": 1000, "label": "a threshold"}}],
+      "breakdowns": [{"id": "jobs", "title": "By job", "columns": ["Tokens", "Runs"],
+                      "rows": [{"label": "Naps", "cells": ["412k", "24"], "share": 0.41, "sub": "hourly"}]}]
+    },
+    "week": {"label": "7 days", "range": "6–12 Oct", "tiles": [], "charts": [], "breakdowns": []}
+  },
+  "heatmap": {"label": "Tokens per day", "end": "2026-10-12", "levels": [100000, 500000, 1000000],
+              "days": [{"date": "2026-10-11", "value": 1234567, "text": "Sun 11 Oct · 1.2M tokens"}]}
+}
+```
+
+- `periods` holds `day`, `week`, `month` and `year`. One that's missing
+  isn't offered.
+- The card shows `card.tiles` and `card.chart` of `card.period`. Its page
+  shows every tile, chart and breakdown of the period you pick.
+- A chart's `series` stack, the first at the bottom, one value per label.
+  `texts` holds one tooltip per bar, and `line` is an optional dashed
+  threshold.
+- A breakdown row's `share`, from 0 to 1, is the length of its bar.
+- The heatmap is the 53 weeks up to `end`, Monday first, and a day that
+  isn't listed is 0. `levels` are three rising thresholds: any value above 0
+  gets the faintest shade, and each threshold it reaches makes it one shade
+  darker.
+- A value that isn't a number counts as 0, and a series is padded or cut to
+  its chart's labels.
 
 ### agenda
 
@@ -242,10 +286,10 @@ shown = false
 
 To remove a widget, delete its manifest, or hide it in Customize. This folder
 is only filled once, the first time the app runs; the built-in widgets you
-delete stay deleted. Built-ins the app gained later (like Usage) aren't added
-by themselves either: Customize shows an "Add" button for each one this
-folder hasn't had yet, unless a widget here already uses its source, and
-clicking it writes its manifest into this folder. The hidden `.builtins` file
+delete stay deleted. Built-ins the app gained later (like Usage and Mini)
+aren't added by themselves either: Customize shows an "Add" button for each
+one this folder hasn't had yet, unless a widget here already uses its
+source, and clicking it writes its manifest into this folder. The hidden `.builtins` file
 lists the built-ins this folder has had, so one you add and later delete
 isn't offered again. This README is the one file the app keeps current: a
 new version replaces it when it's still a copy an older one wrote, never

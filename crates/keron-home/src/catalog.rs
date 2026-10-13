@@ -16,7 +16,7 @@ pub const README: &str = include_str!("../WIDGETS.md");
 /// the last is [`README`]'s. A README.md matching one is an unedited copy,
 /// so [`refresh_readme`] may replace it. When WIDGETS.md changes, append its
 /// new fingerprint (a test says so).
-const SEEDED_READMES: [u64; 9] = [
+const SEEDED_READMES: [u64; 10] = [
     0x44002d8dae033d70,
     0x97faf17121760427,
     0x08fd2bb9e7d63fa6,
@@ -26,6 +26,7 @@ const SEEDED_READMES: [u64; 9] = [
     0xc8d6b755772d971a,
     0xbf3cec4125850e89,
     0x8c789b8019198fbd,
+    0xfe9fe9494a131339,
 ];
 
 /// The hidden file listing the built-ins this folder has had (seeded or
@@ -363,7 +364,7 @@ mod tests {
         catalog.manifests.iter().map(|m| m.id.as_str()).collect()
     }
 
-    const BUILTIN_IDS: [&str; 9] = [
+    const BUILTIN_IDS: [&str; 10] = [
         "loose-ends",
         "slack-waiting",
         "today",
@@ -373,6 +374,7 @@ mod tests {
         "devices",
         "pull-requests",
         "usage",
+        "dashboard",
     ];
 
     #[test]
@@ -429,34 +431,43 @@ mod tests {
         let paths = paths(home.path());
         assert!(seed(&paths).unwrap());
         assert!(missing_builtins(&load(&paths)).is_empty());
-        let file = paths.widgets_dir.join("usage.toml");
+        let file = paths.widgets_dir.join("dashboard.toml");
         let had = paths.widgets_dir.join(HAD_FILE);
 
-        // A folder seeded before Usage existed: no usage.toml, no record.
+        // A folder seeded before Usage and Mini existed: neither file, no
+        // record.
         std::fs::remove_file(&file).unwrap();
+        std::fs::remove_file(paths.widgets_dir.join("usage.toml")).unwrap();
         std::fs::remove_file(&had).unwrap();
         assert_eq!(
             missing_builtins(&load(&paths)),
-            [("usage", "Usage".to_string())]
+            [
+                ("usage", "Usage".to_string()),
+                ("dashboard", "Mini".to_string())
+            ]
         );
 
-        assert!(add_builtin(&paths, "usage").unwrap());
+        assert!(add_builtin(&paths, "dashboard").unwrap());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
             manifest::builtins().last().unwrap().1
         );
-        assert!(missing_builtins(&load(&paths)).is_empty());
+        assert_eq!(
+            missing_builtins(&load(&paths)),
+            [("usage", "Usage".to_string())]
+        );
         // The owner edits it; adding again never overwrites.
         std::fs::write(
             &file,
-            "title = \"Mine\"\nkind = \"list\"\nsource = \"zeron:usage\"\n",
+            "title = \"Mine\"\nkind = \"dashboard\"\nsource = \"memory:dashboard\"\n",
         )
         .unwrap();
-        assert!(!add_builtin(&paths, "usage").unwrap());
+        assert!(!add_builtin(&paths, "dashboard").unwrap());
         assert!(std::fs::read_to_string(&file).unwrap().contains("Mine"));
         assert!(add_builtin(&paths, "weather").is_err());
 
         // Deleted after adding (or a deleted original): not offered again.
+        assert!(add_builtin(&paths, "usage").unwrap());
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_file(paths.widgets_dir.join("devices.toml")).unwrap();
         assert!(missing_builtins(&load(&paths)).is_empty());

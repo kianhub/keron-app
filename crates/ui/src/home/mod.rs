@@ -13,8 +13,13 @@
 //! A shown widget with nothing to show (its data is in and empty, nothing
 //! wrong) is quiet: unless the owner turned that off, it leaves the grid and
 //! sits as an icon chip in the toolbar, where a click peeks at its card.
+//!
+//! The Mini dashboard's card opens into a page of its own ([`dashboard`]):
+//! Home then draws that instead of its grid, and the shell hides the
+//! composer above it ([`Home::dashboard_open`]) until Back or Escape.
 
 mod bridge;
+mod dashboard;
 mod notices;
 mod usage;
 mod view;
@@ -42,7 +47,7 @@ use keron_home::kinds::{is_openable, parse_chat_link};
 use keron_home::loose_ends::{self, Action};
 use keron_home::script::ScriptOptions;
 use keron_home::{
-    Body, FetchError, Fetcher, HomePaths, Layout, ListItem, Manifest, Payload, SourceSpec,
+    Body, FetchError, Fetcher, HomePaths, Layout, ListItem, Manifest, Payload, Period, SourceSpec,
     ZeronSnapshot,
 };
 
@@ -482,6 +487,16 @@ pub struct Home {
     /// Lists that scroll inside their cards, by widget id.
     list_scrolls: RefCell<HashMap<String, ListScroll>>,
     wheel: Wheel,
+    /// The dashboard page, while it's open in the grid's place.
+    page: Option<dashboard::Page>,
+    /// The period the dashboard page shows: Week until the owner picks
+    /// another, for as long as the app runs.
+    period: Period,
+    /// The heatmap day under the pointer, on the card or the page.
+    heat_hover: Option<dashboard::HeatHover>,
+    /// The dashboard page's scroll, apart from the grid's so that's where
+    /// the owner left it.
+    page_scroll: ScrollHandle,
     save_pending: bool,
     _save: Option<Task<()>>,
     _load: Option<Task<()>>,
@@ -633,6 +648,10 @@ impl Home {
             page_before: Rc::default(),
             list_scrolls: RefCell::default(),
             wheel: Wheel::default(),
+            page: None,
+            period: Period::Week,
+            heat_hover: None,
+            page_scroll: ScrollHandle::new(),
             save_pending: false,
             _save: None,
             _load: None,
@@ -691,10 +710,13 @@ impl Home {
     }
 
     /// Home is off screen (a chat, Settings): nothing on it counts as seen,
-    /// and ⌘Z leaves its held row actions be, until it fades in again.
+    /// and ⌘Z leaves its held row actions be, until it fades in again, on
+    /// its grid.
     pub fn hide(&mut self, cx: &mut App) {
         let was_on_screen = self.on_screen();
         self.frame.opacity = 0.0;
+        self.page = None;
+        self.heat_hover = None;
         if was_on_screen {
             self.sync_undo_elsewhere(cx);
         }
@@ -1901,6 +1923,68 @@ impl Home {
             cx.emit(HomeEvent::OpenChat(chat_id.to_string()));
         } else if is_openable(link) {
             cx.open_url(link);
+        }
+    }
+
+    // ---- the dashboard page ----
+
+    /// Open a dashboard widget's page in the grid's place, at its top, with
+    /// focus on it so Escape closes it.
+    pub(crate) fn open_dashboard(
+        &mut self,
+        widget: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.page = Some(dashboard::Page {
+            widget: widget.to_string(),
+            focus,
+        });
+        self.heat_hover = None;
+        self.page_scroll
+            .set_offset(point(Pixels::ZERO, Pixels::ZERO));
+        cx.notify();
+    }
+
+    /// Back to the grid. Focus goes with the page, and the shell gives it
+    /// back to the composer.
+    pub(crate) fn close_dashboard(&mut self, cx: &mut Context<Self>) {
+        if self.page.take().is_some() {
+            self.heat_hover = None;
+            cx.notify();
+        }
+    }
+
+    /// Whether the dashboard page is open: the shell hides the new-chat
+    /// composer meanwhile, so the page has the column.
+    pub fn dashboard_open(&self) -> bool {
+        self.page.is_some()
+    }
+
+    pub(crate) fn set_period(&mut self, period: Period, cx: &mut Context<Self>) {
+        self.period = period;
+        self.heat_hover = None;
+        cx.notify();
+    }
+
+    /// The pointer moved over (or off) heatmap `key`'s days.
+    fn hover_heat(
+        &mut self,
+        key: &str,
+        hover: Option<dashboard::HeatHover>,
+        cx: &mut Context<Self>,
+    ) {
+        let next = match hover {
+            Some(hover) => Some(hover),
+            // Leaving one heatmap doesn't clear another's.
+            None if self.heat_hover.as_ref().is_some_and(|now| now.key != key) => return,
+            None => None,
+        };
+        if self.heat_hover != next {
+            self.heat_hover = next;
+            cx.notify();
         }
     }
 

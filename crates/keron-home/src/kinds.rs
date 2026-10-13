@@ -4,7 +4,8 @@
 //! fetched or polled) and `errors` (short strings, for example
 //! `"work: token expired"`) are optional on every kind. List, timeline,
 //! agenda and devices put their rows in `items`; stat puts `value`, `label`
-//! and `series` at the top level. Unknown fields are ignored and every
+//! and `series` at the top level, and dashboard its periods and heatmap
+//! ([`crate::dashboard`]). Unknown fields are ignored and every
 //! field but the row's main text is optional, so keron-sources' payloads
 //! (`{"source","kind","updated","items","errors"}`) parse as they are.
 //! Times are kept as the strings they came as; [`parse_time`] reads them.
@@ -12,6 +13,8 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::dashboard::{self, Dashboard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,15 +24,17 @@ pub enum Kind {
     Stat,
     Agenda,
     Devices,
+    Dashboard,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::List,
         Kind::Timeline,
         Kind::Stat,
         Kind::Agenda,
         Kind::Devices,
+        Kind::Dashboard,
     ];
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -45,6 +50,7 @@ impl Kind {
             Kind::Stat => "stat",
             Kind::Agenda => "agenda",
             Kind::Devices => "devices",
+            Kind::Dashboard => "dashboard",
         }
     }
 }
@@ -66,6 +72,7 @@ pub enum Body {
     Stat(Stat),
     Agenda(Vec<AgendaItem>),
     Devices(Vec<DeviceItem>),
+    Dashboard(Box<Dashboard>),
 }
 
 impl Body {
@@ -76,10 +83,12 @@ impl Body {
             Body::Stat(_) => Kind::Stat,
             Body::Agenda(_) => Kind::Agenda,
             Body::Devices(_) => Kind::Devices,
+            Body::Dashboard(_) => Kind::Dashboard,
         }
     }
 
-    /// Rows (or 1 for a stat with a value), for the card's count.
+    /// Rows (or 1 for a stat with a value, or a dashboard with anything),
+    /// for the card's count.
     pub fn len(&self) -> usize {
         match self {
             Body::List(items) => items.len(),
@@ -87,6 +96,7 @@ impl Body {
             Body::Stat(stat) => usize::from(!stat.value.is_empty()),
             Body::Agenda(items) => items.len(),
             Body::Devices(items) => items.len(),
+            Body::Dashboard(dashboard) => usize::from(!dashboard.is_empty()),
         }
     }
 
@@ -248,6 +258,7 @@ pub fn parse_payload(kind: Kind, value: &Value) -> Result<Payload, PayloadError>
         Kind::Timeline => Body::Timeline(rows(object, &mut errors, timeline_item)?),
         Kind::Agenda => Body::Agenda(rows(object, &mut errors, agenda_item)?),
         Kind::Devices => Body::Devices(rows(object, &mut errors, device_item)?),
+        Kind::Dashboard => Body::Dashboard(Box::new(dashboard::parse(object, &mut errors))),
     };
     Ok(Payload {
         updated,
@@ -256,7 +267,7 @@ pub fn parse_payload(kind: Kind, value: &Value) -> Result<Payload, PayloadError>
     })
 }
 
-type Object = serde_json::Map<String, Value>;
+pub(crate) type Object = serde_json::Map<String, Value>;
 
 fn rows<T>(
     object: &Object,
@@ -376,7 +387,7 @@ fn stat(o: &Object) -> Stat {
 }
 
 /// A string, or a number written out (ids sometimes come as numbers).
-fn text(value: &Value) -> Option<String> {
+pub(crate) fn text(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(number_text(n)),
@@ -385,12 +396,12 @@ fn text(value: &Value) -> Option<String> {
 }
 
 /// A text field; blank strings count as missing.
-fn field(o: &Object, key: &str) -> Option<String> {
+pub(crate) fn field(o: &Object, key: &str) -> Option<String> {
     o.get(key).and_then(text).filter(|s| !s.trim().is_empty())
 }
 
 /// A number, or a string holding one.
-fn number(value: &Value) -> Option<f64> {
+pub(crate) fn number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => s.trim().parse::<f64>().ok(),

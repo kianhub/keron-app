@@ -2,7 +2,7 @@
 //!
 //! ```toml
 //! title  = "Slack · waiting on you"
-//! kind   = "list"            # list, timeline, stat, agenda, devices
+//! kind   = "list"            # list, timeline, stat, agenda, devices, dashboard
 //! source = "keron-sources:slack-waiting"
 //! every  = "1m"              # optional, default 1m, from 5s to 24h
 //! icon   = "chat"            # optional, see ICONS
@@ -232,7 +232,7 @@ pub fn parse_every(text: &str) -> Option<Duration> {
 
 /// The first widgets, as `(file name, TOML)`, in Home's default order:
 /// loose-ends, slack-waiting, today, gmail-needs-reply, memory-today,
-/// working-now, devices, pull-requests, usage.
+/// working-now, devices, pull-requests, usage, dashboard.
 pub fn builtins() -> &'static [(&'static str, &'static str)] {
     BUILTINS
 }
@@ -338,6 +338,17 @@ icon   = "bars"
 empty  = "No usage reported yet"
 "#,
     ),
+    (
+        "dashboard.toml",
+        r#"# What the Mac mini processed: model tokens and their estimated dollars, runs, polls, door traffic and Clef, by day, week, month and year.
+title  = "Mini"
+kind   = "dashboard"
+source = "memory:dashboard"
+every  = "5m"
+icon   = "bars"
+wide   = true
+"#,
+    ),
 ];
 
 #[cfg(test)]
@@ -378,12 +389,18 @@ mod tests {
                 ("devices", "zeron:devices".to_string(), s(30)),
                 ("pull-requests", "zeron:pull-requests".to_string(), s(60)),
                 ("usage", "zeron:usage".to_string(), s(60)),
+                ("dashboard", "memory:dashboard".to_string(), s(300)),
             ]
         );
         let memory_today = &parsed[4];
         assert_eq!(
             (memory_today.kind, memory_today.wide, memory_today.limit),
             (Kind::Timeline, true, Some(8))
+        );
+        let mini = &parsed[9];
+        assert_eq!(
+            (mini.title.as_str(), mini.kind, mini.wide),
+            ("Mini", Kind::Dashboard, true)
         );
         assert_eq!(parsed[2].kind, Kind::Agenda);
         assert_eq!(parsed[6].empty, None);

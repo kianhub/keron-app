@@ -1,15 +1,16 @@
 //! keron-home: Home's widget runtime (docs/plan/04-home.md in the Keron repo).
 //!
 //! A widget is a manifest plus a source. The app draws a handful of kinds
-//! (list, timeline, stat, agenda, devices); a new kind needs Rust, a new
-//! widget doesn't: drop `<id>.toml` (and, for a `script:` source, the script)
-//! into `~/.keron/widgets` and it appears. The format is in `WIDGETS.md`
-//! next to this crate's Cargo.toml, which is also seeded into the widgets
-//! folder as README.md.
+//! (list, timeline, stat, agenda, devices, dashboard); a new kind needs
+//! Rust, a new widget doesn't: drop `<id>.toml` (and, for a `script:`
+//! source, the script) into `~/.keron/widgets` and it appears. The format is
+//! in `WIDGETS.md` next to this crate's Cargo.toml, which is also seeded into
+//! the widgets folder as README.md.
 //!
 //! - [`manifest`]: one widget's TOML.
 //! - [`source`]: where a widget's data comes from.
 //! - [`kinds`]: the JSON each kind takes, parsed leniently.
+//! - [`dashboard`]: the Mini dashboard's figures, charts and year of days.
 //! - [`heat`]: loose-ends heat levels and words.
 //! - [`layout`]: `~/.keron/home.toml`, which widgets show, in what order, how wide.
 //! - [`catalog`]: loading, seeding and watching the widgets folder.
@@ -22,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod catalog;
+pub mod dashboard;
 pub mod fetch;
 pub mod heat;
 pub mod kinds;
@@ -32,6 +34,7 @@ pub mod script;
 pub mod source;
 pub mod zeron;
 
+pub use dashboard::{Dashboard, Period};
 pub use fetch::{FetchError, Fetcher};
 pub use heat::Heat;
 pub use kinds::{

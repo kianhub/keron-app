@@ -1667,19 +1667,7 @@ impl Render for TextTooltip {
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(320.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        let card = crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card);
+        let card = tooltip_chip(Theme::of(cx), self.text.clone());
         if !self.above {
             return card.into_any_element();
         }
@@ -1693,6 +1681,23 @@ impl Render for TextTooltip {
             .child(div().relative().bottom(px(TOOLTIP_ABOVE_GAP)).child(card))
             .into_any_element()
     }
+}
+
+/// The frosted chip a [`TextTooltip`] shows, for hover notes drawn by hand
+/// (a heatmap's cells, which aren't elements of their own).
+pub fn tooltip_chip(theme: &Theme, text: SharedString) -> impl IntoElement {
+    let card = div()
+        .max_w(px(320.0))
+        .px(px(9.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::popover::surface_bg(theme))
+        .text_size(px(11.0))
+        .text_color(theme.text_muted)
+        .child(text);
+    crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
 }
 
 /// `.tooltip(...)` builder for a [`TextTooltip`].

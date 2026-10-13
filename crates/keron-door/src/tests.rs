@@ -15,6 +15,7 @@ use super::*;
 struct Seen {
     path: String,
     authorization: Option<String>,
+    user_agent: Option<String>,
     body: String,
 }
 
@@ -118,6 +119,7 @@ async fn serve(mut socket: tokio::net::TcpStream, state: Arc<Mutex<FakeState>>, 
         state.seen.push(Seen {
             path: path.clone(),
             authorization: authorization.clone(),
+            user_agent: header("user-agent"),
             body: body.clone(),
         });
         route(&mut state, &origin, &path, authorization.as_deref(), &body)
@@ -330,6 +332,15 @@ async fn sign_in_registers_once_and_keeps_the_refresh_token() {
         json!({"messages": 3})
     );
     assert_eq!(fake.state().refreshes, 0);
+
+    // Discovery, registration, the token and the door all hear it's the app.
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        fake.state()
+            .seen
+            .iter()
+            .all(|s| s.user_agent == Some(format!("keron-app/{version}")))
+    );
 
     // A second sign-in reuses the registration and its port.
     let again = sign_in(&client).await;
