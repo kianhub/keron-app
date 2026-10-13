@@ -199,7 +199,8 @@ impl BrowserSurface {
                 crate::settings::ShortcutId::ALL
                     .iter()
                     .filter(|id| **id != crate::settings::ShortcutId::SaveFile)
-                    .map(|id| crate::settings::platform_combo(keymap.get(*id)))
+                    .filter_map(|id| keymap.bound(*id))
+                    .map(crate::settings::platform_combo)
                     .collect(),
             );
         }
